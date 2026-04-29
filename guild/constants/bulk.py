@@ -1,0 +1,146 @@
+from guild.constants.guild import (
+    BOLTZ_PREFIX,
+    BOLTZ_SCORE,
+    DIFFDOCK_PREFIX,
+    DIFFDOCK_SCORE,
+    KARMADOCK_PREFIX,
+    KARMADOCK_SCORE,
+    VINA_PREFIX,
+    VINA_RESCORE_PREFIX,
+    VINA_RESCORE_SCORE,
+    VINA_SCORE,
+)
+
+"""
+Files
+"""
+RP_SCORES_FILE = "guild_scores.txt"
+GUILD_COMBINATIONS_FILE = "combinations.csv"
+OUTPUT_LOG_FILE = "output.log"
+BATCH_PROGRESS_LOG_FILE = "batch_progress.log"
+ALL_COMBINATIONS_FILE = "all_combinations.csv"
+KNOWN_BINDERS_FILE = "known_binders.csv"
+
+
+"""
+Folders
+"""
+BATCHES_FOLDER = "batches"
+
+"""
+Bulk constants
+"""
+# Timeout constants (in seconds)
+PREPROCESSING_TIMEOUT = 300  # 5 minutes for molecule preprocessing
+DOCKING_TIMEOUT = 360  # 6 minutes for docking tasks
+
+BATCH_FOLDER = "batch_folder"
+COMBINATIONS_TABLE_KEY = "combinations_table"
+PROTEINS_FOLDER_KEY = "proteins_folder"
+COMBINATIONS_TO_RUN_KEY = "combinations_to_run"
+UNIQUE_PROTEIN_IDS_KEY = "unique_protein_ids"
+INPUT_COMBINATIONS_KEY = "input_combinations"
+SMILES_NAMES_DICTIONARY_KEY = "smiles_names_dictionary"
+SMILES_TYPE_DICTIONARY_KEY = "smiles_type_dictionary"
+PRE_EXISTING_RP_SCORES_KEY = "pre_existing_rp_scores"
+RP_SCORES_DF_KEY = "rp_scores_df"
+COMBINATIONS_TO_RUN_KEY = "combinations_to_run"
+METHODS_TO_SCORE_DICTIONARY_KEY = "methods_to_score_dictionary"
+METHODS_TO_SORT_DICTIONARY_KEY = "methods_to_sort_dictionary"
+PREVIOUS_RP_SCORES_KEY = "previous_rp_scores"
+PROTEIN_SEQUENCE_KEY = "protein_sequence"
+DECOYS_COMBINATIONS_KEY = "decoys_combinations"
+PREVIOUS_COMBINATIONS_DF_KEY = "previous_combinations_df"
+SCORES_TO_USE_KEY = "scores_to_use"
+RANKS_LIST_KEY = "ranks_list"
+BULK_TEMPLATE_DICTIONARY = {
+    BATCH_FOLDER: None,
+    COMBINATIONS_TABLE_KEY: None,
+    PROTEINS_FOLDER_KEY: None,
+    UNIQUE_PROTEIN_IDS_KEY: None,
+    INPUT_COMBINATIONS_KEY: None,
+    SMILES_NAMES_DICTIONARY_KEY: None,
+    SMILES_TYPE_DICTIONARY_KEY: None,
+    PRE_EXISTING_RP_SCORES_KEY: None,
+    RP_SCORES_DF_KEY: None,
+    COMBINATIONS_TO_RUN_KEY: None,
+    PREVIOUS_COMBINATIONS_DF_KEY: None,
+    DECOYS_COMBINATIONS_KEY: None,
+    METHODS_TO_SCORE_DICTIONARY_KEY: None,
+    METHODS_TO_SORT_DICTIONARY_KEY: None,
+    PREVIOUS_RP_SCORES_KEY: None,
+    SCORES_TO_USE_KEY: None,
+    RANKS_LIST_KEY: None,
+    PROTEIN_SEQUENCE_KEY: None,
+}
+"""
+Folders
+"""
+COMBINATION_ID = "combination"
+
+"""
+Scores columns
+"""
+GLOBAL_RP_SCORE = "global_rp_score"
+VINA_RP_SCORE = f"rp_{VINA_SCORE}"
+KARMADOCK_RP_SCORE = f"rp_{KARMADOCK_SCORE}"
+DIFFDOCK_RP_SCORE = f"rp_{DIFFDOCK_SCORE}"
+BOLTZ_RP_SCORE = f"rp_{BOLTZ_SCORE}"
+VINA_RESCORE_RP_SCORE = f"rp_{VINA_RESCORE_SCORE}"
+RANK_VINA_SCORE = f"rank_{VINA_SCORE}"
+RANK_KARMADOCK_SCORE = f"rank_{KARMADOCK_SCORE}"
+RANK_DIFFDOCK_SCORE = f"rank_{DIFFDOCK_SCORE}"
+RANK_BOLTZ_SCORE = f"rank_{BOLTZ_SCORE}"
+RANK_VINA_RESCORE_SCORE = f"rank_{VINA_RESCORE_SCORE}"
+
+SCORES_DIRECTION_DICTIONARY = {
+    VINA_PREFIX: "minimum",
+    KARMADOCK_PREFIX: "maximum",
+    DIFFDOCK_PREFIX: "maximum",
+    BOLTZ_PREFIX: "maximum",
+    VINA_RESCORE_PREFIX: "minimum",
+}
+
+RANKS_DICTIONARY = {
+    VINA_PREFIX: RANK_VINA_SCORE,
+    KARMADOCK_PREFIX: RANK_KARMADOCK_SCORE,
+    DIFFDOCK_PREFIX: RANK_DIFFDOCK_SCORE,
+    BOLTZ_PREFIX: RANK_BOLTZ_SCORE,
+    VINA_RESCORE_PREFIX: RANK_VINA_RESCORE_SCORE,
+}
+
+RP_SCORES_DICTIONARY = {
+    VINA_PREFIX: VINA_RP_SCORE,
+    KARMADOCK_PREFIX: KARMADOCK_RP_SCORE,
+    DIFFDOCK_PREFIX: DIFFDOCK_RP_SCORE,
+    BOLTZ_PREFIX: BOLTZ_RP_SCORE,
+    VINA_RESCORE_PREFIX: VINA_RESCORE_RP_SCORE,
+}
+
+SCORES_TO_USE_DICTIONARY = {
+    VINA_PREFIX: [
+        VINA_SCORE,
+        RANK_VINA_SCORE,
+        VINA_RP_SCORE,
+    ],
+    KARMADOCK_PREFIX: [
+        KARMADOCK_SCORE,
+        RANK_KARMADOCK_SCORE,
+        KARMADOCK_RP_SCORE,
+    ],
+    DIFFDOCK_PREFIX: [
+        DIFFDOCK_SCORE,
+        RANK_DIFFDOCK_SCORE,
+        DIFFDOCK_RP_SCORE,
+    ],
+    BOLTZ_PREFIX: [
+        BOLTZ_SCORE,
+        RANK_BOLTZ_SCORE,
+        BOLTZ_RP_SCORE,
+    ],
+    VINA_RESCORE_PREFIX: [
+        VINA_RESCORE_SCORE,
+        RANK_VINA_RESCORE_SCORE,
+        VINA_RESCORE_RP_SCORE,
+    ],
+}

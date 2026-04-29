@@ -1,0 +1,16 @@
+# Ignore everything
+**
+
+# Except for required files and source
+!uv.lock
+!pyproject.toml
+!README.md
+!guild
+!tests
+
+# Ignore things that might be inside the folders above
+**/*~
+**/__pycache__*
+**/*.log
+**/.DS_Store
+**/Thumbs.db

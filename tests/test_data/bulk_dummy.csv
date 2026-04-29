@@ -1,0 +1,2 @@
+protein_id,protein_chain,protein_path,original_ligand,original_ligand_chain,protein_config_id,ligand_id,smiles,ligand_category,is_pdb
+3pbl,A,3pbl.pdb,ETQ,A,3pbl-A-ETQ-A,lig1,CC(=COC=O)CCC1=C(C)CCCC1(C)C,ex,1

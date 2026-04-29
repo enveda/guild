@@ -1,0 +1,11 @@
+[lint]
+select = ["B", "E", "F", "I"]
+# flake8-bugbear, pyflakes, pycodestyle, isort
+# Never enforce `E501` (line length violations).
+ignore = ["E501"]
+
+[lint.per-file-ignores]
+# Third-party reference code — not ours to fix
+"docs/*" = ["B", "E", "F"]
+# Notebooks: mid-cell imports are normal, loop vars often intentional
+"notebooks/**/*.ipynb" = ["E402", "B007", "E741", "E722", "B905", "F841"]

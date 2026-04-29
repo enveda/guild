@@ -1,0 +1,77 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Specific files
+DATABASE_SCHEMA.md
+
+# File terminations
+*.pdb
+*.smi
+*.smiles
+*.txt
+*.csv
+*.tsv
+*.out
+*.pdbqt
+*.sdf
+*.png
+*.pq
+*.pdf
+*.svg
+*.log
+/notebooks/*.py
+/notebooks/debug/*.py
+
+# File exceptions
+!files/autodock_vina_box.txt
+!guild/support/results/single_protein_per_family_rp_scores.txt
+!notebooks/data/3pbl.pdb
+!notebooks/data/3pbl_box.txt
+!tests/test_data/3pbl.pdb
+!tests/test_data/3pbl_box.txt
+!tests/test_data/bulk_dummy.csv
+!notebooks/data/bulk_dummy.csv
+!guild/support/decoys/chembl_35_decoys_3.tsv
+!guild/support/decoys/chembl_36_decoys_2.tsv
+!guild/support/decoys/chembl_36_decoys_100.tsv
+!guild/support/decoys/chembl_36_decoys_1000.tsv
+!guild/support/binders/chembl_assay_chembl_36.pq
+!guild/support/binders/chembl_binders_chembl_36.tsv
+
+# Folders
+/.venv
+/KarmaDock
+/data
+/notebooks/figures
+/p2rank_2.4.2
+/.boltz
+/.vscode
+/.keras
+/.nv
+/localcolabfold
+/.triton
+/.databrickscfg
+/.data
+/.local
+/guild/OLD
+/notebooks/database
+
+# Chache
+/.pytest_cache
+/.ruff_cache
+/.cache
+
+# Software
+vina
+
+.vscode
+
+# external repos
+KarmaDock/*
+DiffDock/*
+openbabel/*
+pdbfixer/*
+plip/*
+KarmaDock

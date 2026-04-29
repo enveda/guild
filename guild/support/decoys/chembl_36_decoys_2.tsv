@@ -1,0 +1,3 @@
+chembl_id	canonical_smiles	standard_inchi	standard_inchi_key	chembl_version	molecular_weight	logp	topological_surface_area_mapping	fsp3	scaffold_smiles	n_hba	n_hbd	ro5_fulfilled	max_ring_size
+CHEMBL963078	Cc1ccc(-c2nc(CN(C)C3CCOC3)c(C)o2)s1	InChI=1S/C15H20N2O2S/c1-10-4-5-14(20-10)15-16-13(11(2)19-15)8-17(3)12-6-7-18-9-12/h4-5,12H,6-9H2,1-3H3	XXJJGKPHZICTPC-UHFFFAOYSA-N	chembl_36	292.404	3.2406400000000017	38.5	0.5333333333333333	c1csc(-c2nc(CNC3CCOC3)co2)c1	5.0	0.0	True	5.0
+CHEMBL2606857	COc1ccc(NC(=O)c2cc(C#N)c3ccccn23)cc1	InChI=1S/C17H13N3O2/c1-22-14-7-5-13(6-8-14)19-17(21)16-10-12(11-18)15-4-2-3-9-20(15)16/h2-10H,1H3,(H,19,21)	JTIOOIHBPWRDGT-UHFFFAOYSA-N	chembl_36	291.31	3.071880000000001	66.53	0.058823529411764705	O=C(Nc1ccccc1)c1ccc2ccccn12	4.0	1.0	True	6.0
