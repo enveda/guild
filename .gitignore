@@ -26,6 +26,7 @@ DATABASE_SCHEMA.md
 
 # File exceptions
 !files/autodock_vina_box.txt
+!files/logo.svg
 !guild/support/results/single_protein_per_family_rp_scores.txt
 !notebooks/data/3pbl.pdb
 !notebooks/data/3pbl_box.txt
