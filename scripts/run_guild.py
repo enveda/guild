@@ -97,6 +97,12 @@ def parse_args() -> argparse.Namespace:
         help="ChEMBL version string.",
     )
     parser.add_argument(
+        "--no-decoys",
+        action="store_true",
+        default=False,
+        help="Disable decoy generation (useful when decoy file is not available).",
+    )
+    parser.add_argument(
         "--clean",
         action="store_true",
         default=False,
@@ -192,6 +198,7 @@ def main() -> None:
         max_mol_wt=args.max_mol_wt,
         chembl_version=args.chembl_version,
         decoys=decoys_path,
+        use_decoys=not args.no_decoys,
         use_known_binders=args.use_known_binders,
         n_workers=1,
     )

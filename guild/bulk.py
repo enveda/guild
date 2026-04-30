@@ -59,6 +59,7 @@ from guild.constants.guild import (
     PROTEIN_CONF_ID,
     PROTEIN_ID,
     PROTEIN_PATH,
+    PROTEINS_FOLDER,
     # Scores lists
     RP_SCORES_COLUMNS,
     # Dictionaries
@@ -554,22 +555,76 @@ class BulkRun:
                             continue
 
                         os.makedirs(f"{current_batch_folder}/{BOLTZ_FOLDER}", exist_ok=True)
+
+                        # Use single-chain PDB as template to avoid Boltz multi-chain parsing errors
+                        boltz_template_file = (
+                            f"{current_batch_folder}/{PROTEINS_FOLDER}/"
+                            f"{unique_protein_configuration_id}_single_chain_clean.pdb"
+                        )
+                        if not os.path.exists(boltz_template_file):
+                            # Fallback to original protein path if single-chain not available
+                            boltz_template_file = current_protein_path
+
+                        yaml_file = f"{current_batch_folder}/{BOLTZ_FOLDER}/{run_id}_boltz.yaml"
+                        boltz_out_dir = f"{current_batch_folder}/{BOLTZ_FOLDER}"
+
                         generate_boltz_yaml(
                             protein_sequence=current_protein_sequence,
                             protein_chain=current_protein_chain,
                             ligand_sequences=[ligand_smiles],
                             ligand_ids=["L"],
-                            output_file=f"{current_batch_folder}/{BOLTZ_FOLDER}/{run_id}_boltz.yaml",
-                            template_file=current_protein_path,
+                            output_file=yaml_file,
+                            template_file=boltz_template_file,
                             pocket_contacts=pocket_contacts if pocket_contacts else None,
                             msa_file=msa_file,
                         )
 
                         deploy_boltz(
-                            f"{current_batch_folder}/{BOLTZ_FOLDER}/{run_id}_boltz.yaml",
-                            out_dir=f"{current_batch_folder}/{BOLTZ_FOLDER}",
+                            yaml_file,
+                            out_dir=boltz_out_dir,
                             use_gpu=self.use_gpu,
                         )
+
+                        # Check if Boltz produced valid output (manifest with records).
+                        # Template PDB parsing can fail silently in Boltz2, resulting
+                        # in an empty manifest.  If that happens, retry without the template.
+                        manifest_path = (
+                            f"{boltz_out_dir}/boltz_results_{run_id}_boltz/processed/manifest.json"
+                        )
+                        if os.path.exists(manifest_path):
+                            import json as _json
+
+                            with open(manifest_path) as _mf:
+                                _manifest = _json.load(_mf)
+                            if not _manifest.get("records"):
+                                logger.warning(
+                                    f"Boltz2 produced empty manifest for {run_id} "
+                                    "(likely template parsing failure). Retrying without template..."
+                                )
+                                # Remove the failed output directory
+                                import shutil
+
+                                failed_dir = f"{boltz_out_dir}/boltz_results_{run_id}_boltz"
+                                if os.path.isdir(failed_dir):
+                                    shutil.rmtree(failed_dir)
+
+                                # Regenerate YAML without template
+                                generate_boltz_yaml(
+                                    protein_sequence=current_protein_sequence,
+                                    protein_chain=current_protein_chain,
+                                    ligand_sequences=[ligand_smiles],
+                                    ligand_ids=["L"],
+                                    output_file=yaml_file,
+                                    template_file=None,
+                                    pocket_contacts=pocket_contacts if pocket_contacts else None,
+                                    msa_file=msa_file,
+                                )
+
+                                deploy_boltz(
+                                    yaml_file,
+                                    out_dir=boltz_out_dir,
+                                    use_gpu=self.use_gpu,
+                                )
 
                         logger.info(
                             f"Boltz docking completed for {current_batch}: "
