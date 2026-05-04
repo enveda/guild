@@ -80,7 +80,7 @@ run-boltz: _prepare-passwd
 		$(DOCKER_COMMON) \
 		--gpus all \
 		--shm-size=8g \
-		-e LD_LIBRARY_PATH=/opt/localcolabfold/.pixi/envs/default/lib:/usr/local/lib \
+		-e LD_LIBRARY_PATH=/opt/localcolabfold/.pixi/envs/default/lib:/usr/local/lib:/app/.venv/lib/python3.10/site-packages/nvidia/cu13/lib:/app/.venv/lib/python3.10/site-packages/nvidia/cuda_nvrtc/lib:/app/.venv/lib/python3.10/site-packages/nvidia/cudnn/lib:/app/.venv/lib/python3.10/site-packages/nvidia/cublas/lib \
 		guild:latest \
 		python $(MASTER_SCRIPT) \
 			--project $(PROJECT) \
@@ -124,7 +124,7 @@ run-guild: _prepare-passwd
 		$(DOCKER_COMMON) \
 		--gpus all \
 		--shm-size=8g \
-		-e LD_LIBRARY_PATH=/opt/localcolabfold/.pixi/envs/default/lib:/usr/local/lib \
+		-e LD_LIBRARY_PATH=/opt/localcolabfold/.pixi/envs/default/lib:/usr/local/lib:/app/.venv/lib/python3.10/site-packages/nvidia/cu13/lib:/app/.venv/lib/python3.10/site-packages/nvidia/cuda_nvrtc/lib:/app/.venv/lib/python3.10/site-packages/nvidia/cudnn/lib:/app/.venv/lib/python3.10/site-packages/nvidia/cublas/lib \
 		guild:latest \
 		python $(MASTER_SCRIPT) \
 			--project $(PROJECT) \
