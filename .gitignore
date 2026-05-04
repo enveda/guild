@@ -55,7 +55,6 @@ DATABASE_SCHEMA.md
 /.databrickscfg
 /.data
 /.local
-/notebooks/
 
 # Chache
 /.pytest_cache
