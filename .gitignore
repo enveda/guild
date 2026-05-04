@@ -22,7 +22,6 @@ DATABASE_SCHEMA.md
 *.svg
 *.log
 /notebooks/*.py
-/notebooks/debug/*.py
 
 # File exceptions
 !files/autodock_vina_box.txt
@@ -56,7 +55,6 @@ DATABASE_SCHEMA.md
 /.databrickscfg
 /.data
 /.local
-/notebooks/data_prep/
 
 # Chache
 /.pytest_cache
