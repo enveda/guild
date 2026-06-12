@@ -8,7 +8,6 @@ from typing import Tuple
 
 import chembl_downloader
 import pandas as pd
-from chembl_webresource_client.http_errors import HttpBadRequest
 from tqdm import tqdm
 from unipressed import IdMappingClient
 

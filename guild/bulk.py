@@ -66,7 +66,6 @@ from guild.constants.guild import (
     # Scores lists
     RP_SCORES_COLUMNS,
     # Dictionaries
-    SCORES_DICTIONARY,
     SMILES,
     # Folders
     VINA_FOLDER,
