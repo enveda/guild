@@ -4,18 +4,21 @@ build-backend = "hatchling.build"
 
 [project]
 name = "guild"
-version = "1.0.0"
+version = "1.1.5"
 description = "A unified framework for multi-method molecular docking and scoring"
 license = "MIT"
 authors = [
     { name = "António J Preto" },
     { name = "Yojana Gadiya" },
+    { name = "Tyson Park" },
     { name = "Christoph Krettler" },
-    { name = "Dani Domingo-Fernandéz" },
     { name = "Shweta Bhandare" },
     { name = "Keaton Noon" },
-    { name = "Tyson Park" }
+    { name = "Eric Fish" }
+    { name = "António de La Vega de León" },
+    { name = "Dani Domingo-Fernandéz" },
 ]
+
 requires-python = ">=3.10,<3.11"
 readme = "README.md"
 classifiers = [

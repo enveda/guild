@@ -1,0 +1,55 @@
+# syntax=docker/dockerfile:1
+#
+# Curated gnina runtime bundle.
+#
+# Pulls the upstream gnina/gnina image (~9 GB, mostly static archives + MKL
+# we don't need at runtime), then extracts the binary plus the ~1.4 GB of
+# shared libraries the binary actually loads — boost 1.71, jsoncpp, ICU 66,
+# numa, openblas, gfortran, the CUDA 12 runtime libs, and gnina's own
+# libtorch / libmolgrid / libopenbabel.so.7 — into ``/export``.
+#
+# The final stage is ``FROM scratch`` so the published image is just the
+# /export tree. Build it once and tag it (locally or in your own registry),
+# then point the main Dockerfile's GNINA_BUNDLE_IMAGE build arg at that tag.
+# Consumers (see [Dockerfile](Dockerfile) in this repo) do:
+#
+#     docker build -f Dockerfile.gnina-bundle -t gnina-bundle:local .
+#     docker build --build-arg GNINA_BUNDLE_IMAGE=gnina-bundle:local -t guild .
+#
+# The main image then does:
+#
+#     ARG GNINA_BUNDLE_IMAGE
+#     FROM ${GNINA_BUNDLE_IMAGE} AS gnina-source
+#     ...
+#     COPY --from=gnina-source /export /opt/gnina
+#
+# and invokes ``gnina`` with ``LD_LIBRARY_PATH=/opt/gnina/lib`` so the bundle's
+# libtorch / libopenbabel don't clash with the main image's CUDA 13 torch
+# and system openbabel.
+#
+# Rebuild this bundle whenever you want to pick up a newer upstream gnina.
+
+FROM gnina/gnina:latest AS extract
+RUN set -eux; \
+    mkdir -p /export/bin /export/lib; \
+    cp -L /usr/local/bin/gnina /export/bin/; \
+    cp -L /usr/local/lib/*.so* /export/lib/ 2>/dev/null || true; \
+    cp -L /usr/lib/x86_64-linux-gnu/libboost_*.so.1.71.0 /export/lib/ 2>/dev/null || true; \
+    cp -L /usr/lib/x86_64-linux-gnu/libjsoncpp.so* /export/lib/ 2>/dev/null || true; \
+    # Ubuntu 20.04 ICU + libnuma + openblas — Debian bookworm ships
+    # newer/different SONAMEs, so gnina would fail to find these at runtime.
+    cp -L /usr/lib/x86_64-linux-gnu/libicui18n.so.66* /export/lib/ 2>/dev/null || true; \
+    cp -L /usr/lib/x86_64-linux-gnu/libicuuc.so.66* /export/lib/ 2>/dev/null || true; \
+    cp -L /usr/lib/x86_64-linux-gnu/libicudata.so.66* /export/lib/ 2>/dev/null || true; \
+    cp -L /usr/lib/x86_64-linux-gnu/libnuma.so* /export/lib/ 2>/dev/null || true; \
+    cp -L /usr/lib/x86_64-linux-gnu/libopenblas.so* /export/lib/ 2>/dev/null || true; \
+    cp -L /usr/lib/x86_64-linux-gnu/libgfortran.so* /export/lib/ 2>/dev/null || true; \
+    cp -L /usr/lib/x86_64-linux-gnu/libquadmath.so* /export/lib/ 2>/dev/null || true; \
+    if [ -d /usr/local/cuda-12.0/targets/x86_64-linux/lib ]; then \
+      cp -RL /usr/local/cuda-12.0/targets/x86_64-linux/lib/*.so* /export/lib/ 2>/dev/null || true; \
+    fi
+
+####################################################################################################
+# Tiny published image: just /export, nothing else. ~1.4 GB on disk.
+FROM scratch AS bundle
+COPY --from=extract /export /export

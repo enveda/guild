@@ -154,6 +154,40 @@ class KeepProteinAndMetals(Select):
         return len(residue) == 1 and (residue.child_list[0].element or "").upper() in METALS_LIST
 
 
+def _normalize_chain_list(chains):
+    """
+    Normalize a chain specification into a list of chain-ID strings.
+
+    Accepts a single chain ID (``"A"``), a comma-separated string (``"A,B"``),
+    a list/tuple of IDs, or ``None`` (→ empty list). Whitespace is stripped and
+    empty tokens dropped, so ``"A, B"`` and ``["A", "B"]`` both yield
+    ``["A", "B"]``. This is the single place that defines how the
+    ``protein_chain`` CSV column encodes multiple chains.
+    """
+    if chains is None:
+        return []
+
+    # Treat pandas/NumPy missing values (NaN, <NA>) as "no chain specified".
+    try:
+        import pandas as pd  # type: ignore
+
+        if pd.isna(chains):
+            return []
+    except Exception:
+        pass
+
+    if isinstance(chains, str):
+        return [c.strip() for c in chains.split(",") if c.strip()]
+
+    # Iterable of chain IDs (list/tuple/set/etc). If it's a non-iterable scalar,
+    # treat it as a single token.
+    try:
+        return [str(c).strip() for c in chains if str(c).strip()]
+    except TypeError:
+        token = str(chains).strip()
+        return [token] if token else []
+
+
 def get_protein_chain(input_file, input_name):
     """
     Get the chain ID of the first chain in a PDB file.
@@ -176,29 +210,37 @@ def get_protein_chain(input_file, input_name):
 
 def isolate_protein_chain(input_file, input_name, output_file, target_chain=None):
     """
-    Isolate a protein chain by its chain ID (e.g., 'A').
-    Falls back to the first chain if target_chain is None or not found.
-    Strips HETATM while writing.
+    Isolate one or more protein chains by their chain IDs (e.g., 'A' or ['A', 'B']).
+    Falls back to the first chain if ``target_chain`` is None or none of the
+    requested chains are present. Preserves chain IDs so a multi-chain pocket
+    (e.g. a dimer interface) stays intact downstream. (HETATM cleanup is done by ``clean_receptor``.)
     :param input_file: The path to the input PDB file.
     :param input_name: The name of the input PDB file.
     :param output_file: The path to the output PDB file.
-    :param target_chain: The chain to be used for docking. If not provided, the first chain is used.
+    :param target_chain: Chain ID, list of chain IDs, or comma-separated string
+                         (e.g. ``"A,B"``). If not provided, the first chain is used.
     """
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure(input_name, input_file)
     model = structure[0]
 
-    # find the requested chain (or default to first)
-    if target_chain is not None and target_chain in [ch.id for ch in model.get_chains()]:
-        chain_to_write = model[target_chain]
-    else:
-        chain_to_write = next(model.get_chains())
+    available = [ch.id for ch in model.get_chains()]
+    requested = _normalize_chain_list(target_chain)
+    chains_to_write = [c for c in requested if c in available]
+    if not chains_to_write:
+        # Fall back to the first chain if nothing was requested or matched.
+        chains_to_write = [next(model.get_chains()).id]
+        logger.warning(
+            f"No requested chain {requested} found in {input_file}. "
+            f"Defaulting to first chain '{chains_to_write[0]}'."
+        )
 
-    # 🔧 rebuild a proper structure hierarchy
+    # 🔧 rebuild a proper structure hierarchy, preserving every requested chain ID
     structure_builder = StructureBuilder.StructureBuilder()
     structure_builder.init_structure("filtered")
     structure_builder.init_model(0)
-    structure_builder.structure[0].add(chain_to_write.copy())  # preserve chain ID
+    for chain_id in chains_to_write:
+        structure_builder.structure[0].add(model[chain_id].copy())  # preserve chain ID
 
     io = PDBIO()
     io.set_structure(structure_builder.get_structure())
@@ -216,9 +258,12 @@ def renumber_pdb_residues(input_pdb, output_pdb, start_index=1):
     """
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure("renumbered", input_pdb)
-    i = start_index
     for model in structure:
         for chain in model:
+            # Renumber per chain so each chain is 1-based. Boltz pocket
+            # contacts index residues per chain, so continuous numbering
+            # across chains would misalign multi-chain constraints.
+            i = start_index
             for residue in chain:
                 res_id = residue.id
                 residue.id = (res_id[0], i, res_id[2])

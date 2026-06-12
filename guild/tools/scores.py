@@ -15,8 +15,8 @@ import pandas as pd
 
 from guild.constants.bulk import (
     GLOBAL_RP_SCORE,
-    RANKS_DICTIONARY,
     RP_SCORES_DICTIONARY,
+    RANKS_DICTIONARY,
     SCORES_DIRECTION_DICTIONARY,
 )
 from guild.constants.guild import PROTEIN_CONF_ID

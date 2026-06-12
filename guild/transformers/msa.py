@@ -16,6 +16,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+
 LOCALCOLABFOLD_DIR_ENV_VAR = "GUILD_LOCALCOLABFOLD_DIR"
 COLABFOLD_RUN_SCRIPT = "run_colabfoldbatch_sample.sh"
 
@@ -168,18 +169,27 @@ def fetch_protein_msa(
         )
         return None
 
-    # Delete temporary files and return the path to the generated a3m, if any
-    all_files_after_run = list(output_dir_path.glob("*"))
-    a3m_candidates = [f for f in all_files_after_run if f.suffix == ".a3m"][0]
-    if not a3m_candidates:
+    # ColabFold writes the a3m using the FASTA header as the filename stem, which
+    # matches output_a3m_path exactly.  Clean up the other artifacts it produces
+    # (pickle, png, _env dir, log, config, bibtex) without touching any pre-existing
+    # a3m files from earlier proteins that share the same output directory.
+    if not output_a3m_path.exists() or output_a3m_path.stat().st_size == 0:
         logger.warning(
-            "fetch_protein_msa: local script completed but no .a3m file was found in %s",
-            output_dir_path,
+            "fetch_protein_msa: local script completed but %s was not created. "
+            "Falling back to empty MSA.",
+            output_a3m_path,
         )
         return None
 
-    # Keep the a3m and clean up other temporary files
-    files_to_remove = [f for f in all_files_after_run if f != a3m_candidates]
-    _cleanup_temp_msa_artifacts(files_to_remove)
+    colabfold_artifacts = [
+        output_dir_path / f"{protein_id}_{protein_chain_id}.pickle",
+        output_dir_path / f"{protein_id}_{protein_chain_id}_coverage.png",
+        output_dir_path / f"{protein_id}_{protein_chain_id}_env",
+        output_dir_path / f"{protein_id}_{protein_chain_id}.fasta",
+        output_dir_path / "cite.bibtex",
+        output_dir_path / "config.json",
+        output_dir_path / "log.txt",
+    ]
+    _cleanup_temp_msa_artifacts(colabfold_artifacts)
     logger.info("fetch_protein_msa: MSA saved to %s", output_a3m_path)
     return str(output_a3m_path)

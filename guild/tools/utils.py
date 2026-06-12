@@ -7,6 +7,8 @@ import logging
 import time
 from functools import wraps
 
+import pandas as pd
+
 
 def read_json_as_dict(input_file):
     """

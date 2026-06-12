@@ -1,4 +1,22 @@
 # syntax=docker/dockerfile:1
+
+####################################################################################################
+# GNINA — pulled as a curated ~1.4 GB bundle (binary + the .so deps it loads
+# at runtime). Build the bundle separately with Dockerfile.gnina-bundle and
+# tag it (locally or in your own registry), then point GNINA_BUNDLE_IMAGE at
+# that tag:
+#
+#     docker build -f Dockerfile.gnina-bundle -t gnina-bundle:local .
+#     docker build --build-arg GNINA_BUNDLE_IMAGE=gnina-bundle:local -t guild .
+#
+# We do NOT consume gnina/gnina:latest directly here: pulling the full ~9 GB
+# upstream image into the build graph caused disk exhaustion in CI. The bundle
+# is a `FROM scratch` image whose only contents are /export/{bin,lib}, so it
+# stays off the main build's dependency graph until the final runtime stage.
+ARG GNINA_BUNDLE_IMAGE=gnina-bundle:latest
+FROM ${GNINA_BUNDLE_IMAGE} AS gnina-source
+
+####################################################################################################
 FROM python:3.10-slim-bookworm AS base
 
 ARG APP_NAME="guild"
@@ -47,6 +65,13 @@ RUN set -eux; \
 RUN wget https://github.com/ccsb-scripps/AutoDock-Vina/releases/download/v1.2.5/vina_1.2.5_linux_x86_64 \
       -O /usr/local/bin/vina && \
     chmod a+x /usr/local/bin/vina
+
+# NOTE: GNINA is intentionally not copied into base-build. The gnina-source
+# stage pulls a large upstream image and would force every target that
+# transitively depends on base-build (including `test`) to materialize it on
+# disk. The gnina bundle is only needed at runtime, so the COPY lives in the
+# final `docker` stage instead — buildkit then skips gnina-source entirely for
+# the `test` target.
 
 # Python build tools
 RUN python -m pip install --upgrade pip setuptools wheel
@@ -150,6 +175,14 @@ ENV LD_LIBRARY_PATH=/app/.venv/lib/python3.10/site-packages/nvidia/cu13/lib:/opt
 # Vina
 COPY --from=base-build /usr/local/bin/vina /usr/local/bin/vina
 
+# GNINA — curated bundle (binary + isolated lib tree). Pulled directly from
+# the gnina-source stage so base-build (and therefore the `test` target) does
+# not have to materialize the large upstream image. Invoked with
+# LD_LIBRARY_PATH=/opt/gnina/lib so its torch/openbabel/boost don't conflict
+# with the venv-managed torch and the system openbabel.
+COPY --from=gnina-source /export /opt/gnina
+RUN chmod a+x /opt/gnina/bin/gnina
+
 # LocalColabFold
 COPY --from=base-build /opt/localcolabfold /opt/localcolabfold
 ENV COLABFOLD_BIN="/opt/localcolabfold/.pixi/envs/default/bin"
@@ -178,3 +211,11 @@ RUN git clone https://github.com/schrojunzhang/KarmaDock.git /app/KarmaDock && \
     git -C /app/KarmaDock checkout 9a35d0cb7caaa1a4d0a61f6ea96821dc1edefa81 && \
     git clone https://github.com/gcorso/DiffDock.git /app/DiffDock && \
     git -C /app/DiffDock checkout 85c49b60d3e0b0182a59ee43a34a6d7036981284
+
+# KarmaDock at the pinned commit was written for an older rdkit and crashes on
+# the rdkit/torch combo we use today (dimension mismatch in ligand_feature.py
+# and the GraphTransformer block). Apply the compatibility patches documented
+# in the project README. The script is idempotent.
+COPY --chown=appuser:appuser scripts/apply_karmadock_patches.py /tmp/apply_karmadock_patches.py
+RUN /app/.venv/bin/python /tmp/apply_karmadock_patches.py /app/KarmaDock && \
+    rm -f /tmp/apply_karmadock_patches.py

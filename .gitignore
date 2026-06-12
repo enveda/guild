@@ -55,11 +55,13 @@ DATABASE_SCHEMA.md
 /.databrickscfg
 /.data
 /.local
+/.azure
 
 # Chache
 /.pytest_cache
 /.ruff_cache
 /.cache
+/_receptor_pdbqt_cache
 
 # Software
 vina
@@ -73,3 +75,19 @@ openbabel/*
 pdbfixer/*
 plip/*
 KarmaDock
+
+# Local-only / scratch areas
+/notebooks/debug/*.py
+/notebooks/database
+/guild/OLD
+/temp_data
+
+# scripts/ — only the load-bearing scripts are tracked.
+# run_guild.py is the Makefile entry point; apply_karmadock_patches.py is
+# COPY'd by the Dockerfile during base-build; vina_rescore_all.py is a
+# published utility. Anything else under scripts/ is treated as a local
+# experiment and should not be committed (avoids leaking machine-specific paths).
+scripts/*
+!scripts/run_guild.py
+!scripts/apply_karmadock_patches.py
+!scripts/vina_rescore_all.py

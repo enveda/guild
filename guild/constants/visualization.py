@@ -7,7 +7,7 @@ import seaborn as sns
 """
 Colors
 """
-GUILD_COLORS = {
+ENVEDA_COLORS = {
     "white": "#FFFFFF",
     "black": "#000000",
     "deep-pink": "#F10A84",
@@ -35,9 +35,9 @@ CONTRAST_COLORS = {
 }
 CONTRAST_PALETTE = sns.color_palette(list(CONTRAST_COLORS.values()))
 
-GUILD_PALETTE_RAINBOW = sns.color_palette(
-    [v for k, v in GUILD_COLORS.items() if k not in ["white", "black"]]
+ENVEDA_PALETTE_RAINBOW = sns.color_palette(
+    [v for k, v in ENVEDA_COLORS.items() if k not in ["white", "black"]]
 )
-GUILD_PALETTE_RAINBOW_PLOTLY = [
-    f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}" for r, g, b in GUILD_PALETTE_RAINBOW
+ENVEDA_PALETTE_RAINBOW_PLOTLY = [
+    f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}" for r, g, b in ENVEDA_PALETTE_RAINBOW
 ]
