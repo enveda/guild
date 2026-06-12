@@ -4,12 +4,18 @@ P2Rank binding site prediction constants
 
 from pathlib import Path
 
-from guild.constants.system import WORKING_DIR_PATH
+import guild as _guild_pkg
 
 """
-P2Rank installation path - assumes p2rank is installed in the workspace
+P2Rank installation path — sibling of the guild/ package on disk (so
+guild-internal/p2rank_2.4.2 in dev, /app/p2rank_2.4.2 in the container).
+Resolving from the guild package location rather than WORKING_DIR_PATH is
+deliberate: run_guild.py rebinds WORKING_DIR_PATH to the caller's workspace
+for output paths, which would otherwise look for p2rank under the caller's
+repo. The guild package's own location is the stable anchor.
 """
-P2RANK_INSTALL_DIR = Path(WORKING_DIR_PATH) / "p2rank_2.4.2"
+_GUILD_PKG_DIR = Path(_guild_pkg.__file__).resolve().parent
+P2RANK_INSTALL_DIR = _GUILD_PKG_DIR.parent / "p2rank_2.4.2"
 P2RANK_EXECUTABLE = P2RANK_INSTALL_DIR / "prank"
 
 """

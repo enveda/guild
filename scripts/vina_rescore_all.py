@@ -55,25 +55,28 @@ def prepare_receptor_pdbqt(protein_conf_id: str) -> str | None:
 
     parts = protein_conf_id.split("-")
     pdb_id = parts[0]
-    chain_id = parts[1] if len(parts) >= 2 else "A"
+    # Single chain or a comma-joined set ("A,B") for a multi-chain receptor.
+    chain_ids = (
+        [c.strip() for c in parts[1].split(",") if c.strip()] if len(parts) >= 2 else ["A"]
+    )
     raw_pdb = os.path.join(PDB_DIR, f"{pdb_id}.pdb")
 
     if not os.path.isfile(raw_pdb):
         logger.warning(f"Raw PDB not found: {raw_pdb}")
         return None
 
-    # Extract single chain
+    # Extract chain(s) — a comma-joined set ("A,B") keeps a multi-chain receptor
     chain_pdb = output_pdbqt.replace(".pdbqt", "_chain.pdb")
     kept = 0
     with open(raw_pdb) as fin, open(chain_pdb, "w") as fout:
         for line in fin:
-            if line.startswith("ATOM") and len(line) > 21 and line[21] == chain_id:
+            if line.startswith("ATOM") and len(line) > 21 and line[21] in chain_ids:
                 fout.write(line)
                 kept += 1
         fout.write("END\n")
 
     if kept == 0:
-        logger.warning(f"No ATOM records for chain {chain_id} in {raw_pdb}")
+        logger.warning(f"No ATOM records for chain(s) {chain_ids} in {raw_pdb}")
         return None
 
     result = subprocess.run(

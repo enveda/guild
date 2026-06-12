@@ -3,8 +3,6 @@ Autodock Vina tools
 """
 
 import logging
-import os
-import subprocess
 
 import numpy as np
 import pandas as pd
@@ -16,15 +14,11 @@ from guild.constants.bulk import (
     COMBINATION_ID,
     COMBINATIONS_TO_RUN_KEY,
 )
-from guild.constants.diffdock import DIFFDOCK_RESULTS_FOLDER
 from guild.constants.general import RANDOM_SEED
 from guild.constants.guild import (
-    DIFFDOCK_FOLDER,
     LIGAND_ID,
     PROTEIN_CONF_ID,
     VINA_FOLDER,
-    VINA_RESCORE_FOLDER,
-    VINA_RESCORE_SCORE,
     VINA_SCORE,
 )
 from guild.constants.vina import (
@@ -35,7 +29,6 @@ from guild.tools.ligand_properties import (
     radius_of_gyration_from_smiles,
     vina_box_edge_from_radius_of_gyration,
 )
-from guild.transformers.converters import sdf_to_pdbqt
 
 logger = logging.getLogger(__name__)
 
@@ -241,29 +234,14 @@ def vina_guild_scoring(batch_dictionary):
     return combinations_df[[COMBINATION_ID, VINA_SCORE, PROTEIN_CONF_ID, LIGAND_ID]]
 
 
-def vina_rescore_guild_scoring(batch_dictionary):
-    """
-    Perform Vina re-scoring of DiffDock poses for a batch.
-
-    Thin wrapper around :func:`vina_rescore_diffdock_batch` that accepts a
-    *batch_dictionary* (the same structure every other ``*_guild_scoring``
-    function receives) and returns a DataFrame compatible with the bulk
-    scoring merge logic.
-
-    :param batch_dictionary: Dictionary containing the batch information.
-    :return: DataFrame with COMBINATION_ID, PROTEIN_CONF_ID, LIGAND_ID,
-        and VINA_RESCORE_SCORE columns.
-    """
-    df = vina_rescore_diffdock_batch(
-        batch_folder=batch_dictionary[BATCH_FOLDER],
-        combinations=batch_dictionary[COMBINATIONS_TO_RUN_KEY],
-    )
-    # Keep only the columns the merge expects (drop 'diffdock_sdf')
-    keep = [COMBINATION_ID, PROTEIN_CONF_ID, LIGAND_ID, VINA_RESCORE_SCORE]
-    return df[[c for c in keep if c in df.columns]]
-
-
 # ── Vina score-only re-scoring of pre-docked poses ──────────────────────────
+# NOTE: Method-specific orchestration (rescore_boltz_pose, rescore_diffdock_pose,
+# vina_rescore_*_batch, vina_rescore_*_guild_scoring) lives in
+# guild/docking/boltz.py and guild/docking/diffdock.py — they know the output
+# layout of their respective methods. This module keeps only the Vina-grid
+# primitives that any pose source can reuse (compute_box_from_sdf,
+# _compute_box_from_pdb_atoms, _extract_ligand_records,
+# _extract_protein_from_complex, vina_score_pose).
 
 
 def compute_box_from_sdf(sdf_path: str, padding: float = 4.0):
@@ -334,248 +312,86 @@ def vina_score_pose(
     return float(energy[0])
 
 
-def _find_best_diffdock_sdf(diffdock_results_dir: str, protein_conf_id: str, ligand_id: str) -> str:
+# ── Vina score-only re-scoring of Boltz-predicted complexes ─────────────────
+
+
+def _compute_box_from_pdb_atoms(pdb_path: str, padding: float = 4.0):
     """
-    Locate the highest-confidence SDF file for a given combination in a
-    DiffDock results directory.
-
-    DiffDock names output files like ``rank1_confidence-1.23.sdf``.
-
-    :return: Absolute path to the best-confidence SDF.
-    :raises FileNotFoundError: If no SDF files are found for the combination.
+    Compute a Vina box (center + size) from the coordinates of all ATOM/HETATM
+    records in a PDB file. Used to size the Vina scoring grid around a
+    pre-docked ligand pose extracted from a Boltz complex.
     """
-    folder_name = f"{protein_conf_id}_{ligand_id}"
-    combo_dir = os.path.join(diffdock_results_dir, folder_name)
-
-    if not os.path.isdir(combo_dir):
-        raise FileNotFoundError(f"DiffDock results folder not found: {combo_dir}")
-
-    sdf_scores = {}
-    for fname in os.listdir(combo_dir):
-        if "_confidence" in fname and fname.endswith(".sdf"):
+    coords = []
+    with open(pdb_path) as f:
+        for line in f:
+            if not line.startswith(("ATOM", "HETATM")):
+                continue
             try:
-                score = float(fname.split("_confidence")[1].replace(".sdf", ""))
-                sdf_scores[fname] = score
+                x = float(line[30:38])
+                y = float(line[38:46])
+                z = float(line[46:54])
             except ValueError:
                 continue
+            coords.append((x, y, z))
+    if not coords:
+        raise ValueError(f"No coordinates parsed from {pdb_path}")
+    arr = np.array(coords)
+    mins = arr.min(axis=0)
+    maxs = arr.max(axis=0)
+    center = tuple(((mins + maxs) / 2.0).tolist())
+    span = maxs - mins
+    size = tuple((span + 2.0 * padding).tolist())
+    return center, size
 
-    if not sdf_scores:
-        raise FileNotFoundError(f"No DiffDock SDF files found in {combo_dir}")
 
-    best_fname = max(sdf_scores, key=sdf_scores.get)
-    return os.path.join(combo_dir, best_fname)
-
-
-def rescore_diffdock_pose(
-    receptor_pdbqt: str,
-    diffdock_results_dir: str,
-    protein_conf_id: str,
-    ligand_id: str,
-    output_dir: str = None,
-    box_padding: float = 4.0,
-    seed: int = RANDOM_SEED,
-) -> dict:
+def _extract_ligand_records(input_pdb: str, output_pdb: str, resname: str = "LIG"):
     """
-    Re-score a DiffDock pose with Vina's physics-based scoring function.
-
-    Pipeline:
-    1. Find the highest-confidence SDF in ``diffdock_results_dir/{protein}_{ligand}/``
-    2. Convert SDF → PDBQT (preserving 3D coordinates)
-    3. Compute a Vina box centred on the SDF pose
-    4. Call ``vina_score_pose()`` (score-only, no re-docking)
-
-    :param receptor_pdbqt: Path to the receptor PDBQT file.
-    :param diffdock_results_dir: Path to the DiffDock results directory.
-    :param protein_conf_id: Protein configuration ID (e.g. ``8gut-R-KO8-R``).
-    :param ligand_id: Ligand identifier.
-    :param output_dir: Directory for intermediate PDBQT files (defaults to
-        ``diffdock_results_dir/{protein}_{ligand}/``).
-    :param box_padding: Padding around the ligand bounding box (Å).
-    :param seed: Random seed for Vina.
-    :return: Dict with ``combination``, ``protein_config_id``, ``ligand_id``,
-        ``vina_rescore_score``, ``diffdock_sdf``.
+    Write a PDB containing only ATOM/HETATM records whose residue name matches
+    ``resname``. Used to isolate the ligand of a Boltz complex (whose ligand is
+    written under residue name ``LIG`` by :func:`relabel_ligand_chain_in_pdb` —
+    the chain ID is not a reliable marker because ``cif_to_pdb`` may rename it).
     """
-    sdf_path = _find_best_diffdock_sdf(diffdock_results_dir, protein_conf_id, ligand_id)
-
-    if output_dir is None:
-        output_dir = os.path.dirname(sdf_path)
-
-    # SDF → PDBQT (preserves 3D coordinates)
-    ligand_pdbqt = os.path.join(output_dir, f"{protein_conf_id}_{ligand_id}_rescore.pdbqt")
-    sdf_to_pdbqt(sdf_path, pdbqt=ligand_pdbqt)
-
-    # Compute box from the DiffDock pose coordinates
-    center, size = compute_box_from_sdf(sdf_path, padding=box_padding)
-
-    # Score-only evaluation
-    score = vina_score_pose(
-        receptor_pdbqt=receptor_pdbqt,
-        ligand_pdbqt=ligand_pdbqt,
-        center=center,
-        size=size,
-        seed=seed,
-    )
-
-    combination_id = f"{protein_conf_id}_{ligand_id}"
-    logger.info(f"Vina rescore: {combination_id} → {score:.3f} kcal/mol")
-
-    return {
-        COMBINATION_ID: combination_id,
-        PROTEIN_CONF_ID: protein_conf_id,
-        LIGAND_ID: ligand_id,
-        VINA_RESCORE_SCORE: score,
-        "diffdock_sdf": sdf_path,
-    }
-
-
-def _prepare_receptor_pdbqt_from_raw(
-    raw_pdb: str,
-    chain_id: str,
-    output_pdbqt: str,
-) -> str:
-    """
-    Extract a single chain (ATOM records only) from a raw PDB and convert to
-    PDBQT via OpenBabel.  This preserves the original crystal coordinates so
-    the receptor is in the same frame as DiffDock's output SDF files.
-
-    :param raw_pdb: Path to the raw (multi-chain) PDB file.
-    :param chain_id: Chain letter to extract (e.g. ``"R"``).
-    :param output_pdbqt: Where to write the receptor PDBQT.
-    :return: *output_pdbqt* path.
-    :raises FileNotFoundError: If *raw_pdb* does not exist.
-    :raises RuntimeError: If ``obabel`` is not available or conversion fails.
-    """
-    if not os.path.isfile(raw_pdb):
-        raise FileNotFoundError(f"Raw PDB not found: {raw_pdb}")
-
-    # Write a single-chain PDB (ATOM records only, no waters/HETATM)
-    chain_pdb = output_pdbqt.replace(".pdbqt", "_chain.pdb")
     kept = 0
-    with open(raw_pdb) as fin, open(chain_pdb, "w") as fout:
+    resname_padded = resname.ljust(3)[:3]
+    with open(input_pdb) as fin, open(output_pdb, "w") as fout:
         for line in fin:
-            if line.startswith("ATOM") and len(line) > 21 and line[21] == chain_id:
+            if (
+                line.startswith(("ATOM", "HETATM"))
+                and len(line) > 20
+                and line[17:20] == resname_padded
+            ):
                 fout.write(line)
                 kept += 1
         fout.write("END\n")
-
     if kept == 0:
-        raise ValueError(f"No ATOM records found for chain {chain_id} in {raw_pdb}")
-
-    # Convert PDB → PDBQT using OpenBabel (receptor mode: -xr)
-    result = subprocess.run(
-        ["obabel", "-ipdb", chain_pdb, "-opdbqt", "-O", output_pdbqt, "-xr"],
-        capture_output=True,
-        text=True,
-    )
-    if not os.path.isfile(output_pdbqt) or os.path.getsize(output_pdbqt) == 0:
-        raise RuntimeError(
-            f"obabel PDB→PDBQT failed for {chain_pdb}: {result.stderr}"
-        )
-
-    logger.info(
-        f"Prepared receptor PDBQT from raw PDB chain {chain_id}: "
-        f"{kept} atoms → {output_pdbqt}"
-    )
-    return output_pdbqt
+        raise ValueError(f"No atoms with resname '{resname}' found in {input_pdb}")
+    return output_pdb
 
 
-def vina_rescore_diffdock_batch(
-    batch_folder: str,
-    combinations: list[tuple[str, str]],
-    receptor_pdbqt_dir: str = None,
-    box_padding: float = 4.0,
-    seed: int = RANDOM_SEED,
-) -> pd.DataFrame:
+def _extract_protein_from_complex(complex_pdb: str, output_pdb: str, ligand_resname: str = "LIG"):
     """
-    Batch re-score DiffDock poses for all combinations in a batch.
-
-    DiffDock produces ligand poses in the coordinate frame of the **raw**
-    input PDB.  The guild pipeline's ``_single_chain_clean`` PDB is
-    typically re-centred, so it cannot be used directly as the Vina
-    receptor.  This function therefore looks for a receptor PDBQT in the
-    following order:
-
-    1. ``{proteins_dir}/{protein_conf_id}_raw.pdbqt`` — single-chain
-       PDBQT already in the raw (crystal) coordinate frame.
-    2. If (1) does not exist, it auto-generates it from
-       ``{protein_conf_id}_raw.pdb`` by extracting the chain letter
-       encoded in *protein_conf_id* and converting via OpenBabel.
-
-    :param batch_folder: Path to the batch folder (e.g. ``data/project/batches/batch_1``).
-    :param combinations: List of (protein_conf_id, ligand_id) tuples.
-    :param receptor_pdbqt_dir: Directory containing receptor PDBQT files.
-        Defaults to ``{batch_folder}/proteins/``.
-    :param box_padding: Padding around the ligand bounding box (Å).
-    :param seed: Random seed for Vina.
-    :return: DataFrame with columns: combination, protein_config_id, ligand_id,
-        vina_rescore_score.
+    Write a PDB containing all ATOM records of the complex EXCEPT those that
+    are the ligand (resname == ``ligand_resname``). Used to obtain a receptor
+    PDB in Boltz's predicted coordinate frame — critical because Boltz often
+    re-centres the whole complex, so the template-frame receptor and the
+    Boltz-output ligand are not in the same physical space.
     """
-    diffdock_results_dir = os.path.join(batch_folder, DIFFDOCK_FOLDER, DIFFDOCK_RESULTS_FOLDER)
-    if receptor_pdbqt_dir is None:
-        receptor_pdbqt_dir = os.path.join(batch_folder, "proteins")
-
-    rescore_output_dir = os.path.join(batch_folder, VINA_RESCORE_FOLDER)
-    os.makedirs(rescore_output_dir, exist_ok=True)
-
-    results = []
-    for protein_conf_id, ligand_id in combinations:
-        # --- Resolve receptor PDBQT in the DiffDock (raw) coordinate frame ---
-        receptor_pdbqt = os.path.join(
-            receptor_pdbqt_dir, f"{protein_conf_id}_raw.pdbqt"
+    kept = 0
+    resname_padded = ligand_resname.ljust(3)[:3]
+    with open(complex_pdb) as fin, open(output_pdb, "w") as fout:
+        for line in fin:
+            if line.startswith(("ATOM", "HETATM")) and len(line) > 20:
+                if line[17:20] == resname_padded:
+                    continue
+                fout.write(line)
+                kept += 1
+            elif line.startswith(("TER", "END")):
+                fout.write(line)
+        fout.write("END\n")
+    if kept == 0:
+        raise ValueError(
+            f"No protein atoms left in {complex_pdb} after excluding resname '{ligand_resname}'"
         )
-        if not os.path.exists(receptor_pdbqt):
-            # Auto-generate from the raw PDB (extract chain, convert)
-            raw_pdb = os.path.join(receptor_pdbqt_dir, f"{protein_conf_id}_raw.pdb")
-            if os.path.isfile(raw_pdb):
-                # Extract chain letter from protein_conf_id (e.g. "8gut-R-KO8-R" → "R")
-                parts = protein_conf_id.split("-")
-                chain_id = parts[1] if len(parts) >= 2 else "A"
-                try:
-                    _prepare_receptor_pdbqt_from_raw(raw_pdb, chain_id, receptor_pdbqt)
-                except Exception as e:
-                    logger.warning(
-                        f"Could not prepare receptor PDBQT from raw PDB "
-                        f"for {protein_conf_id}: {e}"
-                    )
-                    receptor_pdbqt = None
-            else:
-                logger.warning(
-                    f"Neither {receptor_pdbqt} nor {raw_pdb} found for "
-                    f"{protein_conf_id}, skipping combination"
-                )
-                receptor_pdbqt = None
+    return output_pdb
 
-        if receptor_pdbqt is None or not os.path.exists(receptor_pdbqt):
-            results.append({
-                COMBINATION_ID: f"{protein_conf_id}_{ligand_id}",
-                PROTEIN_CONF_ID: protein_conf_id,
-                LIGAND_ID: ligand_id,
-                VINA_RESCORE_SCORE: np.nan,
-                "diffdock_sdf": None,
-            })
-            continue
 
-        try:
-            result = rescore_diffdock_pose(
-                receptor_pdbqt=receptor_pdbqt,
-                diffdock_results_dir=diffdock_results_dir,
-                protein_conf_id=protein_conf_id,
-                ligand_id=ligand_id,
-                output_dir=rescore_output_dir,
-                box_padding=box_padding,
-                seed=seed,
-            )
-            results.append(result)
-        except Exception as e:
-            logger.warning(
-                f"Vina rescore failed for {protein_conf_id}_{ligand_id}: {e}"
-            )
-            results.append({
-                COMBINATION_ID: f"{protein_conf_id}_{ligand_id}",
-                PROTEIN_CONF_ID: protein_conf_id,
-                LIGAND_ID: ligand_id,
-                VINA_RESCORE_SCORE: np.nan,
-                "diffdock_sdf": None,
-            })
-
-    return pd.DataFrame(results)

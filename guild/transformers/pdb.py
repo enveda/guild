@@ -13,6 +13,7 @@ from rdkit import Chem
 
 from guild.constants.ligands import LIGANDS_TO_IGNORE
 from guild.docking.vina import generate_vina_box
+from guild.tools.preparation import _normalize_chain_list
 
 # Suppress PDBConstructionWarning
 warnings.filterwarnings("ignore", category=PDBConstructionWarning)
@@ -330,17 +331,13 @@ def _parse_pdb_atom_fields(
 
 def _convert_pdbqt_to_pdb(ligand_pdbqt: str, out_pdb: str) -> None:
     """
-    Convert PDBQT -> PDB, keeping only the **first model** (best-ranked
-    pose).  Vina writes multiple poses as separate MODEL/ENDMDL blocks;
-    including all of them would inflate PLIP interaction counts.
-
+    Convert PDBQT -> PDB.
     Prefer OpenBabel CLI (obabel). If not available, fall back to stripping
     extra PDBQT columns (best-effort).
     """
     obabel = shutil.which("obabel")
     if obabel:
-        # -f 1 -l 1: extract only the first molecule (best Vina pose)
-        cmd = [obabel, ligand_pdbqt, "-O", out_pdb, "-f", "1", "-l", "1"]
+        cmd = [obabel, ligand_pdbqt, "-O", out_pdb]
         res = subprocess.run(cmd, capture_output=True, text=True)
         if res.returncode != 0:
             raise RuntimeError(
@@ -349,25 +346,11 @@ def _convert_pdbqt_to_pdb(ligand_pdbqt: str, out_pdb: str) -> None:
         return
 
     # Fallback: treat PDBQT as PDB and strip after column 66 (keep coords/occ/temp)
-    # Only keep atoms from the first MODEL block.
     with (
         open(ligand_pdbqt, "r", encoding="utf-8", errors="replace") as fin,
         open(out_pdb, "w", encoding="utf-8") as fout,
     ):
-        seen_model = False
         for line in fin:
-            stripped = line.strip()
-            if stripped.startswith("MODEL"):
-                if seen_model:
-                    # We've already processed the first model – stop here.
-                    break
-                seen_model = True
-                continue
-            if stripped in ("ENDMDL", "END"):
-                # End of the first model – stop reading.
-                if seen_model:
-                    break
-                continue
             if _is_atom_line(line):
                 # Keep up to tempFactor (col 66), then try to preserve element if present.
                 base = line[:66]
@@ -457,24 +440,9 @@ def _write_complex(
     ligand_resseq: int,
     insert_ter_between: bool,
 ) -> None:
-    # Read ligand, keep only atom records from the **first MODEL** block.
-    # Multi-model files (e.g. Vina multi-pose output) should already be
-    # filtered upstream, but this serves as a safety net so PLIP never
-    # accidentally analyses overlapping poses.
-    ligand_atom_lines: list[str] = []
+    # Read ligand, keep only atom records
     with open(ligand_pdb, "r", encoding="utf-8", errors="replace") as f:
-        seen_first_model = False
-        for ln in f:
-            stripped = ln.strip()
-            if stripped.startswith("MODEL"):
-                if seen_first_model:
-                    break  # second MODEL encountered – stop
-                seen_first_model = True
-                continue
-            if stripped in ("ENDMDL",) and seen_first_model:
-                break  # end of first model
-            if _is_atom_line(ln):
-                ligand_atom_lines.append(ln)
+        ligand_atom_lines = [ln for ln in f if _is_atom_line(ln)]
 
     if not ligand_atom_lines:
         raise ValueError(f"No ATOM/HETATM records found in ligand file: {ligand_pdb}")
@@ -540,7 +508,7 @@ def _write_complex(
 
 def get_pocket_contacts_from_ligand(
     protein_pdb: str,
-    protein_chain: str,
+    protein_chain,
     original_ligand: str,
     original_ligand_chain: str,
     distance_threshold: float = 6.0,
@@ -548,18 +516,22 @@ def get_pocket_contacts_from_ligand(
     """
     Return a list of [chain_id, residue_index] protein residue contacts that lie
     within ``distance_threshold`` Å of any atom of ``original_ligand`` (by residue
-    name). ``residue_index`` is 1-based and contiguous along the selected protein
-    chain (Boltz schema indexing), not the raw PDB residue number.
-    Suitable for use in a Boltz pocket-constraint ``contacts`` list.
+    name). ``residue_index`` is 1-based and contiguous *within each chain* (Boltz
+    schema indexing), not the raw PDB residue number. Suitable for use in a Boltz
+    pocket-constraint ``contacts`` list.
 
     :param protein_pdb: Path to the crystal-structure PDB that contains both
                         protein and the reference ligand.
-    :param protein_chain: Chain ID of the protein receptor (e.g. ``"A"``).
+    :param protein_chain: Chain ID, list of chain IDs, or comma-separated string
+                          (e.g. ``"A,B"``) of the protein receptor. Contacts are
+                          collected from every listed chain, each indexed
+                          independently from 1, so a pocket spanning multiple
+                          chains is fully captured.
     :param original_ligand: Residue name of the reference ligand (e.g. ``"LIG"``).
     :param original_ligand_chain: Chain ID that contains the reference ligand.
     :param distance_threshold: Maximum heavy-atom distance (Å) to include a
                                protein residue as a contact (default 6.0).
-    :return: List of ``[protein_chain, residue_index]`` pairs, or ``[]`` if
+    :return: List of ``[chain_id, residue_index]`` pairs, or ``[]`` if
              the ligand residue cannot be found.
     """
     parser = PDBParser(QUIET=True)
@@ -582,35 +554,96 @@ def get_pocket_contacts_from_ligand(
         return []
 
     ligand_coords = np.array([a.get_coord() for a in ligand_atoms])
+    available = [c.id for c in model]
 
-    # Find protein residues with at least one atom within distance_threshold
+    # Find protein residues with at least one atom within distance_threshold,
+    # indexing each chain independently (Boltz expects per-chain 1-based indices).
     contacts = []
-    if protein_chain not in [c.id for c in model]:
-        logger.warning(
-            f"get_pocket_contacts_from_ligand: protein chain '{protein_chain}' "
-            f"not found in {protein_pdb}."
-        )
-        return []
-
-    seen = set()
-    sequence_index = 0
-    for residue in model[protein_chain]:
-        if residue.id[0] != " ":  # skip heteroatoms / water on the protein chain
+    for chain_id in _normalize_chain_list(protein_chain):
+        if chain_id not in available:
+            logger.warning(
+                f"get_pocket_contacts_from_ligand: protein chain '{chain_id}' "
+                f"not found in {protein_pdb}."
+            )
             continue
-        sequence_index += 1
-        if sequence_index in seen:
-            continue
-        for atom in residue:
-            diffs = ligand_coords - atom.get_coord()
-            dists = np.linalg.norm(diffs, axis=1)
-            if np.any(dists <= distance_threshold):
-                contacts.append([protein_chain, sequence_index])
-                seen.add(sequence_index)
-                break  # one close atom is enough to include this residue
+        seen = set()
+        sequence_index = 0
+        for residue in model[chain_id]:
+            if residue.id[0] != " ":  # skip heteroatoms / water on the protein chain
+                continue
+            sequence_index += 1
+            if sequence_index in seen:
+                continue
+            for atom in residue:
+                diffs = ligand_coords - atom.get_coord()
+                dists = np.linalg.norm(diffs, axis=1)
+                if np.any(dists <= distance_threshold):
+                    contacts.append([chain_id, sequence_index])
+                    seen.add(sequence_index)
+                    break  # one close atom is enough to include this residue
 
     logger.debug(
         f"get_pocket_contacts_from_ligand: found {len(contacts)} contact residues "
         f"within {distance_threshold} Å of '{original_ligand}' in {protein_pdb}."
+    )
+    return contacts
+
+
+def get_pocket_contacts_from_box(
+    protein_pdb: str,
+    protein_chain,
+    center: Tuple[float, float, float],
+    size: Tuple[float, float, float],
+) -> list:
+    """
+    Return ``[[chain_id, residue_index], ...]`` for protein residues whose Cα atom
+    lies inside the axis-aligned box defined by ``center`` and ``size``.
+    ``residue_index`` is 1-based and contiguous *within each chain* (Boltz schema
+    indexing). Same return shape as :func:`get_pocket_contacts_from_ligand`.
+
+    :param protein_pdb: Path to the protein PDB.
+    :param protein_chain: Chain ID, list of chain IDs, or comma-separated string
+                          (e.g. ``"A,B"``) of the protein receptor. Residues are
+                          collected from every listed chain, each indexed
+                          independently from 1, so an interface pocket spanning
+                          multiple chains is fully captured.
+    :param center: ``(x, y, z)`` of the box center.
+    :param size: ``(sx, sy, sz)`` full edge lengths of the box.
+    :return: List of ``[chain_id, residue_index]`` pairs, or ``[]`` if no
+             listed chain is found or no residue Cα falls inside the box.
+    """
+    cx, cy, cz = center
+    sx, sy, sz = size
+    half = np.array([sx / 2.0, sy / 2.0, sz / 2.0])
+    center_arr = np.array([cx, cy, cz])
+
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("complex", protein_pdb)
+    model = structure[0]
+    available = [c.id for c in model]
+
+    contacts = []
+    for chain_id in _normalize_chain_list(protein_chain):
+        if chain_id not in available:
+            logger.warning(
+                f"get_pocket_contacts_from_box: protein chain '{chain_id}' "
+                f"not found in {protein_pdb}."
+            )
+            continue
+        sequence_index = 0
+        for residue in model[chain_id]:
+            if residue.id[0] != " ":  # skip heteroatoms / water on the protein chain
+                continue
+            sequence_index += 1
+            if "CA" not in residue:
+                continue
+            ca_coord = residue["CA"].get_coord()
+            if np.all(np.abs(ca_coord - center_arr) <= half):
+                contacts.append([chain_id, sequence_index])
+
+    logger.debug(
+        f"get_pocket_contacts_from_box: found {len(contacts)} contact residues "
+        f"inside box center={center} size={size} in {protein_pdb}."
     )
     return contacts
 

@@ -70,7 +70,7 @@ def parse_args() -> argparse.Namespace:
         "--methods", "-m",
         nargs="+",
         default=["boltz"],
-        choices=["boltz", "vina", "karmadock", "diffdock"],
+        choices=["boltz", "vina", "karmadock", "diffdock", "gnina"],
         help="Docking methods to run (space-separated).",
     )
     parser.add_argument(
@@ -97,12 +97,6 @@ def parse_args() -> argparse.Namespace:
         help="ChEMBL version string.",
     )
     parser.add_argument(
-        "--no-decoys",
-        action="store_true",
-        default=False,
-        help="Disable decoy generation (useful when decoy file is not available).",
-    )
-    parser.add_argument(
         "--clean",
         action="store_true",
         default=False,
@@ -120,6 +114,77 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Enable known-binders expansion in BulkRun.",
     )
+    parser.add_argument(
+        "--no-decoys",
+        action="store_true",
+        default=False,
+        help="Disable decoy generation (useful for single runs).",
+    )
+    parser.add_argument(
+        "--box",
+        default=None,
+        help=(
+            "Optional path to a Vina box file (center_{x,y,z} + size_{x,y,z}) used as a "
+            "global fallback for combinations whose 'box_location' column is empty. "
+            "Per-row values in the CSV always take precedence."
+        ),
+    )
+    parser.add_argument(
+        "--n-workers",
+        type=int,
+        default=1,
+        help=(
+            "Number of parallel worker processes for Vina docking. Vina's internal "
+            "threading auto-scales, so values >1 oversubscribe slightly but typically "
+            "still help. Default 1 (safe but serial)."
+        ),
+    )
+    parser.add_argument(
+        "--no-gpu",
+        action="store_true",
+        default=False,
+        help=(
+            "Force CPU-only execution. Passed through to BulkRun(use_gpu=False); "
+            "gnina respects it via its own --no_gpu flag. Vina and DiffDock are "
+            "already CPU-only and unaffected; Boltz is genuinely GPU-bound and will "
+            "still attempt to use a GPU (so don't combine --no-gpu with --methods boltz)."
+        ),
+    )
+    parser.add_argument(
+        "--no-plip",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip the PLIP interactions analysis step. By default, after docking "
+            "and scoring complete, guild runs PLIP over every method's complex "
+            "PDBs and writes data/<project>/plip_interactions.tsv (always — "
+            "header-only when nothing was produced). External consumers should "
+            "read that file rather than installing plip locally; pass this flag "
+            "only if you don't need the interactions output."
+        ),
+    )
+    parser.add_argument(
+        "--plip-only",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip docking + scoring and run only the PLIP interactions step over "
+            "an existing data/<project>/ tree. Useful for re-generating "
+            "plip_interactions.tsv when only the PLIP code changed."
+        ),
+    )
+    parser.add_argument(
+        "--gnina-input-mode",
+        choices=["pdbqt", "sdf"],
+        default="pdbqt",
+        help=(
+            "Ligand/receptor input format for gnina. 'sdf' skips OpenBabel "
+            "PDBQT prep entirely (gnina reads RDKit-generated SDF + cleaned "
+            "PDB natively), but only takes effect when gnina is the sole "
+            "PDBQT-relevant method requested — co-running with Vina or any "
+            "Vina-rescore downgrades to PDBQT with a warning."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -131,18 +196,39 @@ def main() -> None:
     args = parse_args()
     np.random.seed(42)
 
-    # scripts/ lives directly under the project root, so one level up is enough.
-    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    # PROJECT_ROOT is the host directory the Makefile bind-mounts at
+    # ``/workspace`` — the place where ``data/<project>/`` outputs land and
+    # where ``COMBINATIONS``/``BOX`` paths resolve. We read it from the
+    # ``WORKSPACE_ROOT`` env var (set in the Makefile's DOCKER_COMMON) so the
+    # script can live anywhere on disk: it does NOT have to sit under
+    # ``WORKSPACE/scripts/``. The fallback to ``parent.parent`` covers
+    # invocations that don't go through the Makefile (e.g. someone running
+    # ``python scripts/run_guild.py`` locally).
+    workspace_env = os.environ.get("WORKSPACE_ROOT")
+    if workspace_env:
+        PROJECT_ROOT = Path(workspace_env)
+    else:
+        PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
     # Override guild's hardcoded paths so output lands in
     # PROJECT_ROOT/data/ (the volume-mounted workspace) rather than /app.
+    import guild as _guild_pkg
     import guild.bulk as _bulk_mod
     import guild.constants.system as _sys_const
     import guild.run as _run_mod
 
+    # ``guild/support/`` ships with the guild package itself. Resolving it
+    # from the imported package's location works both in-repo
+    # (``./guild/support``) and from an external caller where ``WORKSPACE``
+    # is a different repo entirely and the guild source is bind-mounted at
+    # ``/app/guild`` — there is no ``guild/`` directory at the caller's
+    # workspace root.
+    GUILD_PKG_DIR = Path(_guild_pkg.__file__).resolve().parent
+    GUILD_SUPPORT_DIR = GUILD_PKG_DIR / "support"
+
     _sys_const.WORKING_DIR_PATH = PROJECT_ROOT
     _sys_const.PROJECTS_FOLDER = str(PROJECT_ROOT / "data")
-    _sys_const.SUPPORT_FOLDER = str(PROJECT_ROOT / "guild" / "support")
+    _sys_const.SUPPORT_FOLDER = str(GUILD_SUPPORT_DIR)
     _sys_const.PYTHON_EXECUTABLE = sys.executable  # works both locally & in Docker
     _bulk_mod.WORKING_DIR_PATH = PROJECT_ROOT
     _bulk_mod.PROJECTS_FOLDER = str(PROJECT_ROOT / "data")
@@ -151,7 +237,7 @@ def main() -> None:
     # Patch diffdock module's imported constants so they see the overrides.
     import guild.docking.diffdock as _dd_mod
     _dd_mod.PYTHON_EXECUTABLE = sys.executable
-    _dd_mod.SUPPORT_FOLDER = str(PROJECT_ROOT / "guild" / "support")
+    _dd_mod.SUPPORT_FOLDER = str(GUILD_SUPPORT_DIR)
 
     from guild.bulk import BulkRun
 
@@ -160,7 +246,7 @@ def main() -> None:
     decoys_path = (
         args.decoys
         if args.decoys is not None
-        else str(PROJECT_ROOT / "guild" / "support" / "decoys" / "chembl_36_decoys_2.tsv")
+        else str(GUILD_SUPPORT_DIR / "decoys" / "chembl_36_decoys_2.tsv")
     )
 
     if args.clean:
@@ -170,18 +256,39 @@ def main() -> None:
     # Auto-detect separator (handles .tsv named as .csv, etc.)
     runs_table = pd.read_csv(combinations_path, sep=None, engine="python")
 
-    # Remap protein_path: strip any absolute prefix up to /notebooks/ so paths
-    # work both locally and inside Docker.
-    if "protein_path" in runs_table.columns:
-        runs_table["protein_path"] = runs_table["protein_path"].apply(
-            lambda p: str(PROJECT_ROOT / re.sub(r"^.*?/notebooks/", "notebooks/", p))
-            if pd.notna(p) and "/notebooks/" in str(p)
-            else p
-        )
+    # Remap protein_path / box_location: strip any absolute host prefix up to
+    # /notebooks/ or /temp_data/ so paths work both locally and inside Docker
+    # (where the repo is mounted at /workspace).
+    _PATH_PREFIX = re.compile(r"^.*?/(notebooks|temp_data)/")
+
+    def _normalize_workspace_path(p):
+        if pd.isna(p):
+            return p
+        s = str(p)
+        m = _PATH_PREFIX.search(s)
+        if not m:
+            return p
+        return str(PROJECT_ROOT / _PATH_PREFIX.sub(r"\1/", s, count=1))
+
+    for col in ("protein_path", "box_location"):
+        if col in runs_table.columns:
+            runs_table[col] = runs_table[col].apply(_normalize_workspace_path)
 
     # Optionally take only the first N rows
     if args.head > 0:
         runs_table = runs_table.head(args.head).reset_index(drop=True)
+
+    # Global box fallback: fill empty 'box_location' rows with --box, when supplied.
+    # Per-row CSV values win.
+    if args.box:
+        if "box_location" not in runs_table.columns:
+            runs_table["box_location"] = args.box
+        else:
+            mask = runs_table["box_location"].isna() | (
+                runs_table["box_location"].astype(str).str.strip() == ""
+            )
+            runs_table.loc[mask, "box_location"] = args.box
+        print(f"Box (global): {args.box}")
 
     print(f"Project:      {project_name}")
     print(f"Combinations: {combinations_path}  ({len(runs_table)} rows)")
@@ -189,6 +296,8 @@ def main() -> None:
     print(f"Methods:      {args.methods}")
     print(f"Batch size:   {args.batch_size}")
     print(f"Known bndrs:  {args.use_known_binders}")
+    print(f"GPU:          {not args.no_gpu}")
+
     bulk = BulkRun(
         runs_table,
         project_name,
@@ -200,16 +309,31 @@ def main() -> None:
         decoys=decoys_path,
         use_decoys=not args.no_decoys,
         use_known_binders=args.use_known_binders,
-        n_workers=1,
+        n_workers=args.n_workers,
+        use_gpu=not args.no_gpu,
+        gnina_input_mode=args.gnina_input_mode,
     )
 
-    t0 = time.time()
-    bulk.run_docking()
-    print(f"Docking time: {time.time() - t0:.1f}s")
+    if not args.plip_only:
+        t0 = time.time()
+        bulk.run_docking()
+        print(f"Docking time: {time.time() - t0:.1f}s")
 
-    t0 = time.time()
-    bulk.run_guild_scoring()
-    print(f"Scoring time: {time.time() - t0:.1f}s")
+        t0 = time.time()
+        bulk.run_guild_scoring()
+        print(f"Scoring time: {time.time() - t0:.1f}s")
+    else:
+        print("Skipping docking + scoring (--plip-only).")
+
+    # PLIP interaction analysis: always run by default. The contract is that
+    # data/<project>/plip_interactions.tsv exists after every run (header-only
+    # if no method produced complex PDBs), so external notebooks can read it
+    # without installing plip locally. --no-plip skips this step; --plip-only
+    # runs ONLY this step.
+    if args.plip_only or not args.no_plip:
+        t0 = time.time()
+        bulk.run_interactions_analysis()
+        print(f"PLIP time:    {time.time() - t0:.1f}s")
 
     # ── Print final scores summary ──────────────────────────────────────
     if hasattr(bulk, "rp_scores_df") and bulk.rp_scores_df is not None and not bulk.rp_scores_df.empty:

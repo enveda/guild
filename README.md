@@ -4,7 +4,7 @@
 
 # Guild
 
-> **Version 1.0.0** — Python ≥3.10, <3.11
+> **Version 1.1.4** — Python ≥3.10, <3.11
 
 Guild is an open-source Protein-Ligand Binding Tools orchestrator that covers the end-to-end pipeline while leveraging multiple docking methods in each step.
 
@@ -13,11 +13,16 @@ Guild is an open-source Protein-Ligand Binding Tools orchestrator that covers th
 * [Docker (recommended)](#docker)
 * [Running locally](#how-to-run)
 * [Installations](#installations)
+  * [Consuming PLIP interactions output](#consuming-plip-interactions-output)
+  * [Troubleshooting a failed combination](#troubleshooting-a-failed-combination)
 * [Usage](#usage)
   * [Single run](#single-run)
   * [BulkRun](#bulkrun)
 * [Methods](#methods)
   * [Docking](#docking)
+  * [Vina rescore (automatic with DiffDock and Boltz)](#vina-rescore-automatic-with-diffdock-and-boltz)
+  * [Custom binding pocket](#custom-binding-pocket)
+  * [Multi-chain binding pocket](#multi-chain-binding-pocket)
   * [Post-analysis](#post-analysis)
 
 ## Docker
@@ -64,12 +69,17 @@ make run-vina \
 |---|---|---|
 | `COMBINATIONS` | *(required)* | Path to the protein–ligand pairs CSV/TSV (use `/workspace/…` paths) |
 | `PROJECT` | `imagerun` | Output folder name under `data/` (no underscores allowed) |
-| `METHODS` | `boltz` | Space-separated list: `boltz`, `vina`, `karmadock`, `diffdock` |
+| `METHODS` | `boltz` | Space-separated list: `boltz`, `vina`, `karmadock`, `diffdock`, `gnina` |
 | `BATCH_SIZE` | `2` | Number of combinations per batch |
 | `HEAD` | `0` | Take only the first N rows from the combinations table (0 = all) |
 | `DECOYS` | *(script default)* | Path to the decoys file; omit to use built-in default (`chembl_36_decoys_2.tsv`) |
+| `NO_DECOYS` | *(empty)* | Set to `1` to skip decoy expansion entirely (useful for single-protein runs where you only want to score the supplied ligands) |
 | `CLEAN` | *(empty)* | Set to `1` to delete the project output folder before running |
 | `KNOWN_BINDERS` | *(empty)* | Set to `1` to enable known-binders expansion |
+| `N_WORKERS` | `1` | Vina parallel-worker processes. Vina internally also threads — values >1 may oversubscribe on high-core hosts but are typically fine. |
+| `BOX` | *(empty)* | Global fallback Vina box file (`center_{x,y,z}` + `size_{x,y,z}`). Used for combinations whose CSV `box_location` cell is empty; per-row values always take precedence. See [Custom binding pocket](#custom-binding-pocket). |
+| `USE_GPU` | `1` | Set empty (`USE_GPU=`) to drop `--gpus all` from `docker run` and forward `--no-gpu` to the python script. Use on no-GPU hosts. gnina falls back to CPU; vina and diffdock are unaffected. **Do not combine with `METHODS=boltz`** — Boltz is genuinely GPU-bound. |
+| `GNINA_INPUT_MODE` | *(empty)* | Set to `sdf` to skip OpenBabel PDBQT prep entirely when gnina is the only docking method requested — gnina then reads the RDKit-generated SDF + cleaned PDB directly. Co-requesting Vina or any Vina-rescore (boltz/diffdock auto-add a Vina-rescore) silently falls back to PDBQT with a warning, since OpenBabel still has to run for those methods. |
 | `MIN_MOL_WT` | `250` | Minimum molecular weight filter for known-binder expansion |
 | `MAX_MOL_WT` | `450` | Maximum molecular weight filter for known-binder expansion |
 | `CHEMBL_VERSION` | `chembl_36` | ChEMBL version string used for known-binder lookup |
@@ -82,6 +92,8 @@ make run-vina \
 | `run-boltz` | Yes | Shortcut for boltz docking |
 | `run-vina` | No | Shortcut for vina docking (CPU only) |
 | `run-diffdock` | No | Shortcut for diffdock docking |
+| `run-gnina` | Yes* | Shortcut for gnina docking (*GPU used for CNN rescoring; pass `USE_GPU=` for CPU-only) |
+| `run-plip` | No | Re-run only the PLIP interactions step over an existing `data/<project>/` tree |
 
 ### Direct script invocation
 
@@ -105,6 +117,70 @@ python scripts/run_guild.py \
 ### Requirements
 
 * NVIDIA GPU + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/) (for GPU methods)
+
+### Consuming PLIP interactions output
+
+Every `make run-*` invocation runs PLIP after scoring and writes
+`data/<project>/plip_interactions.tsv` — a tab-separated file with one row
+per docked complex that PLIP could analyze. The file is **always written**,
+even header-only if no method produced complex PDBs, so downstream code
+paths are deterministic. External notebooks should read this file directly
+instead of installing `plip` locally (its sdist tries to build openbabel
+from source, which fails on most CI / lab hosts):
+
+```python
+import pandas as pd
+
+plip = pd.read_csv(f"data/{project}/plip_interactions.tsv", sep="\t")
+```
+
+Schema (see [guild/constants/plip.py](guild/constants/plip.py) for the
+canonical list):
+
+| column | meaning |
+|---|---|
+| `protein_config_id` | matches the row in `combinations.csv` |
+| `smiles` | the docked ligand |
+| `n_hbonds` | hydrogen bonds |
+| `n_hydrophobic` | hydrophobic contacts |
+| `n_pistacking`, `n_pication` | π-stacking and π-cation |
+| `n_saltbridges`, `n_halogen`, `n_waterbridges`, `n_metal` | other interaction types |
+| `total_interactions` | sum across all categories |
+| `n_unique_residues` | unique residue contacts |
+
+To skip PLIP for a docking run, pass `--no-plip` to `run_guild.py`. To
+**re-run only PLIP** over an existing project (no re-docking), use:
+
+```shell
+make run-plip PROJECT=myproject COMBINATIONS=/workspace/path/to/combos.csv METHODS="vina diffdock"
+```
+
+That iterates the existing `data/<project>/batches/*/` tree and regenerates
+`plip_interactions.tsv` from whatever complex PDBs are present.
+
+### Troubleshooting a failed combination
+
+When a docking method fails for a given combination, the project's
+`batch_progress.log` and each batch's `output.log` carry a `FAILED ...`
+line that points at a dedicated subprocess transcript:
+
+| Method | Per-combination log path |
+|---|---|
+| Boltz | `batches/<batch>/boltz/<run_id>.subprocess.log` |
+| gnina | `batches/<batch>/gnina/<protein>_<ligand>.subprocess.log` |
+| DiffDock | `batches/<batch>/diffdock/_batch.subprocess.log` *(batch-level — DiffDock runs once per batch)* |
+| Vina | *(uses the Python API — failure trace lands in `output.log`)* |
+
+The file contains the full argv, exit code, stdout and stderr — written
+on every invocation, success or failure. Example FAILED line you'd grep
+for:
+
+```
+FAILED Boltz 6CTA-A-protein_1 (empty manifest after retry) — see /workspace/data/myproject/batches/batch_1/boltz/6CTA-A-protein_1.subprocess.log
+```
+
+Open that file to see exactly what Boltz / gnina / DiffDock printed before
+exiting — no `grep` archaeology in the batch-wide log needed.
 
 ---
 
@@ -225,21 +301,27 @@ Running in bulk is necessary to leverage the rank percentile score, as it is emp
 
 Your input table should be a pandas DataFrame with the following columns:
 
-|protein_config_id|protein_id|protein_path|protein_chain|original_ligand|original_ligand_chain|ligand_id|smiles|ligand_category|is_pdb|
-|-----------------|----------|------------|-------------|---------------|---------------------|---------|------|---------------|------|
-|5zk8-A-3C0-A|5zk8|path/to/file.pdb|A|3C0|A|drug_1|CCCC|LOI|1|
+|protein_config_id|protein_id|protein_path|protein_chain|original_ligand|original_ligand_chain|ligand_id|smiles|ligand_category|is_pdb|box_location|
+|-----------------|----------|------------|-------------|---------------|---------------------|---------|------|---------------|------|------------|
+|5zk8-A-3C0-A|5zk8|path/to/file.pdb|A|3C0|A|drug_1|CCCC|LOI|1| *(optional)* |
 
 **Column Descriptions:**
 - `protein_config_id`: Unique identifier for the protein configuration (e.g., `{protein_id}-{chain}-{ligand}-{ligand_chain}`)
 - `protein_id`: PDB ID or identifier for the protein
 - `protein_path`: Full path to the protein PDB file
-- `protein_chain`: Chain identifier to use for docking
+- `protein_chain`: Chain identifier to use for docking. To dock into a pocket
+  that spans **multiple chains** (e.g. a dimer interface), give a comma-separated
+  list such as `A,B` (any number of chains). See
+  [Multi-chain binding pocket](#multi-chain-binding-pocket).
 - `original_ligand`: Ligand identifier from the PDB file
 - `original_ligand_chain`: Chain of the original ligand
 - `ligand_id`: Unique identifier for the ligand
 - `smiles`: SMILES string of the ligand
 - `ligand_category`: Category of ligand (e.g., "LOI" for ligand of interest, "known_binder", etc.) - required for plotting
 - `is_pdb`: Binary indicator (1 if PDB file, 0 otherwise)
+- `box_location` *(optional)*: Path to a Vina box file (`center_{x,y,z}` + `size_{x,y,z}`) that
+  defines the binding pocket for both Vina and Boltz. Supplied per row but conceptually per
+  protein — see [Custom binding pocket](#custom-binding-pocket).
 
 **Basic Example:**
 
@@ -338,12 +420,100 @@ biorxiv: <https://www.biorxiv.org/content/10.1101/2025.06.14.659707v1>
 
 If you use results from any of these tools, please make sure to cite the authors as indicated in the hyperlinks.
 
-### Vina rescore (automatic with DiffDock)
+### Vina rescore (automatic with DiffDock and Boltz)
 
-When `diffdock` is included in the methods list, Guild **automatically adds** a Vina rescore step.
-After DiffDock generates poses, the Vina scoring function is applied to the top-ranked DiffDock pose for each combination (score-only, no re-docking).
-This produces an additional `vina_rescore_score` column (kcal/mol, lower = better) alongside the DiffDock confidence score.
-Both scores are independently ranked per protein and averaged into the `global_rp_score`.
+When `diffdock` or `boltz` is included in the methods list, Guild **automatically adds** a
+matching Vina rescore step. The rescore applies Vina's physics-based scoring function to the
+predicted pose (score-only, no re-docking), giving a kcal/mol ΔG estimate that's comparable
+across methods.
+
+The two rescore tracks are **independent** — each produces its own column, so a run that uses
+both DiffDock and Boltz gets two distinct rescore scores:
+
+| Upstream method | Auto-enabled rescore   | Score column                  |
+|-----------------|------------------------|-------------------------------|
+| `boltz`         | `vina_rescore_boltz`   | `vina_rescore_boltz_score`    |
+| `diffdock`      | `vina_rescore_diffdock`| `vina_rescore_diffdock_score` |
+
+Both score columns are in kcal/mol (lower = stronger predicted binding). Each is independently
+ranked per protein and folded into the `global_rp_score`.
+
+> **Note:** `boltz_score` itself is the protein-ligand ipTM confidence (range [0, 1], higher =
+> more confident structure) — not a binding score. For a binding-strength signal from Boltz,
+> use `vina_rescore_boltz_score`. Likewise `gnina`'s `gnina_score` is the Vina-style affinity
+> (kcal/mol, lower = better) while `gnina_cnn_score` is a pose-confidence side channel that does
+> not participate in guild's rank-percentile aggregation.
+
+#### Coordinate-frame caveat
+
+Boltz often recentres its predicted complex into its own internal frame, so a receptor PDBQT
+prepared from the *template* PDB will not be in the same physical space as the Boltz-output
+ligand. Guild handles this by extracting both the receptor and the ligand from Boltz's complex
+PDB on every rescore call. If you call `rescore_boltz_pose` directly outside the bulk pipeline,
+do the same — do not reuse the template-frame receptor.
+
+### Custom binding pocket
+
+By default, Guild derives the binding pocket from the co-crystal ligand declared in
+`original_ligand` / `original_ligand_chain` (for Boltz, residues within 4 Å of that ligand become
+`pocket_contacts`; for Vina, a box is built from its centre). When that information isn't
+available — apo structures, recombinant assemblies, or pockets predicted by external tools like
+fpocket / P2Rank — supply a **Vina box file** instead:
+
+```
+center_x = -7.470
+center_y = -15.230
+center_z =   5.970
+size_x = 13.830
+size_y = 15.070
+size_z = 15.230
+```
+
+There are two ways to wire it in:
+
+1. **Per-row** via the optional `box_location` column in the combinations CSV — best for
+   multi-protein runs where each protein has its own pocket file.
+2. **Global** via the `BOX=` Makefile flag (or `--box` on the script) — fills the column on rows
+   where it is empty. Per-row values always win.
+
+Precedence per combination: `box_location` (explicit) > P2Rank prediction (when
+`predict_binding_pocket=True`) > derived from `original_ligand`.
+
+For Boltz, the box is converted to a residue list at runtime: every residue whose Cα is inside
+the axis-aligned box becomes a `contact` constraint in the YAML.
+
+### Multi-chain binding pocket
+
+Some pockets sit at the **interface of two (or more) protein chains** — a dimer
+interface, a recombinant assembly, an allosteric site between subunits. To dock a
+small-molecule ligand into such a pocket, list every chain in the `protein_chain`
+column, comma-separated:
+
+| protein_config_id | protein_id | protein_path | protein_chain | ... |
+|-------------------|------------|--------------|---------------|-----|
+| 6CTA-A,B--lig1    | 6CTA       | /path/6CTA.pdb | `A,B`       | ... |
+
+This works for an arbitrary number of chains (`A`, `A,B`, `A,B,C,D`, …). A single
+chain (`A`) behaves exactly as before, so existing tables are unaffected.
+
+What changes under the hood when more than one chain is listed:
+
+- **Receptor** (Vina, gnina, KarmaDock, DiffDock): all listed chains are kept in
+  the prepared receptor, so docking and scoring see the full interface. Residues
+  are renumbered 1-based *per chain*.
+- **Boltz**: emits one `protein` block per chain (each with its own MSA) and a
+  template/pocket constraint spanning every chain. Per-chain MSA generation and
+  the larger complex make Boltz runs proportionally more expensive with more
+  chains.
+- **Pocket contacts**: collected from every listed chain, each indexed
+  independently from 1, so an interface pocket is fully constrained.
+
+**Recommended:** supply a `box_location` (see [Custom binding pocket](#custom-binding-pocket))
+that covers the interface. The co-crystal-ligand pocket derivation
+(`original_ligand`) still uses the primary (first) chain only; a box covers the
+whole interface cleanly. If you encode the chain segment of `protein_config_id`,
+use the same comma form (`6CTA-A,B-...`) so DiffDock/complex receptor extraction
+keeps both chains.
 
 ### Post-analysis
 

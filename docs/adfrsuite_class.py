@@ -414,7 +414,7 @@ class AutoDockMoleculePreparation:
             hohs = hohs + hohs2
             if hohs:
                 # remove(hohs)
-                self.lenHOHS = len(hohs)
+                lenHOHS = self.lenHOHS = len(hohs)
                 for h in hohs:
                     for b in h.bonds:
                         c = b.atom1
@@ -448,7 +448,7 @@ class AutoDockMoleculePreparation:
             if len(mol.chains) > 1:
                 chains_to_delete = []
                 for c in mol.chains:
-                    len(c.residues)
+                    num_res = len(c.residues)
                     non_std = []
                     for res in c.residues:
                         if res.type not in self.std_types:
@@ -509,6 +509,7 @@ class AutoDockMoleculePreparation:
 
     def findNearest(self, atom, bonded_atoms):
         lenK = len(bonded_atoms)
+        lenC = 1
         nonbonded_atoms = AtomSet([atom])
         c = numpy.array(nonbonded_atoms.coords, "f")
         k = numpy.array(bonded_atoms.coords, "f")
@@ -556,13 +557,11 @@ class ReceptorPreparation(AutoDockMoleculePreparation):
         cleanup="nphs_lps_waters_nonstdres",
         outputfilename=None,
         debug=False,
-        preserved=None,
+        preserved={},
         delete_single_nonstd_residues=False,
         dict=None,
     ):
 
-        if preserved is None:
-            preserved = {}
         AutoDockMoleculePreparation.__init__(
             self,
             molecule,
@@ -601,7 +600,7 @@ class ReceptorPreparation(AutoDockMoleculePreparation):
         msg = "setup " + mol.name + ":\n"
         if self.newHs != 0:
             msg = msg + " added %d new hydrogen(s)\n" % self.newHs
-        if self.chargeType is not None:
+        if self.chargeType != None:
             if self.chargeType in ["pdbq", "mol2", "pdbqt", "pdbqs"]:
                 msg = msg + " kept charges from " + self.chargeType + " file\n"
             else:
@@ -610,7 +609,7 @@ class ReceptorPreparation(AutoDockMoleculePreparation):
             msg = msg + " merged %d non-polar hydrogens\n" % self.lenNPHS
         if self.lenLPS:
             msg = msg + " merged %d lone pairs\n" % self.lenLPS
-        numpy.add.reduce(mol.allAtoms.charge)
+        totalCh = numpy.add.reduce(mol.allAtoms.charge)
         if hasattr(self, "chargeError") and abs(self.chargeError) > 0.000005:
             msg = msg + " total charge error = %6.4f\n" % self.chargeError
         return msg
@@ -657,13 +656,11 @@ class AD4ReceptorPreparation(AutoDockMoleculePreparation):
         outputfilename=None,
         debug=False,
         version=4,
-        preserved=None,
+        preserved={},
         delete_single_nonstd_residues=False,
         dict=None,
     ):
 
-        if preserved is None:
-            preserved = {}
         self.dict = dict
         AutoDockMoleculePreparation.__init__(
             self,
@@ -789,6 +786,7 @@ class ReceptorWriter:
             assert len(list(filter(cond, receptor_atoms))) == len_receptor_atoms
 
         outptr = open(outputfile, "w")
+        records = ["ATOM"]
         # if self.write_CONECT:
         #    records.append('CONECT')
         # for at in receptor_atoms:
@@ -880,7 +878,7 @@ class LigandPreparation(AutoDockMoleculePreparation):
         dict=None,
         debug=False,
         check_for_fragments=False,
-        bonds_to_inactivate=None,
+        bonds_to_inactivate=[],
         inactivate_all_torsions=False,
         version=3,
         limit_torsions=False,
@@ -889,8 +887,6 @@ class LigandPreparation(AutoDockMoleculePreparation):
     ):
         # why aren't repairs, cleanup and allowed_bonds lists??
         # to run tests: use allowed_bonds = 'guanidinium'
-        if bonds_to_inactivate is None:
-            bonds_to_inactivate = []
         if debug:
             print("LPO: allowed_bonds=", allowed_bonds)
         self.detect_bonds_between_cycles = detect_bonds_between_cycles
@@ -929,7 +925,7 @@ class LigandPreparation(AutoDockMoleculePreparation):
 
         # detect aromatic cycle carbons and rename them for AutoDock3
         rename = self.version == 3
-        self.ACM = AromaticCarbonManager(rename=rename)
+        ACM = self.ACM = AromaticCarbonManager(rename=rename)
         self.aromCs = self.ACM.setAromaticCarbons(molecule)
 
         # optional output summary filename to write types and number of torsions
@@ -949,7 +945,7 @@ class LigandPreparation(AutoDockMoleculePreparation):
         msg = "setup " + mol.name + ":\n"
         if self.newHs != 0:
             msg = msg + " added %d new hydrogen(s)\n" % self.newHs
-        if self.chargeType is not None:
+        if self.chargeType != None:
             if self.chargeType in ["pdbq", "mol2"]:
                 msg = msg + " kept charges from " + self.chargeType + " file\n"
             else:
@@ -960,7 +956,7 @@ class LigandPreparation(AutoDockMoleculePreparation):
             msg = msg + " merged %d lone pairs\n" % self.lenLPS
         if len(self.aromCs):
             msg = msg + " found %d aromatic carbons\n" % len(self.aromCs)
-        numpy.add.reduce(mol.allAtoms.charge)
+        totalCh = numpy.add.reduce(mol.allAtoms.charge)
         msg = msg + " detected %d rotatable bonds\n" % len(mol.possible_tors_bnds)
         msg = msg + " set TORSDOF to %d\n" % mol.TORSDOF
         # if hasattr(self, 'chargeError') and abs(self.chargeError)>0.000005:
@@ -1111,6 +1107,7 @@ class LigandPreparation(AutoDockMoleculePreparation):
         self.RBM.toggle_torsion(ind1, ind2)
 
     def changePlanarityCriteria(self, cutoff):
+        oldAromCs = self.aromCs
         self.aromCs = self.ACM.setAromaticCarbons(self.molecule, cutoff)
         if self.debug:
             print("now there are ", len(self.aromCs), " aromaticCs")
@@ -1145,7 +1142,7 @@ class AD4LigandPreparation(LigandPreparation):
         dict=None,
         debug=False,
         check_for_fragments=False,
-        bonds_to_inactivate=None,
+        bonds_to_inactivate=[],
         inactivate_all_torsions=False,
         version=4,
         typeAtoms=True,
@@ -1159,9 +1156,7 @@ class AD4LigandPreparation(LigandPreparation):
         write_CONECT=False,
     ):
 
-        if bonds_to_inactivate is None:
-            bonds_to_inactivate = []
-        if attach_nonbonded_fragments:
+        if attach_nonbonded_fragments == True:
             molecule.attach_nonbonded_fragments(attach_singletons=attach_singletons)
         # FIX THIS: what if molecule already has autodock_element set???
         LigandPreparation.__init__(
@@ -1307,6 +1302,7 @@ class LigandWriter:
                     rootnum = rootnum + 1
         # before writing, sort rootlist
         newrootlist = []
+        oldrootlist = rootlist
         r_ctr = 0
         for at in ligand.chains.residues.atoms:
             if hasattr(at, "rnum0"):
@@ -1511,6 +1507,7 @@ class LigandWriter:
             self.outatom_counter += 1
             if self.debug:
                 print("self.outatom_counter=", self.outatom_counter)
+            activeTors = []
             # outfptr.write(outstring)
             for bond in startAtom.bonds:
                 at2 = bond.atom1
@@ -1664,7 +1661,7 @@ class LigandRandomizer:
     def QuatToAxisAngle(self, q):
         # (x,y,z,w)
         assert len(q) == 4
-        abs(q[3])
+        abs_w = abs(q[3])
         if q[3] > 1.0:
             q[3] = 1.0
         if q[3] < -1.0:
@@ -1678,7 +1675,7 @@ class LigandRandomizer:
         quat.append(q[0] * inv_sin_half_angle)
         quat.append(q[1] * inv_sin_half_angle)
         quat.append(q[2] * inv_sin_half_angle)
-        q[3]
+        w = q[3]
         # retval.ang = WrpModRad( angle );#line233 qmultiply.cc
         # define WrpModRad(angle)  WrpRad(ModRad(angle))
         # define WrpRad(angle)     IF (((angle)> PI)? ((angle)-TWOPI)
@@ -1743,7 +1740,7 @@ class LigandRandomizer:
             ndihe = m.parser.keys.count("BRANCH")
         else:
             # do something else here @@ ??FILTER OUT ALL INACTIVE @@#1
-            ndihe = len(m.allAtoms.bonds[0].get(lambda x: x.activeTors))
+            ndihe = len(m.allAtoms.bonds[0].get(lambda x: x.activeTors == True))
             if verbose:
                 print("ndihe =", ndihe)
         if outputfilename is None:
@@ -1781,7 +1778,7 @@ class LigandRandomizer:
             orig_d[a] = set(a.bonds.getAtoms())
         # setup random torsion angles:
         dihe = []
-        for _ind in range(ndihe):
+        for ind in range(ndihe):
             dihe.append(round(random.uniform(-180, 180), 3))
         if torsOnly:
             trans = [0, 0, 0]
@@ -1875,6 +1872,7 @@ class LigandRandomizer:
                     print("quat=", quat)
                 m.state["quat"] = quat
                 # CONVERT TO AXISANGLE in order to use stoc:
+                retval = []  # to hold x,y,z,ang
                 x, y, z, w = quat
                 # TODO handle big W! Singularities line219 qmultiply.cc
                 # check for identity
@@ -1953,8 +1951,8 @@ class LigandRandomizer:
                 m.allAtoms.updateCoords(newCrds, ind=m.orig_coord_index)
                 # remove all original bonds and set hasBonds to 0 on all levels
                 # @@ REMEMBER WHICH ARE activeTors and not
-                aBD = {}
-                RotatableBondManager(m, allowed_bonds="backbone")  # 5/2014
+                aBD = activeBondDict = {}
+                rbm = RotatableBondManager(m, allowed_bonds="backbone")  # 5/2014
                 for b in m.allAtoms.bonds[0]:
                     v1 = b.possibleTors
                     v2 = b.activeTors
@@ -1973,7 +1971,7 @@ class LigandRandomizer:
                     a.hasBonds = 0
                 m.buildBondsByDistance()
                 # do it again here??
-                RotatableBondManager(m, allowed_bonds="backbone")  # 5/2014
+                rbm = RotatableBondManager(m, allowed_bonds="backbone")  # 5/2014
                 newLen = len(m.allAtoms.bonds[0])
                 if verbose:
                     print(
@@ -2006,9 +2004,11 @@ class LigandRandomizer:
                 # reset bond activity:
                 for k, v in list(aBD.items()):  # k = (b.atom1, b.atom2);
                     for b in k[0].bonds:
+                        found = 0
                         b.possibleTors = 0
                         b.activeTors = 0
                         if b.neighborAtom(k[0]) == k[1]:
+                            found = 1
                             b.possibleTors, b.activeTors = v
                 if verbose:
                     print(
@@ -2067,6 +2067,7 @@ class RotatableBondManager:
         molecule.has_backbone = allow_backbone_torsions
         allow_guanidinium_torsions = "guanidinium" in allowed_bond_list
         molecule.has_guanidinium = allow_guanidinium_torsions
+        allow_all_torsions = "all" in allowed_bond_list
         self.molecule = molecule
         self.debug = debug
         self.__classifyBonds(molecule.allAtoms, allow_guanidinium_torsions)
@@ -2117,7 +2118,7 @@ class RotatableBondManager:
         # restore appropriate categories:
         if len(dict["leaf"]):
             dict["leaf"].leaf = 1
-        dict["aromatic"]
+        aromBnds = dict["aromatic"]
         if len(dict["cycle"]):
             dict["cycle"].incycle = 1
         if len(dict["rotatable"]):
@@ -2565,7 +2566,7 @@ class RotatableBondManager:
             for k in range(1, numTors + 1):
                 rangeList.append(-k)
         # turn them all off
-        self.set_torsions(mol, mol.allAtoms.bonds[0], 0)
+        ct = self.set_torsions(mol, mol.allAtoms.bonds[0], 0)
         # print "ct = ", ct, " and mol.torscount=", mol.torscount
         # torsionMap = mol.torTree.torsionMap
         # for i in range(tNum):
@@ -2622,19 +2623,15 @@ class AD4FlexibleDockingPreparation:
         ligand,
         mode="automatic",
         rigid_filename=None,
-        residues=None,
+        residues=[],
         allowed_bonds="",  # deprecated FlexibleDocking: 5/2014: backbone off, amide + guanidinium off
-        non_rotatable_bonds=None,
+        non_rotatable_bonds=[],
         flex_filename=None,
         reassign=True,
         debug=False,
     ):
 
         # ?NEED TO TYPE ATOMS?
-        if non_rotatable_bonds is None:
-            non_rotatable_bonds = []
-        if residues is None:
-            residues = []
         self.molecule = molecule
         self.debug = debug
         file_type = os.path.splitext(os.path.basename(molecule.parser.filename))[1]
@@ -2849,6 +2846,7 @@ class AD4FlexibleDockingPreparation:
         """
         if startAtom.used == 0:
             startAtom.used = 1
+            charge = startAtom.charge
             at = startAtom
             at.newindex = self.outatom_counter
             at.number = self.outatom_counter
@@ -2975,19 +2973,15 @@ class AD4FlexibleReceptorPreparation:
         receptor,
         mode="automatic",
         rigid_filename=None,
-        residues=None,
+        residues=[],
         allowed_bonds="backbone",  # backbone on; amide + guanidinium off
-        non_rotatable_bonds=None,
+        non_rotatable_bonds=[],
         flexres_filename=None,
         reassign=True,
         debug=False,
     ):
 
         # ?NEED TO TYPE ATOMS?
-        if non_rotatable_bonds is None:
-            non_rotatable_bonds = []
-        if residues is None:
-            residues = []
         self.receptor = receptor
         self.debug = debug
         file_type = os.path.splitext(os.path.basename(receptor.parser.filename))[1]
@@ -3047,17 +3041,17 @@ class AD4FlexibleReceptorPreparation:
         self.write_flex(self.flex_residues, flexres_filename)
         self.write_rigid(self.receptor, rigid_filename)
         self.flex_atoms_to_write = self.flex_residues.atoms.get(
-            lambda x: not hasattr(x, "used")
+            lambda x: hasattr(x, "used") == False
         )
         self.rigid_atoms_to_write = self.rigid_residues.atoms.get(
-            lambda x: not hasattr(x, "used")
+            lambda x: hasattr(x, "used") == False
         )
         if len(self.rigid_atoms_to_write):
             if self.debug:
                 print("writing rigid atoms to ", rigid_filename)
             outptr = open(rigid_filename, "a")
             for at in self.rigid_atoms_to_write:
-                if not hasattr(at, "used") or not at.used:
+                if not hasattr(at, "used") or at.used == False:
                     at.number = self.rigid_outctr
                     self.writer.write_atom(outptr, at)
                     self.rigid_outctr += 1
@@ -3079,7 +3073,7 @@ class AD4FlexibleReceptorPreparation:
             # try to write the non_rotatable_bonds near other atoms in same residue...
             if not len(resSet) or res not in resSet:  # normal output
                 for at in res.atoms:
-                    if not hasattr(at, "used") or not at.used:
+                    if not hasattr(at, "used") or at.used == False:
                         at.number = self.rigid_outctr
                         self.writer.write_atom(outptr, at)
                         self.rigid_outctr += 1
@@ -3101,7 +3095,7 @@ class AD4FlexibleReceptorPreparation:
         ) in (
             molecule.allAtoms
         ):  # @@HACKED: write any atoms that haven't been written yet at the end of the rigid file...
-            if not at.used or hasattr(at, "used") is False:
+            if at.used == False or hasattr(at, "used") is False:
                 self.writer.write_atom(outptr, at)
                 self.rigid_outctr += 1
                 at.used = True
@@ -3352,7 +3346,7 @@ class AD4FlexibleReceptorPreparation:
                 startAtom.used,
             )
         queue = []
-        if not startAtom.used:
+        if startAtom.used == False:
             startAtom.used = True
             startAtom.number = startAtom.newindex = self.outatom_counter
             self.writer.write_atom(outfptr, startAtom)
@@ -3362,6 +3356,7 @@ class AD4FlexibleReceptorPreparation:
             self.outatom_counter += 1
             if self.debug:
                 print("self.outatom_counter=", self.outatom_counter)
+            activeTors = []
             # outfptr.write(outstring)
             for bond in startAtom.bonds:
                 if not hasattr(bond, "activeTors"):
@@ -3418,7 +3413,7 @@ class AD4FlexibleReceptorPreparation:
         for AutoDock. Specifically, appropriate BRANCH/ENDBRANCH
         statements are added.
         """
-        if not startAtom.used:
+        if startAtom.used == False:
             startAtom.used = True
             at = startAtom
             for bond in startAtom.bonds:

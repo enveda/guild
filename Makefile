@@ -1,14 +1,22 @@
-.PHONY : docker-local docker-test dev test run-boltz run-vina run-diffdock run-guild project-init project-setup
+.PHONY : docker-local docker-test dev test run-boltz run-vina run-diffdock run-gnina run-plip run-guild project-init project-setup
 
 # Run the tests locally
 test:
 	uv run pytest -v
 
-# Build a local guild image
+# Build a local guild image.
+# Uses gnina-bundle:local if already present; otherwise builds it first from
+# Dockerfile.gnina-bundle (pulls gnina/gnina:latest once, ~9 GB) so the gnina
+# docking method works out of the box without needing an external registry.
 docker-local:
+	@if ! docker image inspect gnina-bundle:local >/dev/null 2>&1; then \
+		echo "gnina-bundle:local not found — building from Dockerfile.gnina-bundle..."; \
+		docker build -t gnina-bundle:local -f Dockerfile.gnina-bundle .; \
+	fi
 	DOCKER_BUILDKIT=1 \
 	docker build \
 		--build-arg APP_NAME=guild \
+		--build-arg GNINA_BUNDLE_IMAGE=gnina-bundle:local \
 		-t guild:latest \
 		-f Dockerfile \
 		--target=docker \
@@ -34,7 +42,24 @@ BATCH_SIZE      ?= 2
 HEAD            ?= 0
 CLEAN           ?=
 KNOWN_BINDERS   ?=
+NO_DECOYS       ?=
+BOX             ?=
+N_WORKERS       ?=
 PASSWD_FILE     ?= /tmp/guild_passwd
+
+# GPU toggle. Default 1 (enabled). Set USE_GPU= (empty) to drop
+# `--gpus all --shm-size=8g` from docker run AND forward `--no-gpu` to
+# run_guild.py — required on hosts without a usable GPU (gnina then falls back
+# to CPU; Boltz is genuinely GPU-bound and shouldn't be combined with USE_GPU=).
+USE_GPU         ?= 1
+_GPU_FLAGS       = $(if $(USE_GPU),--gpus all --shm-size=8g,)
+_NO_GPU_FLAG     = $(if $(USE_GPU),,--no-gpu)
+
+# Gnina input mode. Empty (default) → omit the flag (pdbqt default applies).
+# Set GNINA_INPUT_MODE=sdf to skip OpenBabel PDBQT prep when gnina is the only
+# docking method requested (otherwise BulkRun downgrades to pdbqt with a warning).
+GNINA_INPUT_MODE ?=
+_GNINA_INPUT_MODE_FLAG = $(if $(GNINA_INPUT_MODE),--gnina-input-mode $(GNINA_INPUT_MODE),)
 
 # Internal docker run flags reused across targets.
 # Mounts a generated /etc/passwd so pwd.getpwuid() works for the host UID
@@ -60,7 +85,10 @@ _HEAD_FLAG = $(if $(filter-out 0,$(HEAD)),--head $(HEAD),)
 
 # Collect all optional flags into one variable for DRY target definitions
 _DECOYS_FLAG         = $(if $(DECOYS),--decoys $(DECOYS),)
-_OPTIONAL_FLAGS = $(_CLEAN_FLAG) $(_KNOWN_BINDERS_FLAG) $(_HEAD_FLAG) $(_DECOYS_FLAG)
+_NO_DECOYS_FLAG      = $(if $(NO_DECOYS),--no-decoys,)
+_BOX_FLAG            = $(if $(BOX),--box $(BOX),)
+_N_WORKERS_FLAG      = $(if $(N_WORKERS),--n-workers $(N_WORKERS),)
+_OPTIONAL_FLAGS = $(_CLEAN_FLAG) $(_KNOWN_BINDERS_FLAG) $(_HEAD_FLAG) $(_DECOYS_FLAG) $(_NO_DECOYS_FLAG) $(_BOX_FLAG) $(_N_WORKERS_FLAG) $(_NO_GPU_FLAG) $(_GNINA_INPUT_MODE_FLAG)
 
 # Generate an /etc/passwd that includes the container's original entries plus
 # the host user.  This fixes pwd.getpwuid() failures for LDAP/SSSD users
@@ -78,8 +106,7 @@ METHODS ?= boltz
 run-boltz: _prepare-passwd
 	docker run \
 		$(DOCKER_COMMON) \
-		--gpus all \
-		--shm-size=8g \
+		$(_GPU_FLAGS) \
 		-e LD_LIBRARY_PATH=/opt/localcolabfold/.pixi/envs/default/lib:/usr/local/lib:/app/.venv/lib/python3.10/site-packages/nvidia/cu13/lib:/app/.venv/lib/python3.10/site-packages/nvidia/cuda_nvrtc/lib:/app/.venv/lib/python3.10/site-packages/nvidia/cudnn/lib:/app/.venv/lib/python3.10/site-packages/nvidia/cublas/lib \
 		guild:latest \
 		python $(MASTER_SCRIPT) \
@@ -117,13 +144,45 @@ run-diffdock: _prepare-passwd
 			--batch-size $(BATCH_SIZE) \
 			$(_OPTIONAL_FLAGS)
 
-# Generic target — pass METHODS="boltz vina karmadock diffdock" as needed.
-# Picks up GPU flags automatically when any GPU method is present.
+# Run gnina docking inside the local Docker image. Uses the GPU by default for
+# CNN rescoring; pass USE_GPU= (empty) on no-GPU hosts to drop --gpus and run
+# gnina CPU-only. Requires: make docker-local first.
+GNINA_METHODS ?= gnina
+run-gnina: _prepare-passwd
+	docker run \
+		$(DOCKER_COMMON) \
+		$(_GPU_FLAGS) \
+		guild:latest \
+		python $(MASTER_SCRIPT) \
+			--project $(PROJECT) \
+			--combinations $(COMBINATIONS) \
+			--methods $(GNINA_METHODS) \
+			--batch-size $(BATCH_SIZE) \
+			$(_OPTIONAL_FLAGS)
+
+# Re-run only the PLIP interactions step over an existing data/<project>/ tree.
+# CPU-safe and skips docking + scoring entirely — useful for regenerating
+# plip_interactions.tsv when only the PLIP code changed. Requires the same
+# COMBINATIONS / PROJECT used by the original run.
+run-plip: _prepare-passwd
+	docker run \
+		$(DOCKER_COMMON) \
+		guild:latest \
+		python $(MASTER_SCRIPT) \
+			--project $(PROJECT) \
+			--combinations $(COMBINATIONS) \
+			--methods $(METHODS) \
+			--batch-size $(BATCH_SIZE) \
+			--plip-only \
+			$(_OPTIONAL_FLAGS)
+
+# Generic target — pass METHODS="boltz vina karmadock diffdock gnina" as needed.
+# GPU on by default; pass USE_GPU= (empty) for CPU-only hosts (drops --gpus all
+# and forwards --no-gpu). Boltz requires a GPU regardless.
 run-guild: _prepare-passwd
 	docker run \
 		$(DOCKER_COMMON) \
-		--gpus all \
-		--shm-size=8g \
+		$(_GPU_FLAGS) \
 		-e LD_LIBRARY_PATH=/opt/localcolabfold/.pixi/envs/default/lib:/usr/local/lib:/app/.venv/lib/python3.10/site-packages/nvidia/cu13/lib:/app/.venv/lib/python3.10/site-packages/nvidia/cuda_nvrtc/lib:/app/.venv/lib/python3.10/site-packages/nvidia/cudnn/lib:/app/.venv/lib/python3.10/site-packages/nvidia/cublas/lib \
 		guild:latest \
 		python $(MASTER_SCRIPT) \

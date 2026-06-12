@@ -238,6 +238,25 @@ def ligand_pdb_to_pdbqt(pdb: str, timeout: int = 300):
         if pdbqt_atoms == 0:
             raise ValueError(f"Generated PDBQT has no ATOM records: {output_pdbqt}")
 
+        # OpenBabel sometimes writes non-ligand records such as COMPND/AUTHOR
+        # before ROOT, which Vina's PDBQT parser rejects with "Unknown or
+        # inappropriate tag". Strip everything except the tags Vina accepts in a
+        # ligand PDBQT, including REMARK.
+        # Match on the leading whitespace-separated token — ``line[:6]`` would
+        # truncate the 7/9-char tags ENDROOT/ENDBRANCH/TORSDOF, silently
+        # dropping the very lines that close the torsion tree. Vina tolerates
+        # the truncated result, but gnina rejects it as malformed.
+        _VINA_LIGAND_TAGS = {
+            "REMARK", "ROOT", "ENDROOT", "BRANCH", "ENDBRANCH",
+            "TORSDOF", "ATOM", "HETATM", "END",
+        }
+        filtered = [
+            line for line in pdbqt_lines
+            if line.strip() and line.split(maxsplit=1)[0] in _VINA_LIGAND_TAGS
+        ]
+        with open(output_pdbqt, "w") as f:
+            f.writelines(filtered)
+
     except subprocess.TimeoutExpired as e:
         raise TimeoutError(
             f"OpenBabel conversion timed out after {timeout} seconds for {pdb}"

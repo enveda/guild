@@ -16,22 +16,17 @@ from guild.constants.binders import (
 )
 from guild.constants.bulk import (
     BATCH_FOLDER,
-    BOLTZ_PREFIX,
-    BOLTZ_RP_SCORE,
     BULK_TEMPLATE_DICTIONARY,
     # Batch dictionary keys
     COMBINATIONS_TABLE_KEY,
     COMBINATIONS_TO_RUN_KEY,
-    DIFFDOCK_PREFIX,
-    DIFFDOCK_RP_SCORE,
     INPUT_COMBINATIONS_KEY,
-    KARMADOCK_PREFIX,
-    KARMADOCK_RP_SCORE,
     METHODS_TO_SCORE_DICTIONARY_KEY,
     METHODS_TO_SORT_DICTIONARY_KEY,
     PRE_EXISTING_RP_SCORES_KEY,
     PREVIOUS_COMBINATIONS_DF_KEY,
     PREVIOUS_RP_SCORES_KEY,
+    RANKS_DICTIONARY,
     RANKS_LIST_KEY,
     SCORES_DIRECTION_DICTIONARY,
     SCORES_TO_USE_DICTIONARY,
@@ -39,9 +34,6 @@ from guild.constants.bulk import (
     SMILES_NAMES_DICTIONARY_KEY,
     SMILES_TYPE_DICTIONARY_KEY,
     UNIQUE_PROTEIN_IDS_KEY,
-    VINA_PREFIX,
-    VINA_RESCORE_RP_SCORE,
-    VINA_RP_SCORE,
 )
 from guild.constants.decoys import DECOYS_CATEGORY
 from guild.constants.diffdock import DIFFDOCK_RESULTS_FOLDER
@@ -59,9 +51,9 @@ from guild.constants.guild import (
     RP_SCORES_COLUMNS,
     SMILES,
     VINA_FOLDER,
-    VINA_RESCORE_PREFIX,
 )
 from guild.tools.binders import collect_known_binders
+from guild.tools.preparation import _normalize_chain_list
 from guild.transformers.converters import cif_to_pdb, sdf_to_pdb
 from guild.transformers.pdb import build_complex_pdb, relabel_ligand_chain_in_pdb
 
@@ -156,14 +148,6 @@ def available_methods_preparation(batch_dictionary, methods_to_run):
     :return: Batch dictionary with the available methods prepared.
     """
 
-    ranks_dictionary = {
-        VINA_PREFIX: VINA_RP_SCORE,
-        KARMADOCK_PREFIX: KARMADOCK_RP_SCORE,
-        DIFFDOCK_PREFIX: DIFFDOCK_RP_SCORE,
-        BOLTZ_PREFIX: BOLTZ_RP_SCORE,
-        VINA_RESCORE_PREFIX: VINA_RESCORE_RP_SCORE,
-    }
-
     batch_dictionary[METHODS_TO_SCORE_DICTIONARY_KEY] = SCORES_TO_USE_DICTIONARY
     batch_dictionary[METHODS_TO_SORT_DICTIONARY_KEY] = SCORES_DIRECTION_DICTIONARY
 
@@ -171,7 +155,7 @@ def available_methods_preparation(batch_dictionary, methods_to_run):
     batch_dictionary[RANKS_LIST_KEY] = []
 
     for current_method in methods_to_run:
-        batch_dictionary[RANKS_LIST_KEY].append(ranks_dictionary[current_method])
+        batch_dictionary[RANKS_LIST_KEY].append(RANKS_DICTIONARY[current_method])
         batch_dictionary[SCORES_TO_USE_KEY] += SCORES_TO_USE_DICTIONARY[current_method]
     return batch_dictionary
 
@@ -286,20 +270,23 @@ def extend_all_combinations_table_with_decoys(input_table, decoys_file_path):
     return pd.DataFrame(rows_to_add)
 
 
-def generate_vina_complex_pdbs(batch_dictionary):
+def _generate_pdbqt_complex_pdbs(batch_dictionary, output_folder_name: str, method_label: str):
     """
-    Generate complex PDB files for all Vina docking results in a batch.
-    Merges protein PDB with docked ligand PDBQT into a single complex PDB.
+    Merge protein PDB with docked-pose PDBQT into a complex PDB, for any
+    docking method whose output is a multi-pose PDBQT in
+    ``{BATCH_FOLDER}/{output_folder_name}/{protein}_{ligand}.pdbqt``.
 
-    :param batch_dictionary: Dictionary containing batch information including
-                             BATCH_FOLDER, COMBINATIONS_TABLE_KEY, etc.
+    Used by both Vina and gnina, which share the same PDBQT output format.
+
+    :param batch_dictionary: Standard bulk batch dictionary.
+    :param output_folder_name: Per-method docking-output folder (``VINA_FOLDER``,
+        ``GNINA_FOLDER``).
+    :param method_label: Human-readable method name for log messages.
     """
-
     batch_folder = batch_dictionary[BATCH_FOLDER]
-    vina_folder = f"{batch_folder}/{VINA_FOLDER}"
+    method_folder = f"{batch_folder}/{output_folder_name}"
     proteins_folder = f"{batch_folder}/proteins"
 
-    # Get all combinations for this batch
     combinations_df = batch_dictionary[COMBINATIONS_TABLE_KEY]
 
     complexes_created = 0
@@ -309,19 +296,15 @@ def generate_vina_complex_pdbs(batch_dictionary):
         protein_conf_id = row[PROTEIN_CONF_ID]
         ligand_id = row[LIGAND_ID]
 
-        # Paths for vina output
-        ligand_pdbqt = f"{vina_folder}/{protein_conf_id}_{ligand_id}.pdbqt"
-        complex_pdb = f"{vina_folder}/{protein_conf_id}_{ligand_id}_complex.pdb"
+        ligand_pdbqt = f"{method_folder}/{protein_conf_id}_{ligand_id}.pdbqt"
+        complex_pdb = f"{method_folder}/{protein_conf_id}_{ligand_id}_complex.pdb"
 
-        # Check if vina output exists
         if not os.path.exists(ligand_pdbqt):
             continue
 
-        # Skip if complex already exists
         if os.path.exists(complex_pdb):
             continue
 
-        # Try multiple naming patterns for protein PDB files
         protein_pdb_candidates = [
             f"{proteins_folder}/{protein_conf_id}_single_chain_clean.pdb",
             f"{proteins_folder}/{protein_conf_id}_clean.pdb",
@@ -356,8 +339,30 @@ def generate_vina_complex_pdbs(batch_dictionary):
             complexes_failed += 1
 
     logger.info(
-        f"Complex PDB generation complete: {complexes_created} created, {complexes_failed} failed"
+        f"{method_label} complex PDB generation complete: "
+        f"{complexes_created} created, {complexes_failed} failed"
     )
+
+
+def generate_vina_complex_pdbs(batch_dictionary):
+    """
+    Generate complex PDB files for all Vina docking results in a batch.
+    Merges protein PDB with docked ligand PDBQT into a single complex PDB.
+
+    :param batch_dictionary: Dictionary containing batch information including
+                             BATCH_FOLDER, COMBINATIONS_TABLE_KEY, etc.
+    """
+    _generate_pdbqt_complex_pdbs(batch_dictionary, VINA_FOLDER, "Vina")
+
+
+def generate_gnina_complex_pdbs(batch_dictionary):
+    """
+    Generate complex PDB files for all gnina docking results in a batch.
+    Uses the same PDBQT output format as Vina.
+    """
+    from guild.constants.guild import GNINA_FOLDER
+
+    _generate_pdbqt_complex_pdbs(batch_dictionary, GNINA_FOLDER, "gnina")
 
 
 def generate_diffdock_complex_pdbs(batch_dictionary):
@@ -438,22 +443,24 @@ def generate_diffdock_complex_pdbs(batch_dictionary):
             complexes_failed += 1
             continue
 
-        # Extract chain from protein_conf_id (e.g. "8gut-R-KO8-R" → "R")
+        # Extract chain(s) from protein_conf_id. Single chain ("8gut-R-KO8-R" →
+        # "R") or a comma-joined set for a multi-chain pocket ("8gut-A,B-..." →
+        # ["A", "B"]); every listed chain is kept so the receptor stays intact.
         parts = protein_conf_id.split("-")
-        chain_id = parts[1] if len(parts) >= 2 else "A"
+        chain_ids = _normalize_chain_list(parts[1]) if len(parts) >= 2 else ["A"]
 
         chain_pdb = os.path.join(diffdock_folder, f"{protein_conf_id}_chain.pdb")
         if not os.path.exists(chain_pdb):
             kept = 0
             with open(raw_pdb) as fin, open(chain_pdb, "w") as fout:
                 for line in fin:
-                    if line.startswith("ATOM") and len(line) > 21 and line[21] == chain_id:
+                    if line.startswith("ATOM") and len(line) > 21 and line[21] in chain_ids:
                         fout.write(line)
                         kept += 1
                 fout.write("END\n")
             if kept == 0:
                 logger.warning(
-                    f"No ATOM records for chain {chain_id} in {raw_pdb}"
+                    f"No ATOM records for chain(s) {chain_ids} in {raw_pdb}"
                 )
                 complexes_failed += 1
                 continue

@@ -3,6 +3,7 @@ import math
 import os
 import random
 import time
+from pathlib import Path
 from typing import Tuple
 
 import chembl_downloader
@@ -10,6 +11,7 @@ import pandas as pd
 from tqdm import tqdm
 from unipressed import IdMappingClient
 
+import guild as _guild_pkg
 from guild.constants.chembl import (
     ACTIVITY,
     BINDER_DIR,
@@ -24,7 +26,6 @@ from guild.constants.chembl import (
     UNIPROT_ID,
 )
 from guild.constants.general import RANDOM_SEED
-from guild.constants.system import WORKING_DIR_PATH
 
 random.seed(RANDOM_SEED)
 
@@ -32,8 +33,14 @@ logger = logging.getLogger(__name__)
 
 pd.options.mode.chained_assignment = None  # default='warn'
 
-BINDER_DIR_PATH = f"{WORKING_DIR_PATH}/guild/support/{BINDER_DIR}"
-DECOYS_DIR_PATH = f"{WORKING_DIR_PATH}/guild/support/{DECOYS_DIR}"
+# Anchor the binders/decoys cache directories on the guild package's own
+# location, not WORKING_DIR_PATH. This module is imported lazily (e.g. from
+# guild.tools.binders) after run_guild.py has rebound WORKING_DIR_PATH to
+# the caller's workspace, which has no guild/support tree. The guild package
+# location is the stable anchor.
+_GUILD_PKG_DIR = Path(_guild_pkg.__file__).resolve().parent
+BINDER_DIR_PATH = str(_GUILD_PKG_DIR / "support" / BINDER_DIR)
+DECOYS_DIR_PATH = str(_GUILD_PKG_DIR / "support" / DECOYS_DIR)
 
 os.makedirs(BINDER_DIR_PATH, exist_ok=True)
 os.makedirs(DECOYS_DIR_PATH, exist_ok=True)
