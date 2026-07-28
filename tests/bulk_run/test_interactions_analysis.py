@@ -40,7 +40,12 @@ COMPLEX_PDB = str(TEST_DATA_DIR / "3pbl_lig_complex.pdb")
 
 COMBO_ID = "3pbl-A_lig1"
 PCONF_ID = "3pbl-A"
-SMILES = "CC(=COC=O)CCC1=C(C)CCCC1(C)C"
+# Eticlopride, the ETQ ligand in 3PBL. ProLIF uses this as a bond-order template
+# via AssignBondOrdersFromTemplate, so it has to match the fixture's heavy-atom
+# graph or ProLIF silently falls back to a partially-sanitized ligand.
+# Stereochemistry is omitted deliberately: the template match is on connectivity,
+# and the (S) centre is not something this fixture verifies.
+SMILES = "O=C(NCC1CCCN1CC)c1c(O)c(CC)cc(Cl)c1OC"
 METHOD = "vina"
 
 VALID_INTERACTION_TYPES = {
