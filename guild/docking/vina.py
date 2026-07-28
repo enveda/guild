@@ -72,6 +72,7 @@ def deploy_vina(
     seed: int = RANDOM_SEED,
     output_pdbqt: str = None,
     output_scores: str = None,
+    flex_pdbqt: str | None = None,
 ) -> dict:
     """
     Run docking using the python Vina API.
@@ -89,11 +90,16 @@ def deploy_vina(
     # Validate PDBQT files before passing to Vina to prevent C++ crashes
     _validate_pdbqt(receptor_pdbqt, "receptor")
     _validate_pdbqt(ligand_pdbqt, "ligand")
+    if flex_pdbqt:
+        _validate_pdbqt(flex_pdbqt, "flex receptor")
 
     vina_object = Vina(sf_name="vina", seed=seed, verbosity=False)
 
     try:
-        vina_object.set_receptor(receptor_pdbqt)
+        if flex_pdbqt:
+            vina_object.set_receptor(receptor_pdbqt, flex_pdbqt)
+        else:
+            vina_object.set_receptor(receptor_pdbqt)
     except Exception as e:
         raise RuntimeError(f"Failed to set receptor from {receptor_pdbqt}: {e}") from e
 
@@ -121,6 +127,126 @@ def deploy_vina(
     logger.info(f"Vina: docking completed. Scores saved to {output_scores}")
 
     return {"scores": scores, "out_pdbqt": output_pdbqt, "output_scores": output_scores}
+
+
+def deploy_vina_local_refinement(
+    receptor_pdbqt: str,
+    ligand_pdbqt: str,
+    center: tuple[float, float, float],
+    size: tuple[float, float, float],
+    seed: int = RANDOM_SEED,
+    output_pdbqt: str = None,
+    output_scores: str = None,
+) -> dict:
+    """
+    Locally refine a single user-supplied pose with Vina (no global
+    search). Calls ``Vina.optimize()`` which performs a single local
+    minimisation starting from the ligand's current coordinates, then
+    writes the refined pose to ``output_pdbqt`` and a one-entry
+    ``mode: affinity`` scores file to ``output_scores`` so downstream
+    scoring code (``process_vina_output``) is unchanged.
+
+    Used by ``Guild.run_autodock_vina`` when ``pose_mode == "local"`` —
+    the mode for biasing docking toward an experimentally-informed
+    starting pose. Unlike ``deploy_vina`` (which discards the input
+    coords for search-start purposes), this preserves the input pose's
+    position/orientation and only minimises locally via ``Vina.optimize()``.
+
+    :return: ``{"scores": [score], "out_pdbqt": ..., "output_scores": ...}``
+    """
+    _validate_pdbqt(receptor_pdbqt, "receptor")
+    _validate_pdbqt(ligand_pdbqt, "ligand")
+
+    if output_pdbqt is None:
+        output_pdbqt = ligand_pdbqt.replace(".pdbqt", "_local.pdbqt")
+    if output_scores is None:
+        output_scores = output_pdbqt.replace(".pdbqt", ".txt")
+    vina_object = Vina(sf_name="vina", seed=seed, verbosity=False)
+
+    try:
+        vina_object.set_receptor(receptor_pdbqt)
+    except Exception as e:
+        raise RuntimeError(f"Failed to set receptor from {receptor_pdbqt}: {e}") from e
+
+    try:
+        vina_object.set_ligand_from_file(ligand_pdbqt)
+    except Exception as e:
+        raise RuntimeError(f"Failed to set ligand from {ligand_pdbqt}: {e}") from e
+
+    vina_object.compute_vina_maps(center=center, box_size=size)
+
+    # Vina.optimize() does a local minimisation in-place and returns the
+    # refined energy. The optimised coordinates land in the ligand's
+    # *current state*, NOT in the docked-poses buffer that
+    # write_poses() (plural) reads from — that buffer is only populated
+    # by Vina.dock(). Use write_pose() (singular) to dump the current
+    # ligand state; calling write_poses() here makes python-vina emit
+    # "Could not find any poses. No poses were written." and produces
+    # a 0-byte file.
+    refined_energy = vina_object.optimize()
+    vina_object.write_pose(output_pdbqt, overwrite=True)
+
+    # ``optimize()`` returns either a scalar energy or an array of energy
+    # components depending on the python-vina build; normalise to a
+    # single float by taking the first element when iterable.
+    try:
+        score = float(refined_energy[0])
+    except (TypeError, IndexError):
+        score = float(refined_energy)
+
+    with open(output_scores, "w") as scores_file:
+        scores_file.write(f"0: {score}\n")
+    logger.info(f"Vina: local refinement completed. Score {score:.3f} saved to {output_scores}")
+
+    return {"scores": [score], "out_pdbqt": output_pdbqt, "output_scores": output_scores}
+
+
+def deploy_vina_score(
+    receptor_pdbqt: str,
+    ligand_pdbqt: str,
+    center: tuple[float, float, float],
+    size: tuple[float, float, float],
+    seed: int = RANDOM_SEED,
+    output_pdbqt: str = None,
+    output_scores: str = None,
+) -> dict:
+    """
+    Evaluate a single user-supplied pose with Vina (no movement). Calls
+    ``vina_score_pose`` for the energy, copies the input ligand verbatim
+    to ``output_pdbqt`` (so downstream PLIP / complex-PDB generation
+    finds the pose where it expects it), and writes a one-entry
+    ``mode: affinity`` scores file.
+
+    Used by ``Guild.run_autodock_vina`` when ``pose_mode == "score"`` —
+    pure energy evaluation of the supplied pose.
+
+    :return: ``{"scores": [score], "out_pdbqt": ..., "output_scores": ...}``
+    """
+    score = vina_score_pose(
+        receptor_pdbqt=receptor_pdbqt,
+        ligand_pdbqt=ligand_pdbqt,
+        center=center,
+        size=size,
+        seed=seed,
+    )
+
+    if output_pdbqt is None:
+        output_pdbqt = ligand_pdbqt.replace(".pdbqt", "_score.pdbqt")
+    if output_scores is None:
+        output_scores = output_pdbqt.replace(".pdbqt", ".txt")
+    # Copy the input pose into the standard output location so PLIP /
+    # ``vina_guild_scoring`` find the same artifact layout as a regular
+    # docking run.
+    with open(ligand_pdbqt, "rb") as src, open(output_pdbqt, "wb") as dst:
+        dst.write(src.read())
+
+    with open(output_scores, "w") as scores_file:
+        scores_file.write(f"0: {score}\n")
+    logger.info(
+        f"Vina: score-only evaluation completed. Score {score:.3f} saved to {output_scores}"
+    )
+
+    return {"scores": [score], "out_pdbqt": output_pdbqt, "output_scores": output_scores}
 
 
 def generate_vina_box(
@@ -393,5 +519,3 @@ def _extract_protein_from_complex(complex_pdb: str, output_pdb: str, ligand_resn
             f"No protein atoms left in {complex_pdb} after excluding resname '{ligand_resname}'"
         )
     return output_pdb
-
-

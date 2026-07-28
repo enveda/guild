@@ -39,6 +39,7 @@ from guild.constants.decoys import DECOYS_CATEGORY
 from guild.constants.diffdock import DIFFDOCK_RESULTS_FOLDER
 from guild.constants.guild import (
     BOLTZ_FOLDER,
+    COVALENT_REC_ATOM,
     IS_PDB,
     LIGAND_CATEGORY,
     LIGAND_ID,
@@ -55,7 +56,11 @@ from guild.constants.guild import (
 from guild.tools.binders import collect_known_binders
 from guild.tools.preparation import _normalize_chain_list
 from guild.transformers.converters import cif_to_pdb, sdf_to_pdb
-from guild.transformers.pdb import build_complex_pdb, relabel_ligand_chain_in_pdb
+from guild.transformers.pdb import (
+    add_covalent_conect,
+    build_complex_pdb,
+    relabel_ligand_chain_in_pdb,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,9 +108,7 @@ def identify_previously_ran_combinations(current_batch, batch_dictionary):
     :return: Batch dictionary with the previously ran combinations identified.
     """
 
-    batch_dictionary[PREVIOUS_RP_SCORES_KEY] = pd.DataFrame(
-        columns=RP_SCORES_COLUMNS
-    )
+    batch_dictionary[PREVIOUS_RP_SCORES_KEY] = pd.DataFrame(columns=RP_SCORES_COLUMNS)
 
     pre_existing_combinations = []
     batch_dictionary[COMBINATIONS_TO_RUN_KEY] = []
@@ -297,9 +300,16 @@ def _generate_pdbqt_complex_pdbs(batch_dictionary, output_folder_name: str, meth
         ligand_id = row[LIGAND_ID]
 
         ligand_pdbqt = f"{method_folder}/{protein_conf_id}_{ligand_id}.pdbqt"
+        ligand_sdf = f"{method_folder}/{protein_conf_id}_{ligand_id}.sdf"
         complex_pdb = f"{method_folder}/{protein_conf_id}_{ligand_id}_complex.pdb"
 
-        if not os.path.exists(ligand_pdbqt):
+        if os.path.exists(ligand_sdf):
+            ligand_poses_file = ligand_sdf
+            ligand_is_pdbqt = False
+        elif os.path.exists(ligand_pdbqt):
+            ligand_poses_file = ligand_pdbqt
+            ligand_is_pdbqt = True
+        else:
             continue
 
         if os.path.exists(complex_pdb):
@@ -325,9 +335,9 @@ def _generate_pdbqt_complex_pdbs(batch_dictionary, output_folder_name: str, meth
         try:
             build_complex_pdb(
                 protein_pdb=protein_pdb,
-                ligand_file=ligand_pdbqt,
+                ligand_file=ligand_poses_file,
                 out_complex_pdb=complex_pdb,
-                ligand_is_pdbqt=True,
+                ligand_is_pdbqt=ligand_is_pdbqt,
                 ligand_resname="LIG",
                 ligand_chain="Z",
                 ligand_resseq=1,
@@ -337,6 +347,22 @@ def _generate_pdbqt_complex_pdbs(batch_dictionary, output_folder_name: str, meth
         except Exception as e:
             logger.warning(f"Failed to create complex for {protein_conf_id}_{ligand_id}: {e}")
             complexes_failed += 1
+            continue
+
+        # For gnina covalent runs, append CONECT records so the covalent bond
+        # is visible in PyMOL and PLIP.  The spec comes from the per-row
+        # combinations-CSV column; absent / NaN rows are silently skipped.
+        cov_spec = row[COVALENT_REC_ATOM] if COVALENT_REC_ATOM in row.index else None
+        if cov_spec is not None and not (isinstance(cov_spec, float) and pd.isna(cov_spec)):
+            cov_spec = str(cov_spec).strip()
+            if cov_spec:
+                try:
+                    add_covalent_conect(complex_pdb, cov_spec)
+                except Exception as e:
+                    logger.warning(
+                        f"covalent CONECT: could not add bond for "
+                        f"{protein_conf_id}_{ligand_id}: {e}"
+                    )
 
     logger.info(
         f"{method_label} complex PDB generation complete: "
@@ -459,9 +485,7 @@ def generate_diffdock_complex_pdbs(batch_dictionary):
                         kept += 1
                 fout.write("END\n")
             if kept == 0:
-                logger.warning(
-                    f"No ATOM records for chain(s) {chain_ids} in {raw_pdb}"
-                )
+                logger.warning(f"No ATOM records for chain(s) {chain_ids} in {raw_pdb}")
                 complexes_failed += 1
                 continue
 

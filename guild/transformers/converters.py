@@ -7,6 +7,7 @@ Convert between different file formats.
 """
 
 import os
+import shutil
 import subprocess
 
 from rdkit import Chem
@@ -147,10 +148,55 @@ def align_sdf(template_mol: str, align_mol: str, output_name: str = None):
     return mol2
 
 
+def _sdf_has_degenerate_coords(sdf: str) -> bool:
+    """
+    Detect a V2000 SDF whose atoms all sit at the same (usually 0,0,0) point.
+
+    OpenBabel's ``--gen3d`` can fail its distance-geometry embedding for a
+    molecule with over-constrained stereochemistry, print an error to
+    stderr, and *still* exit 0 while writing a placeholder molecule with
+    every atom at the origin. That passes a plain file-size check, so we
+    check the actual coordinates.
+    """
+    with open(sdf, "r", encoding="utf-8", errors="replace") as f:
+        lines = f.read().splitlines()
+    if len(lines) < 4:
+        return True
+    try:
+        n_atoms = int(lines[3][:3])
+    except (ValueError, IndexError):
+        return False
+    coords = set()
+    for line in lines[4 : 4 + n_atoms]:
+        coords.add(line[:30])  # x, y, z columns (10 chars each)
+        if len(coords) > 1:
+            return False
+    return True
+
+
 def smiles_to_sdf(smiles: str, sdf: str = None):
     """
-    Convert SMILES to 3D SDF using OpenBabel.
+    Convert SMILES to 3D SDF using OpenBabel, falling back to RDKit ETKDG
+    if OpenBabel's distance-geometry embedding fails.
+
     OpenBabel handles: parsing, 3D generation, H addition, and minimization.
+
+    KNOWN LIMITATION (flagged, not fixed here): the embedded conformer is placed in an
+    arbitrary local coordinate frame with NO reference to any receptor/box -- this
+    function has no receptor context to position against. This silently breaks gnina's
+    sdf-mode automatic flexible-residue selection (``Guild(flexible_docking=True,
+    gnina_input_mode="sdf")`` -> ``--flexdist_ligand``/``--flexdist`` in
+    guild/run.py and guild/docking/gnina.py), which measures "residues within N Å of the
+    ligand" using THIS function's output coordinates. For any ligand built from a bare
+    SMILES (i.e. not a supplied/aligned pose), those coordinates are nowhere near the
+    real binding site, so --flexdist_ligand locks onto whatever happens to be near the
+    ligand's arbitrary embedding origin -- confirmed in practice to pick residues on an
+    unrelated chain and then fail to find any valid pose at all ("ligand outside box" on
+    effectively every sample), not a real docking failure. Rigid docking and the
+    box-based pdbqt-mode flex derivation are unaffected (they don't use the ligand's
+    absolute position). Workaround: use the explicit ``flexres_gnina``/``gnina_flexres``
+    override (bypasses --flexdist_ligand entirely) instead of automatic sdf-mode
+    flexible_docking for any ligand that isn't pose-supplied.
 
     :param smiles: SMILES string of the molecule to be converted
     :param sdf: Name of the output file
@@ -184,6 +230,15 @@ def smiles_to_sdf(smiles: str, sdf: str = None):
 
         if not content or len(content) < 50:  # SDF files should have substantial content
             raise ValueError(f"Generated SDF file appears empty or malformed: {sdf}")
+
+        if _sdf_has_degenerate_coords(sdf):
+            # OpenBabel's DG embedder can fail on over-constrained
+            # stereochemistry (conflicting/unembeddable defined stereocenters
+            # + double bonds) yet still exit 0 with a placeholder molecule at
+            # the origin. RDKit's ETKDG embedder handles these cases.
+            molecule = _molecule_rdkit_processing(Chem.MolFromSmiles(smiles))
+            with Chem.SDWriter(sdf) as writer:
+                writer.write(molecule)
 
     except subprocess.TimeoutExpired as e:
         raise TimeoutError(f"OpenBabel SMILES conversion timed out for: {smiles}") from e
@@ -247,11 +302,19 @@ def ligand_pdb_to_pdbqt(pdb: str, timeout: int = 300):
         # dropping the very lines that close the torsion tree. Vina tolerates
         # the truncated result, but gnina rejects it as malformed.
         _VINA_LIGAND_TAGS = {
-            "REMARK", "ROOT", "ENDROOT", "BRANCH", "ENDBRANCH",
-            "TORSDOF", "ATOM", "HETATM", "END",
+            "REMARK",
+            "ROOT",
+            "ENDROOT",
+            "BRANCH",
+            "ENDBRANCH",
+            "TORSDOF",
+            "ATOM",
+            "HETATM",
+            "END",
         }
         filtered = [
-            line for line in pdbqt_lines
+            line
+            for line in pdbqt_lines
             if line.strip() and line.split(maxsplit=1)[0] in _VINA_LIGAND_TAGS
         ]
         with open(output_pdbqt, "w") as f:
@@ -346,6 +409,96 @@ def protein_pdb_to_pdbqt(
     return output_pdbqt
 
 
+def _flexres_str_to_meeko_args(flexres_str: str) -> list[str]:
+    """
+    Convert the internal ``"A:88_A:91_B:7"`` format to meeko 0.7+ ``-f`` args.
+
+    meeko 0.7+ expects one ``-f`` flag per chain with residues comma-separated:
+    ``["-f", "A:88,91", "-f", "B:7"]``.
+    """
+    from collections import defaultdict
+
+    chain_residues: dict = defaultdict(list)
+    for token in flexres_str.split("_"):
+        chain, resnum = token.split(":")
+        chain_residues[chain].append(resnum)
+    args = []
+    for chain, resnums in chain_residues.items():
+        args += ["-f", f"{chain}:{','.join(resnums)}"]
+    return args
+
+
+def prepare_flex_receptor_pdbqt(
+    input_pdb: str,
+    output_rigid_pdbqt: str,
+    output_flex_pdbqt: str,
+    flexres_str: str,
+    default_altloc: str = "A",
+    allow_bad_res: bool = False,
+) -> tuple[str, str]:
+    """
+    Split a receptor PDB into a rigid PDBQT and a flexible-residue PDBQT.
+
+    Calls ``mk_prepare_receptor.py -p <basename> -f <flexres>`` (meeko 0.7+
+    API).  meeko writes ``<basename>_rigid.pdbqt`` and ``<basename>_flex.pdbqt``
+    automatically; these are then moved to the caller-specified paths.
+
+    :param input_pdb: Cleaned protein PDB (post chain-isolation + renumbering).
+    :param output_rigid_pdbqt: Destination for the rigid portion.
+    :param output_flex_pdbqt: Destination for the flexible side chains.
+    :param flexres_str: AutoDock residue spec, e.g. ``"A:1_A:3_B:7"``.
+    :param default_altloc: Alternate-location selector (default ``"A"``).
+    :param allow_bad_res: Pass ``--allow_bad_res`` to tolerate unusual residues.
+    :return: ``(output_rigid_pdbqt, output_flex_pdbqt)`` paths.
+    :raises RuntimeError: If either output file is missing or empty after the call.
+    """
+    import shutil as _shutil
+    import tempfile as _tempfile
+
+    # meeko 0.7+ takes -p <basename> (no extension) and writes
+    # <basename>_rigid.pdbqt / <basename>_flex.pdbqt.
+    # Use a temp basename so we control where the files land, then move.
+    tmp_dir = _tempfile.mkdtemp()
+    basename = os.path.join(tmp_dir, "receptor")
+    meeko_rigid = basename + "_rigid.pdbqt"
+    meeko_flex = basename + "_flex.pdbqt"
+
+    cmd = [
+        "mk_prepare_receptor.py",
+        "--read_pdb",
+        input_pdb,
+        "-p",
+        basename,
+    ] + _flexres_str_to_meeko_args(flexres_str)
+    if default_altloc:
+        cmd += ["--default_altloc", default_altloc]
+    if allow_bad_res:
+        cmd += ["--allow_bad_res"]
+
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except Exception:
+        _shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+
+    for path, label in [(meeko_rigid, "rigid"), (meeko_flex, "flex")]:
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            _shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise RuntimeError(
+                f"prepare_flex_receptor_pdbqt: {label} output missing or empty: {path}"
+            )
+
+    try:
+        _shutil.move(meeko_rigid, output_rigid_pdbqt)
+        _shutil.move(meeko_flex, output_flex_pdbqt)
+    except Exception:
+        _shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+    _shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    return output_rigid_pdbqt, output_flex_pdbqt
+
+
 def _molecule_rdkit_processing(molecule: Chem.Mol):
     """
     Process a molecule by adding hydrogens, embedding, and optimizing.
@@ -398,3 +551,56 @@ def pdb_to_sdf(input_pdb: str, output_sdf: str):
     molecule = _molecule_rdkit_processing(molecule)
     writer = Chem.SDWriter(output_sdf)
     writer.write(molecule)
+
+
+_POSE_EXTENSION = ".sdf"
+
+
+def stage_user_pose(
+    pose_path: str,
+    ligand_sdf: str,
+    ligand_pdbqt: str,
+    gnina_input_mode: str = "pdbqt",
+):
+    """
+    Stage a user-supplied ligand pose (SDF) into the standard per-combo
+    artifact locations *without* re-randomising 3D coordinates.
+
+    The default ligand-prep path in ``Guild._prepare_ligand`` runs
+    ``smiles_to_sdf`` (OpenBabel ``--gen3d``) → ``sdf_to_pdb`` →
+    ``ligand_pdb_to_pdbqt``, which produces an arbitrary conformer. When
+    the user supplies a starting pose we instead copy the SDF verbatim
+    and use ``sdf_to_pdbqt`` (coord-preserving, no ``--gen3d``) so the
+    docking engine sees the actual pose.
+
+    :param pose_path: Path to the user-supplied pose file. Must be a
+        ``.sdf`` (we deliberately only support SDF for now — keeps the
+        format dispatch and validation surface small; revisit if other
+        formats become a frequent ask).
+    :param ligand_sdf: Destination SDF path (``self.ligand_sdf``).
+        Receives a byte-for-byte copy of ``pose_path``.
+    :param ligand_pdbqt: Destination PDBQT path (``self.ligand_pdbqt``).
+        Produced by ``sdf_to_pdbqt`` from the staged SDF. Skipped when
+        ``gnina_input_mode == "sdf"`` because gnina-sdf mode reads
+        ``ligand_sdf`` directly and no other consumer in ``Guild`` reads
+        the per-combo PDB/PDBQT once docking has run.
+    """
+    ext = os.path.splitext(pose_path)[1].lower()
+    if ext != _POSE_EXTENSION:
+        raise ValueError(
+            f"Unsupported pose file extension {ext!r} for {pose_path}; "
+            f"only {_POSE_EXTENSION} is supported."
+        )
+    if not os.path.exists(pose_path):
+        raise FileNotFoundError(f"Pose file not found: {pose_path}")
+
+    for dest in (ligand_sdf, ligand_pdbqt):
+        os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+
+    if os.path.abspath(pose_path) != os.path.abspath(ligand_sdf):
+        shutil.copyfile(pose_path, ligand_sdf)
+
+    if gnina_input_mode == "sdf":
+        return
+
+    sdf_to_pdbqt(sdf=ligand_sdf, pdbqt=ligand_pdbqt)
