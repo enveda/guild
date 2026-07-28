@@ -30,6 +30,7 @@ DATABASE_SCHEMA.md
 !notebooks/data/3pbl.pdb
 !notebooks/data/3pbl_box.txt
 !tests/test_data/3pbl.pdb
+!tests/test_data/3pbl_lig_complex.pdb
 !tests/test_data/3pbl_box.txt
 !tests/test_data/bulk_dummy.csv
 !notebooks/data/bulk_dummy.csv
