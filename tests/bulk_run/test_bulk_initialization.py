@@ -43,7 +43,7 @@ def cleanup_bulk_test():
 def test_bulk_run_minimal_initialization(test_input_table, cleanup_bulk_test):
     """
     Test BulkRun initialization with minimal settings.
-    No database, no decoys, no known binders.
+    No decoys, no known binders.
     """
     bulk = BulkRun(
         input_table=test_input_table,

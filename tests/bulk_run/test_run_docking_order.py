@@ -60,6 +60,7 @@ def _run_and_capture(test_input_table, methods):
     def make_recorder(name):
         def _record(self, current_batch, current_batch_folder):
             call_order.append(name)
+
         return _record
 
     with (
