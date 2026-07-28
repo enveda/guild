@@ -66,18 +66,30 @@ RUN wget https://github.com/ccsb-scripps/AutoDock-Vina/releases/download/v1.2.5/
       -O /usr/local/bin/vina && \
     chmod a+x /usr/local/bin/vina
 
-# NOTE: GNINA is intentionally not copied into base-build. The gnina-source
-# stage pulls a large upstream image and would force every target that
-# transitively depends on base-build (including `test`) to materialize it on
-# disk. The gnina bundle is only needed at runtime, so the COPY lives in the
-# final `docker` stage instead — buildkit then skips gnina-source entirely for
-# the `test` target.
+# NOTE: GNINA is intentionally not copied into base-build. Every target that
+# transitively depends on base-build (including `test`) would otherwise have to
+# materialize the bundle on disk. The gnina bundle is only needed at runtime,
+# so the COPY lives in the final `docker` stage instead — buildkit then skips
+# gnina-source entirely for the `test` target.
 
 # Python build tools
 RUN python -m pip install --upgrade pip setuptools wheel
 
 # OpenBabel build
-RUN git clone https://github.com/openbabel/openbabel.git && \
+# Pinned to the openbabel-3-1-1 release tag rather than tracking master, so an
+# upstream commit cannot change the library this image builds against.
+#
+# The `sed` cherry-picks a one-line upstream fix that never made it into any
+# tagged 3.1.x release: on GCC 12+, `obutil.h` uses `clock()` / `CLOCKS_PER_SEC`
+# without including `<ctime>`, so the asciiformat build fails with
+# `error: 'clock' was not declared in this scope`. Injecting the include is
+# equivalent to https://github.com/openbabel/openbabel/pull/2313 . Remove the
+# sed if we ever bump past the 3.1.x line.
+ARG OPENBABEL_VERSION=openbabel-3-1-1
+RUN git clone --depth 1 --branch ${OPENBABEL_VERSION} \
+        https://github.com/openbabel/openbabel.git && \
+    sed -i '/^#include <math.h>/a #include <ctime>' \
+        openbabel/include/openbabel/obutil.h && \
     mkdir -p openbabel/build && \
     cmake -DBUILD_GUI=OFF -S openbabel -B openbabel/build && \
     make -C openbabel/build && \
@@ -156,6 +168,8 @@ RUN set -eux; \
       libxml2 \
       libinchi1 \
       libc-bin \
+      libxrender1 \
+      libxext6 \
     ; \
     rm -rf /var/lib/apt/lists/* && \
     ln -sf /usr/lib/x86_64-linux-gnu/libinchi.so.1 /usr/lib/x86_64-linux-gnu/libinchi.so.0 && \
@@ -175,11 +189,11 @@ ENV LD_LIBRARY_PATH=/app/.venv/lib/python3.10/site-packages/nvidia/cu13/lib:/opt
 # Vina
 COPY --from=base-build /usr/local/bin/vina /usr/local/bin/vina
 
-# GNINA — curated bundle (binary + isolated lib tree). Pulled directly from
-# the gnina-source stage so base-build (and therefore the `test` target) does
-# not have to materialize the large upstream image. Invoked with
-# LD_LIBRARY_PATH=/opt/gnina/lib so its torch/openbabel/boost don't conflict
-# with the venv-managed torch and the system openbabel.
+# GNINA — curated bundle (statically linked binary + the CUDA 12 runtime it
+# still loads dynamically). Pulled directly from the gnina-source stage so
+# base-build (and therefore the `test` target) does not have to materialize it.
+# Invoked with LD_LIBRARY_PATH=/opt/gnina/lib so the bundle's CUDA runtime
+# doesn't conflict with the venv-managed torch.
 COPY --from=gnina-source /export /opt/gnina
 RUN chmod a+x /opt/gnina/bin/gnina
 
