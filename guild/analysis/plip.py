@@ -9,22 +9,22 @@ from typing import Dict, List, Optional
 import pandas as pd
 from plip.structure.preparation import PDBComplex
 
-from guild.constants.plip import (
+from guild.constants.interactions import (
     COMPLEX_PDB_SUFFIX,
-    PLIP_COMBINATION_ID,
-    PLIP_LIGAND_CHAIN,
-    PLIP_LIGAND_RESNAME,
-    PLIP_LIGAND_RESSEQ,
-    PLIP_N_HALOGEN,
-    PLIP_N_HBONDS,
-    PLIP_N_HYDROPHOBIC,
-    PLIP_N_METAL,
-    PLIP_N_PICATION,
-    PLIP_N_PISTACKING,
-    PLIP_N_SALTBRIDGES,
-    PLIP_N_UNIQUE_RESIDUES,
-    PLIP_N_WATERBRIDGES,
-    PLIP_TOTAL_INTERACTIONS,
+    INTERACTION_COMBINATION_ID,
+    LIGAND_CHAIN,
+    LIGAND_RESNAME,
+    LIGAND_RESSEQ,
+    N_HALOGEN,
+    N_HBONDS,
+    N_HYDROPHOBIC,
+    N_METAL,
+    N_PICATION,
+    N_PISTACKING,
+    N_SALTBRIDGES,
+    N_UNIQUE_RESIDUES,
+    N_WATERBRIDGES,
+    TOTAL_INTERACTIONS,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,9 +32,9 @@ logger = logging.getLogger(__name__)
 
 def analyze_protein_ligand_interactions(
     complex_pdb_path: str,
-    ligand_resname: str = PLIP_LIGAND_RESNAME,
-    ligand_chain: str = PLIP_LIGAND_CHAIN,
-    ligand_resseq: int = PLIP_LIGAND_RESSEQ,
+    ligand_resname: str = LIGAND_RESNAME,
+    ligand_chain: str = LIGAND_CHAIN,
+    ligand_resseq: int = LIGAND_RESSEQ,
 ) -> Optional[Dict]:
     """
     Analyze protein-ligand interactions using PLIP.
@@ -103,23 +103,23 @@ def analyze_protein_ligand_interactions(
 
         interaction_data = {
             # Hydrogen bonds
-            PLIP_N_HBONDS: len(all_hbonds),
+            N_HBONDS: len(all_hbonds),
             # Hydrophobic interactions
-            PLIP_N_HYDROPHOBIC: len(interactions.hydrophobic_contacts),
+            N_HYDROPHOBIC: len(interactions.hydrophobic_contacts),
             # Pi-stacking
-            PLIP_N_PISTACKING: len(interactions.pistacking),
+            N_PISTACKING: len(interactions.pistacking),
             # Pi-cation interactions
-            PLIP_N_PICATION: len(all_pication),
+            N_PICATION: len(all_pication),
             # Salt bridges
-            PLIP_N_SALTBRIDGES: len(all_saltbridges),
+            N_SALTBRIDGES: len(all_saltbridges),
             # Halogen bonds
-            PLIP_N_HALOGEN: len(interactions.halogen_bonds),
+            N_HALOGEN: len(interactions.halogen_bonds),
             # Water bridges
-            PLIP_N_WATERBRIDGES: len(interactions.water_bridges),
+            N_WATERBRIDGES: len(interactions.water_bridges),
             # Metal complexes
-            PLIP_N_METAL: len(interactions.metal_complexes),
+            N_METAL: len(interactions.metal_complexes),
             # Total interactions count
-            PLIP_TOTAL_INTERACTIONS: sum(
+            TOTAL_INTERACTIONS: sum(
                 [
                     len(all_hbonds),
                     len(interactions.hydrophobic_contacts),
@@ -144,10 +144,10 @@ def analyze_protein_ligand_interactions(
             + waterbridge_residues
             + metal_residues
         )
-        interaction_data[PLIP_N_UNIQUE_RESIDUES] = len(all_residues)
+        interaction_data[N_UNIQUE_RESIDUES] = len(all_residues)
 
         logger.info(
-            f"Successfully analyzed {complex_pdb_path}: {interaction_data[PLIP_TOTAL_INTERACTIONS]} total interactions"
+            f"Successfully analyzed {complex_pdb_path}: {interaction_data[TOTAL_INTERACTIONS]} total interactions"
         )
         return interaction_data
 
@@ -170,9 +170,9 @@ def analyze_protein_ligand_interactions(
 def analyze_batch_interactions(
     complex_pdb_paths: List[str],
     combination_ids: Optional[List[str]] = None,
-    ligand_resname: str = PLIP_LIGAND_RESNAME,
-    ligand_chain: str = PLIP_LIGAND_CHAIN,
-    ligand_resseq: int = PLIP_LIGAND_RESSEQ,
+    ligand_resname: str = LIGAND_RESNAME,
+    ligand_chain: str = LIGAND_CHAIN,
+    ligand_resseq: int = LIGAND_RESSEQ,
 ) -> pd.DataFrame:
     """
     Analyze multiple protein-ligand complexes and return results as DataFrame.
@@ -197,11 +197,11 @@ def analyze_batch_interactions(
         if interaction_data is not None:
             # Add combination ID if provided
             if combination_ids is not None and idx < len(combination_ids):
-                interaction_data[PLIP_COMBINATION_ID] = combination_ids[idx]
+                interaction_data[INTERACTION_COMBINATION_ID] = combination_ids[idx]
             else:
                 # Extract from filename
                 base_name = os.path.basename(complex_path).replace(COMPLEX_PDB_SUFFIX, "")
-                interaction_data[PLIP_COMBINATION_ID] = base_name
+                interaction_data[INTERACTION_COMBINATION_ID] = base_name
 
             results.append(interaction_data)
 
@@ -213,7 +213,7 @@ def analyze_batch_interactions(
     df = pd.DataFrame(results)
 
     # Reorder columns to put combination_id first
-    cols = [PLIP_COMBINATION_ID] + [col for col in df.columns if col != PLIP_COMBINATION_ID]
+    cols = [INTERACTION_COMBINATION_ID] + [col for col in df.columns if col != INTERACTION_COMBINATION_ID]
     df = df[cols]
 
     return df

@@ -74,21 +74,21 @@ from guild.constants.guild import (
     VINA_RESCORE_BOLTZ_PREFIX,
     VINA_RESCORE_DIFFDOCK_PREFIX,
 )
+from guild.constants.interactions import (
+    COMPLEX_PDB_SUFFIX,
+    INTERACTION_COMBINATION_ID,
+    INTERACTION_COUNT_COLUMNS,
+    INTERACTIONS_FILE,
+    LIGAND_CHAIN,
+    LIGAND_RESNAME,
+    LIGAND_RESSEQ,
+    N_UNIQUE_RESIDUES,
+    TOTAL_INTERACTIONS,
+)
 from guild.constants.karmadock import (
     KARMADOCK_DATA_FOLDER,
     KARMADOCK_GRAPHS_FOLDER,
     KARMADOCK_RESULTS_FOLDER,
-)
-from guild.constants.plip import (
-    COMPLEX_PDB_SUFFIX,
-    PLIP_COMBINATION_ID,
-    PLIP_INTERACTION_COUNT_COLUMNS,
-    PLIP_INTERACTIONS_FILE,
-    PLIP_LIGAND_CHAIN,
-    PLIP_LIGAND_RESNAME,
-    PLIP_LIGAND_RESSEQ,
-    PLIP_N_UNIQUE_RESIDUES,
-    PLIP_TOTAL_INTERACTIONS,
 )
 from guild.constants.system import PROJECTS_FOLDER, WORKING_DIR_PATH
 from guild.docking.boltz import (
@@ -1677,9 +1677,9 @@ class BulkRun:
                     batch_interactions = analyze_batch_interactions(
                         complex_pdb_paths=[x[0] for x in complex_metadata],
                         combination_ids=[f"{x[1]}_{x[2]}" for x in complex_metadata],
-                        ligand_resname=PLIP_LIGAND_RESNAME,
-                        ligand_chain=PLIP_LIGAND_CHAIN,
-                        ligand_resseq=PLIP_LIGAND_RESSEQ,
+                        ligand_resname=LIGAND_RESNAME,
+                        ligand_chain=LIGAND_CHAIN,
+                        ligand_resseq=LIGAND_RESSEQ,
                     )
                     if not batch_interactions.empty:
                         batch_interactions[PROTEIN_CONF_ID] = [x[1] for x in complex_metadata]
@@ -1720,9 +1720,9 @@ class BulkRun:
                     batch_interactions = analyze_batch_interactions(
                         complex_pdb_paths=complex_paths,
                         combination_ids=combination_ids,
-                        ligand_resname=PLIP_LIGAND_RESNAME,
-                        ligand_chain=PLIP_LIGAND_CHAIN,
-                        ligand_resseq=PLIP_LIGAND_RESSEQ,
+                        ligand_resname=LIGAND_RESNAME,
+                        ligand_chain=LIGAND_CHAIN,
+                        ligand_resseq=LIGAND_RESSEQ,
                     )
 
                     if not batch_interactions.empty:
@@ -1753,9 +1753,9 @@ class BulkRun:
                     batch_interactions = analyze_batch_interactions(
                         complex_pdb_paths=[x[0] for x in complex_metadata],
                         combination_ids=[f"{x[1]}_{x[2]}" for x in complex_metadata],
-                        ligand_resname=PLIP_LIGAND_RESNAME,
-                        ligand_chain=PLIP_LIGAND_CHAIN,
-                        ligand_resseq=PLIP_LIGAND_RESSEQ,
+                        ligand_resname=LIGAND_RESNAME,
+                        ligand_chain=LIGAND_CHAIN,
+                        ligand_resseq=LIGAND_RESSEQ,
                     )
                     if not batch_interactions.empty:
                         batch_interactions[PROTEIN_CONF_ID] = [x[1] for x in complex_metadata]
@@ -1784,9 +1784,9 @@ class BulkRun:
                     batch_interactions = analyze_batch_interactions(
                         complex_pdb_paths=[x[0] for x in complex_metadata],
                         combination_ids=[f"{x[1]}_{x[2]}" for x in complex_metadata],
-                        ligand_resname=PLIP_LIGAND_RESNAME,
-                        ligand_chain=PLIP_LIGAND_CHAIN,
-                        ligand_resseq=PLIP_LIGAND_RESSEQ,
+                        ligand_resname=LIGAND_RESNAME,
+                        ligand_chain=LIGAND_CHAIN,
+                        ligand_resseq=LIGAND_RESSEQ,
                     )
                     if not batch_interactions.empty:
                         batch_interactions[PROTEIN_CONF_ID] = [x[1] for x in complex_metadata]
@@ -1795,7 +1795,7 @@ class BulkRun:
                 else:
                     logger.info(f"No gnina complex PDB files found for {current_batch}")
 
-        interactions_path = f"{self.project_folder}/{PLIP_INTERACTIONS_FILE}"
+        interactions_path = f"{self.project_folder}/{INTERACTIONS_FILE}"
 
         if not all_interactions:
             # Contract: external consumers (e.g. host-side notebooks that read
@@ -1810,10 +1810,10 @@ class BulkRun:
             empty_cols = [
                 PROTEIN_CONF_ID,
                 SMILES,
-                PLIP_COMBINATION_ID,
-                *PLIP_INTERACTION_COUNT_COLUMNS,
-                PLIP_TOTAL_INTERACTIONS,
-                PLIP_N_UNIQUE_RESIDUES,
+                INTERACTION_COMBINATION_ID,
+                *INTERACTION_COUNT_COLUMNS,
+                TOTAL_INTERACTIONS,
+                N_UNIQUE_RESIDUES,
             ]
             self.interactions_df = pd.DataFrame(columns=empty_cols)
             self.interactions_df.to_csv(interactions_path, sep="\t", index=False)
@@ -1832,7 +1832,7 @@ class BulkRun:
         cols_order = [PROTEIN_CONF_ID, SMILES] + [
             col
             for col in self.interactions_df.columns
-            if col not in [PROTEIN_CONF_ID, SMILES, PLIP_COMBINATION_ID]
+            if col not in [PROTEIN_CONF_ID, SMILES, INTERACTION_COMBINATION_ID]
         ]
         df_to_save = self.interactions_df[cols_order]
 
@@ -1845,10 +1845,10 @@ class BulkRun:
             f"Interaction analysis complete: {len(self.interactions_df)} complexes analyzed"
         )
         logger.info(
-            f"Average interactions per complex: {self.interactions_df[PLIP_TOTAL_INTERACTIONS].mean():.2f}"
+            f"Average interactions per complex: {self.interactions_df[TOTAL_INTERACTIONS].mean():.2f}"
         )
         logger.info(
-            f"Average unique residues per complex: {self.interactions_df[PLIP_N_UNIQUE_RESIDUES].mean():.2f}"
+            f"Average unique residues per complex: {self.interactions_df[N_UNIQUE_RESIDUES].mean():.2f}"
         )
 
         return self.interactions_df
