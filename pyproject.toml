@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "guild"
-version = "1.1.5"
+version = "1.2.0"
 description = "A unified framework for multi-method molecular docking and scoring"
 license = "MIT"
 authors = [
