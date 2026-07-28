@@ -46,6 +46,7 @@ NO_DECOYS       ?=
 BOX             ?=
 N_WORKERS       ?=
 PASSWD_FILE     ?= /tmp/guild_passwd
+VINA_EXHAUSTIVENESS ?=
 
 # GPU toggle. Default 1 (enabled). Set USE_GPU= (empty) to drop
 # `--gpus all --shm-size=8g` from docker run AND forward `--no-gpu` to
@@ -60,6 +61,35 @@ _NO_GPU_FLAG     = $(if $(USE_GPU),,--no-gpu)
 # docking method requested (otherwise BulkRun downgrades to pdbqt with a warning).
 GNINA_INPUT_MODE ?=
 _GNINA_INPUT_MODE_FLAG = $(if $(GNINA_INPUT_MODE),--gnina-input-mode $(GNINA_INPUT_MODE),)
+
+# User-supplied starting pose directory. Empty (default) → omit the flag and the
+# SMILES→3D ligand-prep path is used. When set, every ligand_id in the
+# combinations CSV must have a matching <ligand_id>.sdf in the directory;
+# BulkRun fails fast otherwise. Use with POSE_MODE=local (refine the supplied
+# pose) or POSE_MODE=score (evaluate without movement); the default
+# POSE_MODE=dock is rejected when POSES_DIR is set, because Vina/gnina's global
+# search ignores the supplied coordinates.
+POSES_DIR ?=
+_POSES_DIR_FLAG = $(if $(POSES_DIR),--poses-dir $(POSES_DIR),)
+
+# Pose mode for runs that supply POSES_DIR. Empty (default) → omit the flag and
+# run_guild.py defaults to 'dock' (which only makes sense without POSES_DIR).
+# Valid values: dock | local | score.
+POSE_MODE ?=
+_POSE_MODE_FLAG = $(if $(POSE_MODE),--pose-mode $(POSE_MODE),)
+
+# Flexible receptor docking (Vina + gnina only). Empty string (default) → rigid.
+# Set FLEXIBLE_DOCKING=1 to allow side chains inside the docking box to move
+# during the search.
+FLEXIBLE_DOCKING ?=
+_FLEXIBLE_DOCKING_FLAG = $(if $(FLEXIBLE_DOCKING),--flexible-docking,)
+
+# Explicit flexible residues for gnina (gnina-only). Empty (default) → omit.
+# Set to a gnina --flexres spec, e.g. FLEXRES_GNINA="A:88,91" to pin specific
+# residues as flexible regardless of box geometry. Takes priority over
+# FLEXIBLE_DOCKING's automatic selection for gnina; Vina is unaffected.
+FLEXRES_GNINA ?=
+_FLEXRES_GNINA_FLAG = $(if $(FLEXRES_GNINA),--flexres-gnina $(FLEXRES_GNINA),)
 
 # Internal docker run flags reused across targets.
 # Mounts a generated /etc/passwd so pwd.getpwuid() works for the host UID
@@ -88,7 +118,8 @@ _DECOYS_FLAG         = $(if $(DECOYS),--decoys $(DECOYS),)
 _NO_DECOYS_FLAG      = $(if $(NO_DECOYS),--no-decoys,)
 _BOX_FLAG            = $(if $(BOX),--box $(BOX),)
 _N_WORKERS_FLAG      = $(if $(N_WORKERS),--n-workers $(N_WORKERS),)
-_OPTIONAL_FLAGS = $(_CLEAN_FLAG) $(_KNOWN_BINDERS_FLAG) $(_HEAD_FLAG) $(_DECOYS_FLAG) $(_NO_DECOYS_FLAG) $(_BOX_FLAG) $(_N_WORKERS_FLAG) $(_NO_GPU_FLAG) $(_GNINA_INPUT_MODE_FLAG)
+_VINA_EXHAUSTIVENESS_FLAG = $(if $(VINA_EXHAUSTIVENESS),--vina-exhaustiveness $(VINA_EXHAUSTIVENESS),)
+_OPTIONAL_FLAGS = $(_CLEAN_FLAG) $(_KNOWN_BINDERS_FLAG) $(_HEAD_FLAG) $(_DECOYS_FLAG) $(_NO_DECOYS_FLAG) $(_BOX_FLAG) $(_N_WORKERS_FLAG) $(_NO_GPU_FLAG) $(_GNINA_INPUT_MODE_FLAG) $(_FLEXIBLE_DOCKING_FLAG) $(_FLEXRES_GNINA_FLAG) $(_VINA_EXHAUSTIVENESS_FLAG) $(_POSES_DIR_FLAG) $(_POSE_MODE_FLAG)
 
 # Generate an /etc/passwd that includes the container's original entries plus
 # the host user.  This fixes pwd.getpwuid() failures for LDAP/SSSD users
