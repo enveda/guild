@@ -14,7 +14,11 @@ from concurrent.futures.process import BrokenProcessPool
 import pandas as pd
 from tqdm import tqdm
 
-from guild.analysis.plip import analyze_batch_interactions
+from guild.analysis.plip import (
+    analyze_batch_interactions,
+    get_batch_detailed_interactions,
+)
+from guild.analysis.prolif import get_batch_prolif_interactions
 from guild.constants.bulk import (
     ALL_COMBINATIONS_FILE,
     # Batch dictionary keys
@@ -45,8 +49,11 @@ from guild.constants.guild import (
     BOLTZ_FOLDER,
     BOLTZ_PREFIX,
     BOX_LOCATION,
+    COVALENT_LIG_SMARTS,
+    COVALENT_REC_ATOM,
     DIFFDOCK_FOLDER,
     DIFFDOCK_PREFIX,
+    GNINA_FLEXRES,
     GNINA_FOLDER,
     GNINA_PREFIX,
     KARMADOCK_FOLDER,
@@ -76,8 +83,10 @@ from guild.constants.guild import (
 )
 from guild.constants.interactions import (
     COMPLEX_PDB_SUFFIX,
+    DETAIL_COLUMNS,
     INTERACTION_COMBINATION_ID,
     INTERACTION_COUNT_COLUMNS,
+    INTERACTION_DETAILS_FILE,
     INTERACTIONS_FILE,
     LIGAND_CHAIN,
     LIGAND_RESNAME,
@@ -89,6 +98,11 @@ from guild.constants.karmadock import (
     KARMADOCK_DATA_FOLDER,
     KARMADOCK_GRAPHS_FOLDER,
     KARMADOCK_RESULTS_FOLDER,
+)
+from guild.constants.poses import (
+    DEFAULT_POSE_MODE,
+    POSE_MODE_DOCK,
+    POSE_MODES,
 )
 from guild.constants.system import PROJECTS_FOLDER, WORKING_DIR_PATH
 from guild.docking.boltz import (
@@ -121,6 +135,7 @@ from guild.tools.bulk import (
     identify_previously_ran_combinations,
     kickstart_batch_dictionary,
 )
+from guild.tools.poses import _resolve_pose_path, _validate_poses_dir
 from guild.tools.preparation import _normalize_chain_list, clean_smiles
 from guild.tools.protein_sequence import (
     get_original_sequence_dictionary,
@@ -156,6 +171,45 @@ def _row_box_location(row):
     return value or None
 
 
+def _row_covalent(row):
+    """
+    Extract the covalent-docking spec from a combinations-table row.
+
+    Returns ``(covalent_rec_atom, covalent_lig_smarts)`` — both strings, or
+    ``(None, None)`` when either column is absent / missing / empty. gnina runs
+    covalent docking only when *both* are present; otherwise normal docking.
+    """
+
+    def _clean(col):
+        if col not in row.index:
+            return None
+        value = row[col]
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return None
+        value = str(value).strip()
+        return value or None
+
+    return _clean(COVALENT_REC_ATOM), _clean(COVALENT_LIG_SMARTS)
+
+
+def _row_flexres_gnina(row):
+    """
+    Extract the per-row gnina flexible-residue spec from a combinations-table row.
+
+    Returns the ``gnina_flexres`` column value as a stripped string, or ``None``
+    when the column is absent / missing / empty.  The caller is responsible for
+    falling back to the project-level ``BulkRun.flexres_gnina`` when this returns
+    ``None``.
+    """
+    if GNINA_FLEXRES not in row.index:
+        return None
+    value = row[GNINA_FLEXRES]
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    value = str(value).strip()
+    return value or None
+
+
 class BulkRun:
     def __init__(
         self,
@@ -171,31 +225,60 @@ class BulkRun:
         chembl_version="chembl_36",
         use_gpu=True,
         n_workers=None,
+        vina_exhaustiveness=None,
         predict_binding_pocket=False,
         gnina_input_mode="pdbqt",
+        poses_dir=None,
+        pose_mode=DEFAULT_POSE_MODE,
+        flexible_docking: bool = False,
+        flexres_gnina: str = None,
     ):
         """
-        BulkRun class for running multiple docking simulations and performing guild scoring.
-        :param input_table: Table containing the protein path, the ligand SMILES and name.
-        :param project_name: Name of the project.
-        :param methods_to_run: List of methods to run for docking simulations.
-        :param batch_size: Number of combinations to run in a single batch.
-        :param decoys: Path to the decoy file.
-        :param use_decoys: Whether to use decoys.
-        :param use_known_binders: Whether to use known binders.
-        :param min_mol_wt: Minimum molecular weight for known binders.
-        :param max_mol_wt: Maximum molecular weight for known binders.
-        :param chembl_version: ChEMBL version to use for known binders.
-        :param use_gpu: Use GPU.
-        :param n_workers: Number of parallel workers for multiprocessing. If None, uses CPU count.
-        :param predict_binding_pocket: Use P2Rank for binding site prediction instead of original ligand location.
-        :param gnina_input_mode: ``"pdbqt"`` (default — preserves current
-            behaviour) or ``"sdf"``. When ``"sdf"`` AND gnina is the sole
-            docking method requested (no Vina or Vina-rescore co-running),
-            OpenBabel PDBQT prep is skipped and gnina runs directly on the
-            RDKit SDF + cleaned PDB. If ``"sdf"`` is requested alongside
-            Vina/Vina-rescore, this resolves back to ``"pdbqt"`` and a
-            warning is logged — see the constructor body for the rule.
+                BulkRun class for running multiple docking simulations and performing guild scoring.
+                :param input_table: Table containing the protein path, the ligand SMILES and name.
+                :param project_name: Name of the project.
+                :param methods_to_run: List of methods to run for docking simulations.
+                :param batch_size: Number of combinations to run in a single batch.
+                :param decoys: Path to the decoy file.
+                :param use_decoys: Whether to use decoys.
+                :param use_known_binders: Whether to use known binders.
+                :param min_mol_wt: Minimum molecular weight for known binders.
+                :param max_mol_wt: Maximum molecular weight for known binders.
+                :param chembl_version: ChEMBL version to use for known binders.
+                :param use_gpu: Use GPU.
+                :param n_workers: Number of parallel workers for multiprocessing. If None, uses CPU count.
+                :param vina_exhaustiveness: Vina exhaustiveness parameter. If None, uses VINA_DEFAULT_EXHAUSTIVENESS.
+                :param predict_binding_pocket: Use P2Rank for binding site prediction instead of original ligand location.
+                :param gnina_input_mode: ``"pdbqt"`` (default — preserves current
+                    behaviour) or ``"sdf"``. When ``"sdf"`` AND gnina is the sole
+                    docking method requested (no Vina or Vina-rescore co-running),
+                    OpenBabel PDBQT prep is skipped and gnina runs directly on the
+                    RDKit SDF + cleaned PDB. If ``"sdf"`` is requested alongside
+                    Vina/Vina-rescore, this resolves back to ``"pdbqt"`` and a
+                    warning is logged — see the constructor body for the rule.
+                :param poses_dir: Optional path to a directory of user-supplied
+                    ligand poses (one ``<ligand_id>.sdf`` per ligand). When set,
+                    every ``ligand_id`` in ``input_table`` must have a matching
+                    file in the directory; otherwise ``__init__`` raises
+                    ``FileNotFoundError`` listing all missing IDs *before* any
+                    batch folders are created. When ``None``, every code path is
+                    byte-for-byte identical to the SMILES→3D flow.
+                :param pose_mode: One of ``"dock"`` (default; stochastic global
+                    search — supplied pose has *no effect* on Vina's
+                    search-start coordinates), ``"local"`` (Vina.optimize() /
+                    gnina --local_only; refine the supplied pose), or
+                    ``"score"`` (Vina.score() / gnina --score_only; evaluate the
+                    supplied pose). Setting ``poses_dir`` with the default
+                    ``"dock"`` raises ``ValueError`` — supplying a pose without
+                    ``local``/``score`` does no useful work on Vina/gnina (their
+                    global search ignores starting coordinates) and would just
+                    burn ligand-prep cycles. Callers must opt in explicitly.
+                :param flexible_docking: Allow receptor side chains inside the docking box to move
+                    during Vina and gnina searches. Boltz, DiffDock, and KarmaDock are unaffected.
+        :param flexres_gnina: gnina-only.  Explicit flexible-residue spec passed directly as
+            gnina's ``--flexres`` flag (e.g. ``"A:88,91"`` or ``"A:88,91_B:7"``).  Applied
+            to every row; when set it takes precedence over the automatic box/flexdist
+            selection that ``flexible_docking`` uses.
         """
 
         # Pathing variables
@@ -212,10 +295,45 @@ class BulkRun:
         self.use_known_binders = use_known_binders
         self.use_gpu = use_gpu
         self.n_workers = n_workers if n_workers is not None else mp.cpu_count()
+        self.vina_exhaustiveness = vina_exhaustiveness
         self.predict_binding_pocket = predict_binding_pocket
 
         if "_" in project_name:
             raise ValueError("Project name cannot contain underscores!")
+
+        # ── User-supplied pose validation (fail fast) ──────────────────
+        # Run *before* _set_paths so no project folders are created when
+        # the user's configuration is broken. See _resolve_pose_path /
+        # _validate_poses_dir module-level docstring above.
+        if pose_mode not in POSE_MODES:
+            raise ValueError(f"Invalid pose_mode={pose_mode!r}; expected one of {POSE_MODES}.")
+        if poses_dir is not None:
+            if pose_mode == POSE_MODE_DOCK:
+                raise ValueError(
+                    "poses_dir is set but pose_mode='dock'. Supplying a "
+                    "starting pose has no effect on Vina/gnina's "
+                    "stochastic global search, so this combination would "
+                    "do no useful work. Pass pose_mode='local' "
+                    "(refine the pose) or pose_mode='score' (evaluate "
+                    "without movement)."
+                )
+            if use_known_binders or use_decoys:
+                raise ValueError(
+                    "poses_dir is incompatible with use_known_binders / "
+                    "use_decoys: those expansions add ChEMBL ligands that "
+                    "the caller cannot have prepared poses for. Disable "
+                    "both (set NO_DECOYS=1, omit KNOWN_BINDERS) when "
+                    "supplying POSES_DIR."
+                )
+            _validate_poses_dir(poses_dir, input_table)
+        elif pose_mode != POSE_MODE_DOCK:
+            raise ValueError(
+                f"pose_mode={pose_mode!r} requires poses_dir to be set "
+                "(local/score modes operate on a user-supplied starting "
+                "pose)."
+            )
+        self.poses_dir = poses_dir
+        self.pose_mode = pose_mode
 
         self._set_paths(decoys)
 
@@ -270,7 +388,26 @@ class BulkRun:
                 )
             self.gnina_input_mode = "pdbqt"
 
+        self.flexible_docking = flexible_docking
+        self.flexres_gnina = flexres_gnina
         logger.info(f"Methods to run: {self.methods_to_run}")
+
+        # POSES_DIR is honoured by Vina and gnina only. Any other
+        # method in methods_to_run silently ignores the supplied poses
+        # (Boltz/DiffDock have no starting-pose API; the
+        # vina_rescore_* tracks rescore engine-predicted poses, not
+        # the user pose). Log one warning per ignoring method so the
+        # caller knows those tracks won't honour POSES_DIR — without
+        # affecting behaviour.
+        if self.poses_dir is not None:
+            _POSE_AWARE = {VINA_PREFIX, GNINA_PREFIX}
+            for method in self.methods_to_run:
+                if method not in _POSE_AWARE:
+                    logger.warning(
+                        f"POSES_DIR is set but '{method}' ignores "
+                        "user-supplied starting poses. That track will run "
+                        "as usual; only vina and gnina honour pose_mode."
+                    )
 
         logger.info("BulkRun object initialized")
 
@@ -450,6 +587,10 @@ class BulkRun:
                 predict_binding_pocket=task_params.get("predict_binding_pocket", False),
                 box_location=task_params.get("box_location"),
                 gnina_input_mode=task_params.get("gnina_input_mode", "pdbqt"),
+                pose_path=task_params.get("pose_path"),
+                pose_mode=task_params.get("pose_mode", DEFAULT_POSE_MODE),
+                vina_exhaustiveness=task_params.get("vina_exhaustiveness"),
+                flexible_docking=task_params.get("flexible_docking", False),
             )
             guild_object.run_autodock_vina()
             return task_params["ligand_idx"], task_params["protein_idx"]
@@ -486,6 +627,12 @@ class BulkRun:
                 predict_binding_pocket=task_params.get("predict_binding_pocket", False),
                 box_location=task_params.get("box_location"),
                 gnina_input_mode=task_params.get("gnina_input_mode", "pdbqt"),
+                pose_path=task_params.get("pose_path"),
+                pose_mode=task_params.get("pose_mode", DEFAULT_POSE_MODE),
+                flexible_docking=task_params.get("flexible_docking", False),
+                flexres_gnina=task_params.get("flexres_gnina"),
+                covalent_rec_atom=task_params.get("covalent_rec_atom"),
+                covalent_lig_smarts=task_params.get("covalent_lig_smarts"),
             )
             guild_object.run_gnina()
             return task_params["ligand_idx"], task_params["protein_idx"]
@@ -518,6 +665,8 @@ class BulkRun:
                 predict_binding_pocket=batch_params.get("predict_binding_pocket", False),
                 box_location=batch_params.get("box_location"),
                 gnina_input_mode=batch_params.get("gnina_input_mode", "pdbqt"),
+                pose_path=batch_params.get("pose_path"),
+                pose_mode=batch_params.get("pose_mode", DEFAULT_POSE_MODE),
             )
             return batch_params["batch_name"]
         except Exception as e:
@@ -547,9 +696,7 @@ class BulkRun:
 
             # This will download the necessary raw pdb files beforehand
 
-            combinations_table = self.batched_dictionary[current_batch][
-                COMBINATIONS_TABLE_KEY
-            ]
+            combinations_table = self.batched_dictionary[current_batch][COMBINATIONS_TABLE_KEY]
             # KarmaDock has no per-ligand worker downstream (deploy_karmadock
             # runs once per batch on an already-staged data dir), so the prep
             # pool must Guild-init every combination.
@@ -589,6 +736,8 @@ class BulkRun:
                         "predict_binding_pocket": self.predict_binding_pocket,
                         "box_location": _row_box_location(current_row),
                         "gnina_input_mode": self.gnina_input_mode,
+                        "pose_path": _resolve_pose_path(self.poses_dir, current_row[LIGAND_ID]),
+                        "pose_mode": self.pose_mode,
                     }
                 )
 
@@ -648,14 +797,16 @@ class BulkRun:
             # gives a one-line-per-batch overview; the per-batch log opens with
             # the same line so it's easy to align timing between the two.
             self._log_progress(
-                main_progress_log, batch_progress_log,
+                main_progress_log,
+                batch_progress_log,
                 message=f"Starting {current_batch}",
             )
 
             if len(self.batched_dictionary[current_batch][COMBINATIONS_TO_RUN_KEY]) == 0:
                 logger.info(f"Skipping {current_batch} - no new combinations to dock")
                 self._log_progress(
-                    main_progress_log, batch_progress_log,
+                    main_progress_log,
+                    batch_progress_log,
                     message=f"Skipped {current_batch} - no new combinations",
                 )
                 continue
@@ -667,7 +818,8 @@ class BulkRun:
                 runner(current_batch, current_batch_folder)
 
             self._log_progress(
-                main_progress_log, batch_progress_log,
+                main_progress_log,
+                batch_progress_log,
                 message=f"Completed {current_batch}",
             )
 
@@ -678,16 +830,13 @@ class BulkRun:
         self._log_progress(batch_progress_log, message="Starting Boltz")
 
         # Boltz is applied in the whole batch at once, so we need to iterate over the unique protein configuration ids
-        combinations_table_variable = self.batched_dictionary[current_batch][
-            COMBINATIONS_TABLE_KEY
-        ]
+        combinations_table_variable = self.batched_dictionary[current_batch][COMBINATIONS_TABLE_KEY]
         for unique_protein_configuration_id in combinations_table_variable[
             PROTEIN_CONF_ID
         ].unique():
 
             current_protein_combinations = combinations_table_variable[
-                combinations_table_variable[PROTEIN_CONF_ID]
-                == unique_protein_configuration_id
+                combinations_table_variable[PROTEIN_CONF_ID] == unique_protein_configuration_id
             ]
             # ``protein_chain`` may name one chain ("A") or several ("A,B") for a
             # pocket that spans multiple chains. Keep only chains actually present
@@ -696,9 +845,7 @@ class BulkRun:
                 current_protein_combinations[PROTEIN_CHAIN].values[0]
             )
             current_protein_path = current_protein_combinations[PROTEIN_PATH].values[0]
-            original_sequence_dictionary = get_original_sequence_dictionary(
-                current_protein_path
-            )
+            original_sequence_dictionary = get_original_sequence_dictionary(current_protein_path)
             current_protein_chains = [
                 c for c in current_protein_chains if c in original_sequence_dictionary
             ]
@@ -733,8 +880,7 @@ class BulkRun:
             _box_path = None
             if BOX_LOCATION in current_protein_combinations.columns:
                 _box_values = [
-                    _row_box_location(r)
-                    for _, r in current_protein_combinations.iterrows()
+                    _row_box_location(r) for _, r in current_protein_combinations.iterrows()
                 ]
                 _non_empty_box_values = [b for b in _box_values if b]
                 _unique_boxes = set(_non_empty_box_values)
@@ -771,9 +917,7 @@ class BulkRun:
 
             if not pocket_contacts:
                 _orig_lig = current_protein_combinations[ORIGINAL_LIGAND].values[0]
-                _orig_lig_chain = current_protein_combinations[
-                    ORIGINAL_LIGAND_CHAIN
-                ].values[0]
+                _orig_lig_chain = current_protein_combinations[ORIGINAL_LIGAND_CHAIN].values[0]
                 if (
                     _orig_lig
                     and _orig_lig_chain
@@ -790,9 +934,9 @@ class BulkRun:
 
             # Run one Boltz job per ligand to avoid O(N²) attention memory growth
             for current_ligand_id in current_protein_unique_ligands_ids:
-                ligand_smiles = self.batched_dictionary[current_batch][
-                    SMILES_NAMES_DICTIONARY_KEY
-                ][current_ligand_id]
+                ligand_smiles = self.batched_dictionary[current_batch][SMILES_NAMES_DICTIONARY_KEY][
+                    current_ligand_id
+                ]
                 run_id = f"{unique_protein_configuration_id}_{current_ligand_id}"
 
                 # Saving time by skipping already run Boltz dockings - checking for one of the expected output files.
@@ -836,9 +980,7 @@ class BulkRun:
                 # Per-combination subprocess log path. Boltz can exit 0 and
                 # still produce an empty manifest, so we keep the transcript
                 # regardless of success/failure for downstream troubleshooting.
-                boltz_subprocess_log = (
-                    f"{boltz_out_dir}/{run_id}.subprocess.log"
-                )
+                boltz_subprocess_log = f"{boltz_out_dir}/{run_id}.subprocess.log"
 
                 deploy_boltz(
                     yaml_file,
@@ -926,7 +1068,6 @@ class BulkRun:
 
         self._log_progress(batch_progress_log, message="Completed Boltz")
 
-
     def _run_vina_for_batch(self, current_batch, current_batch_folder):
         """Run Vina docking for the batch, then generate complex PDBs."""
         batch_progress_log = f"{current_batch_folder}/{OUTPUT_LOG_FILE}"
@@ -962,6 +1103,10 @@ class BulkRun:
                         "predict_binding_pocket": self.predict_binding_pocket,
                         "box_location": _row_box_location(current_row),
                         "gnina_input_mode": self.gnina_input_mode,
+                        "pose_path": _resolve_pose_path(self.poses_dir, current_row[LIGAND_ID]),
+                        "pose_mode": self.pose_mode,
+                        "vina_exhaustiveness": self.vina_exhaustiveness,
+                        "flexible_docking": self.flexible_docking,
                     }
                 )
 
@@ -986,20 +1131,13 @@ class BulkRun:
                 with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
                     future_to_task = {}
                     for idx, task in enumerate(remaining):
-                        future = executor.submit(
-                            self._run_single_vina_docking, task
-                        )
+                        future = executor.submit(self._run_single_vina_docking, task)
                         future_to_task[future] = (idx, task)
 
-                    desc_suffix = (
-                        f" (restart {pool_restarts})" if pool_restarts else ""
-                    )
+                    desc_suffix = f" (restart {pool_restarts})" if pool_restarts else ""
                     for future in tqdm(
                         as_completed(future_to_task, timeout=None),
-                        desc=(
-                            f"AutoDock Vina for batch: {current_batch}"
-                            f"{desc_suffix}"
-                        ),
+                        desc=(f"AutoDock Vina for batch: {current_batch}" f"{desc_suffix}"),
                         total=len(future_to_task),
                     ):
                         idx, task = future_to_task[future]
@@ -1040,9 +1178,7 @@ class BulkRun:
                 if not pool_broken:
                     break
 
-                not_succeeded = sorted(
-                    set(range(len(remaining))) - succeeded_indices
-                )
+                not_succeeded = sorted(set(range(len(remaining))) - succeeded_indices)
                 if not not_succeeded:
                     break
                 crasher = remaining[not_succeeded[0]]
@@ -1082,7 +1218,6 @@ class BulkRun:
 
         self._log_progress(batch_progress_log, message="Completed Vina")
 
-
     def _run_gnina_for_batch(self, current_batch, current_batch_folder):
         """Run gnina docking for the batch, then generate complex PDBs."""
         batch_progress_log = f"{current_batch_folder}/{OUTPUT_LOG_FILE}"
@@ -1120,6 +1255,12 @@ class BulkRun:
                         "predict_binding_pocket": self.predict_binding_pocket,
                         "box_location": _row_box_location(current_row),
                         "gnina_input_mode": self.gnina_input_mode,
+                        "pose_path": _resolve_pose_path(self.poses_dir, current_row[LIGAND_ID]),
+                        "pose_mode": self.pose_mode,
+                        "flexible_docking": self.flexible_docking,
+                        "flexres_gnina": _row_flexres_gnina(current_row) or self.flexres_gnina,
+                        "covalent_rec_atom": _row_covalent(current_row)[0],
+                        "covalent_lig_smarts": _row_covalent(current_row)[1],
                     }
                 )
 
@@ -1142,20 +1283,13 @@ class BulkRun:
                 with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
                     future_to_task = {}
                     for idx, task in enumerate(remaining):
-                        future = executor.submit(
-                            self._run_single_gnina_docking, task
-                        )
+                        future = executor.submit(self._run_single_gnina_docking, task)
                         future_to_task[future] = (idx, task)
 
-                    desc_suffix = (
-                        f" (restart {pool_restarts})" if pool_restarts else ""
-                    )
+                    desc_suffix = f" (restart {pool_restarts})" if pool_restarts else ""
                     for future in tqdm(
                         as_completed(future_to_task, timeout=None),
-                        desc=(
-                            f"gnina for batch: {current_batch}"
-                            f"{desc_suffix}"
-                        ),
+                        desc=(f"gnina for batch: {current_batch}" f"{desc_suffix}"),
                         total=len(future_to_task),
                     ):
                         idx, task = future_to_task[future]
@@ -1207,9 +1341,7 @@ class BulkRun:
                 if not pool_broken:
                     break
 
-                not_succeeded = sorted(
-                    set(range(len(remaining))) - succeeded_indices
-                )
+                not_succeeded = sorted(set(range(len(remaining))) - succeeded_indices)
                 if not not_succeeded:
                     break
                 crasher = remaining[not_succeeded[0]]
@@ -1254,7 +1386,6 @@ class BulkRun:
 
         self._log_progress(batch_progress_log, message="Completed gnina")
 
-
     def _run_karmadock_for_batch(self, current_batch, current_batch_folder):
         """Run KarmaDock for the batch (single-shot, batch-level)."""
         batch_progress_log = f"{current_batch_folder}/{OUTPUT_LOG_FILE}"
@@ -1287,7 +1418,6 @@ class BulkRun:
 
         self._log_progress(batch_progress_log, message="Completed KarmaDock")
 
-
     def _run_diffdock_for_batch(self, current_batch, current_batch_folder):
         """Run DiffDock for the batch. Generates complex PDBs on resume, then docks."""
         batch_progress_log = f"{current_batch_folder}/{OUTPUT_LOG_FILE}"
@@ -1300,15 +1430,11 @@ class BulkRun:
             DIFFDOCK_RESULTS_FOLDER,
         )
         if os.path.isdir(diffdock_results_dir):
-            logger.info(
-                f"Generating complex PDB files for DiffDock results in {current_batch}"
-            )
+            logger.info(f"Generating complex PDB files for DiffDock results in {current_batch}")
             generate_diffdock_complex_pdbs(self.batched_dictionary[current_batch])
 
         batch_csv = f"{current_batch_folder}/{DIFFDOCK_COMBINATIONS_FILE}"
-        batch_results_dir = (
-            f"{current_batch_folder}/{DIFFDOCK_FOLDER}/{DIFFDOCK_RESULTS_FOLDER}"
-        )
+        batch_results_dir = f"{current_batch_folder}/{DIFFDOCK_FOLDER}/{DIFFDOCK_RESULTS_FOLDER}"
 
         # DiffDock writes rank{N}_confidence-{score}.sdf files into
         # batch_results_dir/{protein_conf_id}_{ligand_id}/. A batch is
@@ -1317,9 +1443,7 @@ class BulkRun:
         # an interrupted run leaves per-combo subfolders that are empty
         # (or absent), and the next run would otherwise skip DiffDock
         # and produce all-NaN scores downstream.
-        combinations_df = self.batched_dictionary[current_batch][
-            COMBINATIONS_TABLE_KEY
-        ]
+        combinations_df = self.batched_dictionary[current_batch][COMBINATIONS_TABLE_KEY]
 
         missing = []
         for _, row in combinations_df.iterrows():
@@ -1328,8 +1452,7 @@ class BulkRun:
                 f"{row[PROTEIN_CONF_ID]}_{row[LIGAND_ID]}",
             )
             has_pose = os.path.isdir(combo_dir) and any(
-                "_confidence" in fname and fname.endswith(".sdf")
-                for fname in os.listdir(combo_dir)
+                "_confidence" in fname and fname.endswith(".sdf") for fname in os.listdir(combo_dir)
             )
             if not has_pose:
                 missing.append((row[PROTEIN_CONF_ID], row[LIGAND_ID]))
@@ -1379,9 +1502,7 @@ class BulkRun:
             # Re-check which combos still lack a docked pose after the re-run
             # and surface them as explicit failures in both progress logs.
             for protein_conf_id, ligand_id in missing:
-                combo_dir = os.path.join(
-                    batch_results_dir, f"{protein_conf_id}_{ligand_id}"
-                )
+                combo_dir = os.path.join(batch_results_dir, f"{protein_conf_id}_{ligand_id}")
                 still_missing = not (
                     os.path.isdir(combo_dir)
                     and any(
@@ -1401,10 +1522,9 @@ class BulkRun:
 
         self._log_progress(batch_progress_log, message="Completed DiffDock")
 
-
     def _compute_global_ranks_per_protein(self, all_raw_scores):
         """
-        Compute ranks and rank percentile scores PER PROTEIN across ALL data (all batches).
+        Compute ranks and rank percentile scores PER PROTEIN across ALL batches.
         This ensures rankings are consistent across batches - all ligands for a given protein
         are ranked together, not separately per batch.
 
@@ -1454,9 +1574,7 @@ class BulkRun:
             )
 
         if VINA_RESCORE_BOLTZ_PREFIX in self.methods_to_run:
-            docked_methods.append(
-                vina_rescore_boltz_guild_scoring(self.batched_dictionary[batch])
-            )
+            docked_methods.append(vina_rescore_boltz_guild_scoring(self.batched_dictionary[batch]))
 
         if BOLTZ_PREFIX in self.methods_to_run:
             docked_methods.append(boltz_guild_scoring(self.batched_dictionary[batch]))
@@ -1536,9 +1654,10 @@ class BulkRun:
         # Ensure ligand category is available before scoring.
         # Key the lookup on ligand_id (authoritative per-row category from the
         # combinations table), NOT on SMILES. The SMILES-keyed dictionary both
-        # (a) loses the per-row category when two ligands share a SMILES, and
-        # (b) silently yields "unknown" whenever an upstream key mishap leaves
-        # SMILES itself as "unknown".
+        # (a) loses the per-row category when two ligands share a SMILES (see
+        # the SMILES_TYPE_DICTIONARY caveat in CLAUDE.md), and (b) silently
+        # yields "unknown" whenever an upstream key mishap leaves SMILES itself
+        # as "unknown".
         category_by_ligand = dict(
             zip(
                 self.all_combinations_table[LIGAND_ID],
@@ -1554,28 +1673,25 @@ class BulkRun:
         # Collapse any duplicate COMBINATION_ID rows by *coalescing* columns
         # (first non-null per column) rather than keeping a single row. Within a
         # batch the per-method outer-merge already yields one row per
-        # combination; coalescing protects against any concatenation that pairs
-        # rows carrying a complementary set of method-score columns, merging them
-        # instead of letting one row win and dropping the other's scores.
-        all_raw_scores = (
-            all_raw_scores
-            .groupby(COMBINATION_ID, as_index=False, sort=False)
-            .first()
-        )
+        # combination, but concatenating across batches can produce rows for
+        # the same combination carrying a complementary set of method-score
+        # columns; coalescing merges them instead of letting one row win and
+        # dropping the other's scores.
+        all_raw_scores = all_raw_scores.groupby(COMBINATION_ID, as_index=False, sort=False).first()
 
-        # Step 2: Compute ranks PER PROTEIN across ALL data
+        # Step 3: Compute ranks PER PROTEIN across ALL data
         logger.info(
             f"Computing global ranks per protein for {all_raw_scores.shape[0]} total combinations"
         )
         self.rp_scores_df = self._compute_global_ranks_per_protein(all_raw_scores)
 
-        # Step 3: Add ligand category
+        # Step 4: Add ligand category
         if LIGAND_CATEGORY not in self.rp_scores_df.columns:
             self.rp_scores_df[LIGAND_CATEGORY] = (
                 self.rp_scores_df[LIGAND_ID].map(category_by_ligand).fillna("unknown")
             )
 
-        # Step 4: Save results
+        # Step 5: Save results
         self.rp_scores_df.to_csv(
             self.rp_scores_path,
             index=False,
@@ -1618,9 +1734,7 @@ class BulkRun:
             self.rp_scores_df.copy()
         self.unpack_dictionary(what_to_unpack="smiles_type_dictionary")
         ranks_list = list(set(self.unpack_list(what_to_unpack="ranks_list")))
-        bulk_plot_unique_scores(
-            self.rp_scores_df, ranks_list, save_folder=self.plots_folder
-        )
+        bulk_plot_unique_scores(self.rp_scores_df, ranks_list, save_folder=self.plots_folder)
 
     def plot_unique_proteins_scorings(self, top_n_hits=5):
         """
@@ -1649,6 +1763,7 @@ class BulkRun:
         logger.info("Starting interactions analysis")
 
         all_interactions = []
+        all_detail_interactions = []
 
         for current_batch in self.batched_dictionary:
             logger.info(f"Analyzing interactions for {current_batch}")
@@ -1656,6 +1771,9 @@ class BulkRun:
             batch_dict = self.batched_dictionary[current_batch]
             batch_folder = batch_dict[BATCH_FOLDER]
             combinations_df = batch_dict[COMBINATIONS_TABLE_KEY]
+            batch_progress_log = f"{batch_folder}/{OUTPUT_LOG_FILE}"
+
+            self._log_progress(batch_progress_log, message="Starting interactions analysis")
 
             if BOLTZ_PREFIX in methods_to_analyze:
                 boltz_folder = f"{batch_folder}/{BOLTZ_FOLDER}"
@@ -1668,7 +1786,9 @@ class BulkRun:
                     complex_pdb = f"{boltz_folder}/{run_id}{COMPLEX_PDB_SUFFIX}"
                     if os.path.exists(complex_pdb):
                         smiles = batch_dict[SMILES_NAMES_DICTIONARY_KEY][ligand_id]
-                        complex_metadata.append((complex_pdb, protein_conf_id, smiles))
+                        complex_metadata.append(
+                            (complex_pdb, run_id, protein_conf_id, smiles, BOLTZ_PREFIX)
+                        )
 
                 if complex_metadata:
                     logger.info(
@@ -1676,60 +1796,64 @@ class BulkRun:
                     )
                     batch_interactions = analyze_batch_interactions(
                         complex_pdb_paths=[x[0] for x in complex_metadata],
-                        combination_ids=[f"{x[1]}_{x[2]}" for x in complex_metadata],
+                        combination_ids=[x[1] for x in complex_metadata],
                         ligand_resname=LIGAND_RESNAME,
                         ligand_chain=LIGAND_CHAIN,
                         ligand_resseq=LIGAND_RESSEQ,
                     )
                     if not batch_interactions.empty:
-                        batch_interactions[PROTEIN_CONF_ID] = [x[1] for x in complex_metadata]
-                        batch_interactions[SMILES] = [x[2] for x in complex_metadata]
+                        batch_interactions[PROTEIN_CONF_ID] = [x[2] for x in complex_metadata]
+                        batch_interactions[SMILES] = [x[3] for x in complex_metadata]
                         all_interactions.append(batch_interactions)
+
+                    plip_details = get_batch_detailed_interactions(complex_metadata)
+                    if not plip_details.empty:
+                        all_detail_interactions.append(plip_details)
+
+                    prolif_details = get_batch_prolif_interactions(complex_metadata)
+                    if not prolif_details.empty:
+                        all_detail_interactions.append(prolif_details)
                 else:
                     logger.info(f"No Boltz complex PDB files found for {current_batch}")
 
             if VINA_PREFIX in methods_to_analyze:
                 vina_folder = f"{batch_folder}/{VINA_FOLDER}"
 
-                # Collect all complex PDB files and their IDs
-                complex_paths = []
-                combination_ids = []
-
-                complex_metadata = []  # Store (complex_path, protein_conf_id, smiles)
-
+                complex_metadata = []
                 for _, row in combinations_df.iterrows():
                     protein_conf_id = row[PROTEIN_CONF_ID]
                     ligand_id = row[LIGAND_ID]
                     combination_id = f"{protein_conf_id}_{ligand_id}"
-
                     complex_pdb = f"{vina_folder}/{combination_id}{COMPLEX_PDB_SUFFIX}"
-
                     if os.path.exists(complex_pdb):
                         smiles = batch_dict[SMILES_NAMES_DICTIONARY_KEY][ligand_id]
-                        complex_metadata.append((complex_pdb, protein_conf_id, smiles))
+                        complex_metadata.append(
+                            (complex_pdb, combination_id, protein_conf_id, smiles, VINA_PREFIX)
+                        )
 
                 if complex_metadata:
                     logger.info(
                         f"Analyzing {len(complex_metadata)} Vina complexes in {current_batch}"
                     )
-                    complex_paths = [x[0] for x in complex_metadata]
-                    combination_ids = [
-                        f"{x[1]}_{x[2]}" for x in complex_metadata
-                    ]  # temporary for analysis
-
                     batch_interactions = analyze_batch_interactions(
-                        complex_pdb_paths=complex_paths,
-                        combination_ids=combination_ids,
+                        complex_pdb_paths=[x[0] for x in complex_metadata],
+                        combination_ids=[x[1] for x in complex_metadata],
                         ligand_resname=LIGAND_RESNAME,
                         ligand_chain=LIGAND_CHAIN,
                         ligand_resseq=LIGAND_RESSEQ,
                     )
-
                     if not batch_interactions.empty:
-                        # Add protein_conf_id and smiles columns
-                        batch_interactions[PROTEIN_CONF_ID] = [x[1] for x in complex_metadata]
-                        batch_interactions[SMILES] = [x[2] for x in complex_metadata]
+                        batch_interactions[PROTEIN_CONF_ID] = [x[2] for x in complex_metadata]
+                        batch_interactions[SMILES] = [x[3] for x in complex_metadata]
                         all_interactions.append(batch_interactions)
+
+                    plip_details = get_batch_detailed_interactions(complex_metadata)
+                    if not plip_details.empty:
+                        all_detail_interactions.append(plip_details)
+
+                    prolif_details = get_batch_prolif_interactions(complex_metadata)
+                    if not prolif_details.empty:
+                        all_detail_interactions.append(prolif_details)
                 else:
                     logger.info(f"No complex PDB files found for {current_batch}")
 
@@ -1744,7 +1868,9 @@ class BulkRun:
                     complex_pdb = f"{diffdock_folder}/{run_id}{COMPLEX_PDB_SUFFIX}"
                     if os.path.exists(complex_pdb):
                         smiles = batch_dict[SMILES_NAMES_DICTIONARY_KEY][ligand_id]
-                        complex_metadata.append((complex_pdb, protein_conf_id, smiles))
+                        complex_metadata.append(
+                            (complex_pdb, run_id, protein_conf_id, smiles, DIFFDOCK_PREFIX)
+                        )
 
                 if complex_metadata:
                     logger.info(
@@ -1752,15 +1878,23 @@ class BulkRun:
                     )
                     batch_interactions = analyze_batch_interactions(
                         complex_pdb_paths=[x[0] for x in complex_metadata],
-                        combination_ids=[f"{x[1]}_{x[2]}" for x in complex_metadata],
+                        combination_ids=[x[1] for x in complex_metadata],
                         ligand_resname=LIGAND_RESNAME,
                         ligand_chain=LIGAND_CHAIN,
                         ligand_resseq=LIGAND_RESSEQ,
                     )
                     if not batch_interactions.empty:
-                        batch_interactions[PROTEIN_CONF_ID] = [x[1] for x in complex_metadata]
-                        batch_interactions[SMILES] = [x[2] for x in complex_metadata]
+                        batch_interactions[PROTEIN_CONF_ID] = [x[2] for x in complex_metadata]
+                        batch_interactions[SMILES] = [x[3] for x in complex_metadata]
                         all_interactions.append(batch_interactions)
+
+                    plip_details = get_batch_detailed_interactions(complex_metadata)
+                    if not plip_details.empty:
+                        all_detail_interactions.append(plip_details)
+
+                    prolif_details = get_batch_prolif_interactions(complex_metadata)
+                    if not prolif_details.empty:
+                        all_detail_interactions.append(prolif_details)
                 else:
                     logger.info(f"No DiffDock complex PDB files found for {current_batch}")
 
@@ -1775,7 +1909,9 @@ class BulkRun:
                     complex_pdb = f"{gnina_folder}/{combination_id}{COMPLEX_PDB_SUFFIX}"
                     if os.path.exists(complex_pdb):
                         smiles = batch_dict[SMILES_NAMES_DICTIONARY_KEY][ligand_id]
-                        complex_metadata.append((complex_pdb, protein_conf_id, smiles))
+                        complex_metadata.append(
+                            (complex_pdb, combination_id, protein_conf_id, smiles, GNINA_PREFIX)
+                        )
 
                 if complex_metadata:
                     logger.info(
@@ -1783,19 +1919,30 @@ class BulkRun:
                     )
                     batch_interactions = analyze_batch_interactions(
                         complex_pdb_paths=[x[0] for x in complex_metadata],
-                        combination_ids=[f"{x[1]}_{x[2]}" for x in complex_metadata],
+                        combination_ids=[x[1] for x in complex_metadata],
                         ligand_resname=LIGAND_RESNAME,
                         ligand_chain=LIGAND_CHAIN,
                         ligand_resseq=LIGAND_RESSEQ,
                     )
                     if not batch_interactions.empty:
-                        batch_interactions[PROTEIN_CONF_ID] = [x[1] for x in complex_metadata]
-                        batch_interactions[SMILES] = [x[2] for x in complex_metadata]
+                        batch_interactions[PROTEIN_CONF_ID] = [x[2] for x in complex_metadata]
+                        batch_interactions[SMILES] = [x[3] for x in complex_metadata]
                         all_interactions.append(batch_interactions)
+
+                    plip_details = get_batch_detailed_interactions(complex_metadata)
+                    if not plip_details.empty:
+                        all_detail_interactions.append(plip_details)
+
+                    prolif_details = get_batch_prolif_interactions(complex_metadata)
+                    if not prolif_details.empty:
+                        all_detail_interactions.append(prolif_details)
                 else:
                     logger.info(f"No gnina complex PDB files found for {current_batch}")
 
+            self._log_progress(batch_progress_log, message="Completed interactions analysis")
+
         interactions_path = f"{self.project_folder}/{INTERACTIONS_FILE}"
+        details_path = f"{self.project_folder}/{INTERACTION_DETAILS_FILE}"
 
         if not all_interactions:
             # Contract: external consumers (e.g. host-side notebooks that read
@@ -1804,8 +1951,9 @@ class BulkRun:
             # a header-only TSV with the columns analyze_batch_interactions
             # emits so downstream code paths are deterministic.
             logger.warning(
-                "No interaction data collected — writing header-only TSV to "
-                f"{interactions_path} so the contract 'file always exists' holds."
+                "No interaction data collected — writing header-only TSVs to "
+                f"{interactions_path} and {details_path} so the contract "
+                "'file always exists' holds."
             )
             empty_cols = [
                 PROTEIN_CONF_ID,
@@ -1817,6 +1965,8 @@ class BulkRun:
             ]
             self.interactions_df = pd.DataFrame(columns=empty_cols)
             self.interactions_df.to_csv(interactions_path, sep="\t", index=False)
+            self.interaction_details_df = pd.DataFrame(columns=DETAIL_COLUMNS)
+            self.interaction_details_df.to_csv(details_path, sep="\t", index=False)
             return None
 
         # Combine all batch results
@@ -1839,6 +1989,20 @@ class BulkRun:
         # Save to file (interactions_path computed at the top of this method)
         df_to_save.to_csv(interactions_path, sep="\t", index=False)
         logger.info(f"Saved interaction analysis to {interactions_path}")
+
+        # Write per-interaction detail file (PLIP + ProLIF)
+        if not all_detail_interactions:
+            self.interaction_details_df = pd.DataFrame(columns=DETAIL_COLUMNS)
+        else:
+            self.interaction_details_df = pd.concat(all_detail_interactions, axis=0).reset_index(
+                drop=True
+            )
+            for col in DETAIL_COLUMNS:
+                if col not in self.interaction_details_df.columns:
+                    self.interaction_details_df[col] = None
+            self.interaction_details_df = self.interaction_details_df[DETAIL_COLUMNS]
+        self.interaction_details_df.to_csv(details_path, sep="\t", index=False)
+        logger.info(f"Saved interaction detail analysis to {details_path}")
 
         # Log summary statistics
         logger.info(

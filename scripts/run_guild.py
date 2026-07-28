@@ -16,6 +16,7 @@ Via Makefile:
     make run-vina        PROJECT=my_project COMBINATIONS=/workspace/path/to/combos.tsv
     make run-guild  PROJECT=my_project METHODS="vina boltz diffdock" HEAD=100 BATCH_SIZE=5
 """
+
 import argparse
 import os
 import re
@@ -42,23 +43,27 @@ import pandas as pd
 # Parse arguments
 # ---------------------------------------------------------------------------
 
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run Guild bulk docking pipeline.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--project", "-p",
+        "--project",
+        "-p",
         required=True,
         help="Project name (used as output folder under data/).",
     )
     parser.add_argument(
-        "--combinations", "-c",
+        "--combinations",
+        "-c",
         required=True,
         help="Path to the combinations TSV/CSV (protein–ligand pairs table).",
     )
     parser.add_argument(
-        "--decoys", "-d",
+        "--decoys",
+        "-d",
         default=None,
         help=(
             "Path to the decoys TSV. "
@@ -67,7 +72,8 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--methods", "-m",
+        "--methods",
+        "-m",
         nargs="+",
         default=["boltz"],
         choices=["boltz", "vina", "karmadock", "diffdock", "gnina"],
@@ -140,6 +146,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--vina-exhaustiveness",
+        type=int,
+        default=None,
+        help=(
+            "Vina exhaustiveness parameter (controls search thoroughness). "
+            "Higher values improve pose quality at the cost of runtime. "
+            "Defaults to VINA_DEFAULT_EXHAUSTIVENESS (16) when omitted."
+        ),
+    )
+    parser.add_argument(
         "--no-gpu",
         action="store_true",
         default=False,
@@ -185,12 +201,67 @@ def parse_args() -> argparse.Namespace:
             "Vina-rescore downgrades to PDBQT with a warning."
         ),
     )
+    parser.add_argument(
+        "--poses-dir",
+        default=None,
+        help=(
+            "Optional path to a directory of user-supplied ligand starting "
+            "poses, one '<ligand_id>.sdf' per ligand. When set, every "
+            "ligand_id in the combinations CSV must have a matching SDF in "
+            "the directory; otherwise BulkRun aborts before docking with a "
+            "single error listing the missing IDs. Requires --pose-mode "
+            "local or score (the default 'dock' mode is stochastic and "
+            "ignores the supplied coordinates, so combining POSES_DIR with "
+            "pose-mode=dock is rejected). Incompatible with "
+            "--use-known-binders and decoy expansion (use --no-decoys)."
+        ),
+    )
+    parser.add_argument(
+        "--pose-mode",
+        choices=["dock", "local", "score"],
+        default="dock",
+        help=(
+            "How Vina/gnina consume a user-supplied starting pose. 'dock' "
+            "(default) runs a normal global search — the supplied pose has "
+            "*no effect* on Vina's starting coordinates. 'local' refines "
+            "the pose with Vina.optimize() / gnina --local_only. 'score' "
+            "evaluates the pose with Vina.score() / gnina --score_only. "
+            "'local' and 'score' require --poses-dir to be set."
+        ),
+    )
+    parser.add_argument(
+        "--flexible-docking",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable flexible receptor docking for Vina and gnina. Side-chain "
+            "atoms of residues whose Cα lies inside the docking box are allowed "
+            "to move during the search. In pdbqt mode the receptor is split into "
+            "rigid+flex PDBQT files via mk_prepare_receptor.py; in gnina sdf mode "
+            "gnina's --flexdist_ligand / --flexdist flags are used instead. Falls "
+            "back to rigid docking if flex prep fails. Boltz, DiffDock, and "
+            "KarmaDock are unaffected."
+        ),
+    )
+    parser.add_argument(
+        "--flexres-gnina",
+        default=None,
+        metavar="FLEXRES",
+        help=(
+            "gnina-only. Explicit flexible-residue spec passed directly as gnina's "
+            "--flexres flag (e.g. 'A:88,91' or 'A:88,91_B:7'). Applied to every "
+            "combination in the run. When set, takes priority over the automatic "
+            "box-based / flexdist residue selection that --flexible-docking uses. "
+            "Ignored by Vina, Boltz, DiffDock, and KarmaDock."
+        ),
+    )
     return parser.parse_args()
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     args = parse_args()
@@ -236,6 +307,7 @@ def main() -> None:
 
     # Patch diffdock module's imported constants so they see the overrides.
     import guild.docking.diffdock as _dd_mod
+
     _dd_mod.PYTHON_EXECUTABLE = sys.executable
     _dd_mod.SUPPORT_FOLDER = str(GUILD_SUPPORT_DIR)
 
@@ -298,6 +370,11 @@ def main() -> None:
     print(f"Known bndrs:  {args.use_known_binders}")
     print(f"GPU:          {not args.no_gpu}")
 
+    poses_dir = _normalize_workspace_path(args.poses_dir) if args.poses_dir else None
+    if poses_dir is not None:
+        print(f"Poses dir:    {poses_dir}")
+        print(f"Pose mode:    {args.pose_mode}")
+
     bulk = BulkRun(
         runs_table,
         project_name,
@@ -310,8 +387,13 @@ def main() -> None:
         use_decoys=not args.no_decoys,
         use_known_binders=args.use_known_binders,
         n_workers=args.n_workers,
+        vina_exhaustiveness=args.vina_exhaustiveness,
         use_gpu=not args.no_gpu,
         gnina_input_mode=args.gnina_input_mode,
+        poses_dir=poses_dir,
+        pose_mode=args.pose_mode,
+        flexible_docking=args.flexible_docking,
+        flexres_gnina=args.flexres_gnina,
     )
 
     if not args.plip_only:
@@ -336,7 +418,11 @@ def main() -> None:
         print(f"PLIP time:    {time.time() - t0:.1f}s")
 
     # ── Print final scores summary ──────────────────────────────────────
-    if hasattr(bulk, "rp_scores_df") and bulk.rp_scores_df is not None and not bulk.rp_scores_df.empty:
+    if (
+        hasattr(bulk, "rp_scores_df")
+        and bulk.rp_scores_df is not None
+        and not bulk.rp_scores_df.empty
+    ):
         df = bulk.rp_scores_df
         # Pick the columns that actually exist: id, raw scores, rp scores
         show_cols = ["combination", "protein_config_id", "ligand_id", "ligand_category"]

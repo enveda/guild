@@ -11,6 +11,7 @@ from guild.constants.boltz import (
 from guild.constants.diffdock import (
     DIFFDOCK_RESULTS_FOLDER,
 )
+from guild.constants.gnina import GNINA_FLEX_DISTANCE
 from guild.constants.guild import (
     # Lists and dictionaries
     ALL_AVAILABLE_METHODS,
@@ -43,6 +44,13 @@ from guild.constants.p2rank import (
     P2RANK_FOLDER,
     P2RANK_MIN_PROBABILITY_THRESHOLD,
 )
+from guild.constants.poses import (
+    DEFAULT_POSE_MODE,
+    POSE_MODE_DOCK,
+    POSE_MODE_LOCAL,
+    POSE_MODE_SCORE,
+    POSE_MODES,
+)
 from guild.constants.system import SHELL_SILENCER, WORKING_DIR_PATH
 from guild.constants.vina import VINA_BOXES_FOLDER
 from guild.docking.boltz import deploy_boltz, generate_boltz_yaml
@@ -51,6 +59,8 @@ from guild.docking.gnina import deploy_gnina
 from guild.docking.karmadock import deploy_karmadock
 from guild.docking.vina import (
     deploy_vina,
+    deploy_vina_local_refinement,
+    deploy_vina_score,
     generate_vina_box,
     get_center_and_size_from_box_file,
 )
@@ -68,14 +78,18 @@ from guild.tools.protein_sequence import (
 from guild.tools.utils import timeit
 from guild.transformers.converters import (
     ligand_pdb_to_pdbqt,
+    prepare_flex_receptor_pdbqt,
     protein_pdb_to_pdbqt,
     sdf_to_pdb,
     smiles_to_sdf,
     smiles_to_sdf_karmadock,
+    stage_user_pose,
 )
 from guild.transformers.msa import fetch_protein_msa
 from guild.transformers.pdb import (
     LigandIdentifier,
+    covalent_rec_atom_exists,
+    get_flexres_string_from_box,
     get_pocket_contacts_from_box,
     get_pocket_contacts_from_ligand,
 )
@@ -104,25 +118,62 @@ class Guild:
         predict_binding_pocket: bool = False,
         box_location: str = None,
         gnina_input_mode: str = "pdbqt",
+        pose_path: str = None,
+        pose_mode: str = DEFAULT_POSE_MODE,
+        vina_exhaustiveness: int = None,
+        flexible_docking: bool = False,
+        flexres_gnina: str = None,
+        covalent_rec_atom: str = None,
+        covalent_lig_smarts: str = None,
     ):
         """
-        Start the Guild for docking ligands to proteins.
-        :param ligand_smile: The SMILES string of the ligand.
-        :param ligand_idx: The index of the ligand.
-        :param protein_idx: The index of the protein.
-        :param protein_file: The path to the protein data file.
-        :param project_name: The name of the project.
-        :param protein_chain: The chain to be used for docking. If not provided, the first chain is used.
-        :param original_ligand: The original ligand in the protein data. If not provided, the first ligand is used.
-        :param original_ligand_chain: The chain of the original ligand in the protein data. If not provided, the first chain is used.
-        :param output_log_file: The file to save the log. If not provided, the log is saved in the project directory.
-        :param use_gpu: Use GPU.
-        :param is_bulk: Whether the run is part of a bulk run.
-        :param predict_binding_pocket: Use P2Rank for binding site prediction instead of original ligand location.
-        :param box_location: Path to a user-supplied Vina box file (center_{x,y,z} + size_{x,y,z}).
-                             When set, takes precedence over P2Rank / original-ligand pocket derivation
-                             for both Vina (used as the Vina box) and Boltz (residues inside the box
-                             become the pocket contact constraint).
+                Start the Guild for docking ligands to proteins.
+                :param ligand_smile: The SMILES string of the ligand.
+                :param ligand_idx: The index of the ligand.
+                :param protein_idx: The index of the protein.
+                :param protein_file: The path to the protein data file.
+                :param project_name: The name of the project.
+                :param protein_chain: The chain to be used for docking. If not provided, the first chain is used.
+                :param original_ligand: The original ligand in the protein data. If not provided, the first ligand is used.
+                :param original_ligand_chain: The chain of the original ligand in the protein data. If not provided, the first chain is used.
+                :param output_log_file: The file to save the log. If not provided, the log is saved in the project directory.
+                :param use_gpu: Use GPU.
+                :param is_bulk: Whether the run is part of a bulk run.
+                :param predict_binding_pocket: Use P2Rank for binding site prediction instead of original ligand location.
+                :param box_location: Path to a user-supplied Vina box file (center_{x,y,z} + size_{x,y,z}).
+                                     When set, takes precedence over P2Rank / original-ligand pocket derivation
+                                     for both Vina (used as the Vina box) and Boltz (residues inside the box
+                                     become the pocket contact constraint).
+                :param pose_path: Optional path to a user-supplied SDF starting
+                    pose for this ligand. When set, ``_prepare_ligand`` skips
+                    the SMILES→3D pipeline and stages the supplied SDF into
+                    ``self.ligand_sdf``/``self.ligand_pdbqt`` verbatim (no
+                    ``--gen3d``). Validated up-front: if the path doesn't
+                    exist, ``__init__`` raises ``FileNotFoundError`` (no silent fallback).
+                :param pose_mode: One of ``"dock"`` (default; stochastic global
+                    search ignores the supplied coordinates), ``"local"``
+                    (Vina.optimize() — refine the supplied pose), or
+                    ``"score"`` (Vina.score() — evaluate the supplied pose as
+                    is). ``local``/``score`` require ``pose_path`` to be set.
+                    See README.md "Starting from a user-supplied pose".
+                :param vina_exhaustiveness: Vina exhaustiveness parameter. If None, uses VINA_DEFAULT_EXHAUSTIVENESS.
+                :param flexible_docking: When True, allow receptor side chains inside the docking box to move
+                                         during Vina and gnina searches. Residues are selected automatically
+                                         from the box geometry (pdbqt mode) or by ligand proximity (gnina sdf
+                                         mode). Falls back to rigid docking if flex prep fails.
+        :param flexres_gnina: gnina-only.  Explicit flexible-residue spec in gnina's
+                                  ``chain:resnum[,resnum,...][_chain:resnum[,resnum,...]]`` format
+                                  (e.g. ``"A:88,91"`` or ``"A:88,91_B:7"``).  When set,
+                                  passed directly as ``--flexres`` and bypasses the automatic
+                                  box-based / flexdist residue selection that ``flexible_docking`` uses.
+                :param covalent_rec_atom: gnina-only. Receptor atom the ligand covalently bonds to, in
+                                          ``chain:resnum:atomname`` form (e.g. ``A:145:SG``). The residue
+                                          number is in the cleaned/renumbered frame. When set together with
+                                          ``covalent_lig_smarts``, gnina runs covalent docking; the spec is
+                                          validated against the cleaned protein and silently skipped (normal
+                                          docking) if it does not resolve.
+                :param covalent_lig_smarts: gnina-only. SMARTS matching the ligand warhead atom that forms the
+                                            covalent bond (e.g. ``C#N`` for a nitrile).
         """
         self.original_ligand_smile = ligand_smile
         self.ligand_idx = ligand_idx
@@ -143,9 +194,7 @@ class Guild:
         # pocket derivation, MSA/file naming).
         self.protein_chains = _normalize_chain_list(protein_chain)
         if not self.protein_chains:
-            self.protein_chains = [
-                get_protein_chain(self.original_protein_data, self.protein_idx)
-            ]
+            self.protein_chains = [get_protein_chain(self.original_protein_data, self.protein_idx)]
         self.protein_chain = self.protein_chains[0]
 
         self.original_ligand = original_ligand
@@ -162,6 +211,11 @@ class Guild:
         # falling back to "pdbqt" when Vina/Vina-rescore is also requested —
         # so by the time we get here the value is final.
         self.gnina_input_mode = gnina_input_mode
+        self.vina_exhaustiveness = vina_exhaustiveness
+        self.flexible_docking = flexible_docking
+        self.flexres_gnina = flexres_gnina
+        self.covalent_rec_atom = covalent_rec_atom
+        self.covalent_lig_smarts = covalent_lig_smarts
         # Validate box_location up-front. An unreadable path is treated as
         # "not provided" so the normal P2Rank / original-ligand fallback chain
         # still kicks in instead of silently leaving Vina/Boltz without a
@@ -178,6 +232,26 @@ class Guild:
                 self.box_location = None
         else:
             self.box_location = None
+
+        # User-supplied starting pose. Unlike ``box_location`` (which
+        # warns-and-falls-back), a missing pose is a hard error: the
+        # caller asked for a specific starting pose, so silently
+        # docking against a random SMILES conformer would be the wrong
+        # answer. ``pose_mode`` is also validated against ``POSE_MODES``
+        # so typos don't silently fall back to ``dock`` (the mode that
+        # ignores the supplied coordinates anyway).
+        if pose_mode not in POSE_MODES:
+            raise ValueError(f"Invalid pose_mode={pose_mode!r}; expected one of {POSE_MODES}.")
+        self.pose_mode = pose_mode
+        if pose_path is not None and not os.path.isfile(pose_path):
+            raise FileNotFoundError(f"pose_path {pose_path!r} does not exist.")
+        self.pose_path = pose_path
+        if self.pose_mode != POSE_MODE_DOCK and self.pose_path is None:
+            raise ValueError(
+                f"pose_mode={self.pose_mode!r} requires a pose_path "
+                "(a user-supplied SDF starting pose)."
+            )
+
         self._set_paths(home_path=self.home_path, output_log_file=output_log_file)
 
         self._create_directories()
@@ -241,6 +315,8 @@ class Guild:
         self.single_chain_protein = f"{self.protein_dir}/{self.protein_idx}_single_chain.pdb"
         self.cleaned_protein = self.single_chain_protein.replace(".pdb", "_clean.pdb")
         self.cleaned_protein_pdbqt = self.cleaned_protein.replace(".pdb", ".pdbqt")
+        self.cleaned_protein_rigid_pdbqt = self.cleaned_protein.replace(".pdb", "_rigid.pdbqt")
+        self.cleaned_protein_flex_pdbqt = self.cleaned_protein.replace(".pdb", "_flex.pdbqt")
 
         self.ligand_pdb = f"{self.ligand_dir}/{self.ligand_idx}_ligand.pdb"
         self.ligand_pdbqt = self.ligand_pdb.replace(".pdb", ".pdbqt")
@@ -255,8 +331,14 @@ class Guild:
         # GNINA directories — reuses the Vina box file (same format) and the
         # PDBQT-prepped receptor/ligand produced for Vina.
         self.gnina_dir = f"{self.project_dir}/{GNINA_FOLDER}"
-        self.gnina_output_pdbqt = f"{self.gnina_dir}/{self.protein_idx}_{self.ligand_idx}.pdbqt"
+        _gnina_poses_ext = "sdf" if self.gnina_input_mode == "sdf" else "pdbqt"
+        self.gnina_output_pdbqt = (
+            f"{self.gnina_dir}/{self.protein_idx}_{self.ligand_idx}.{_gnina_poses_ext}"
+        )
         self.gnina_output_scores = f"{self.gnina_dir}/{self.protein_idx}_{self.ligand_idx}.txt"
+        self.gnina_output_flex_pdbqt = (
+            f"{self.gnina_dir}/{self.protein_idx}_{self.ligand_idx}_flex.pdbqt"
+        )
 
         # KarmaDock directories
         self.karmadock_root = f"{self.project_dir}/{KARMADOCK_FOLDER}"
@@ -374,6 +456,13 @@ class Guild:
         """
         Preprocessing the ligand data for docking.
 
+        When ``self.pose_path`` is set, the SMILES→3D path is skipped
+        and the user-supplied SDF is staged into ``self.ligand_sdf`` /
+        ``self.ligand_pdbqt`` verbatim (no ``--gen3d``). The
+        ligand-specific Vina-box resize is also skipped — a user pose
+        already represents the ligand's bounding extent at its true
+        position.
+
         When ``self.gnina_input_mode == "sdf"`` the OpenBabel-backed
         ``ligand_pdb_to_pdbqt`` step (and its prerequisite ``sdf_to_pdb``)
         are skipped: gnina reads the RDKit-generated SDF directly, and no
@@ -383,6 +472,19 @@ class Guild:
         if os.path.exists(self.ligand_sdf):
             logger.info(f"Ligand {self.ligand_idx} already prepared.")
             return  # Skip preparation if already done
+
+        if self.pose_path is not None:
+            logger.info(
+                f"Staging user-supplied pose for ligand {self.ligand_idx} "
+                f"from {self.pose_path} (skipping SMILES→3D)."
+            )
+            stage_user_pose(
+                pose_path=self.pose_path,
+                ligand_sdf=self.ligand_sdf,
+                ligand_pdbqt=self.ligand_pdbqt,
+                gnina_input_mode=self.gnina_input_mode,
+            )
+            return
 
         smiles_to_sdf(
             smiles=self.original_ligand_smile,
@@ -585,19 +687,61 @@ class Guild:
             logger.error(f"Autodock Vina: error in preparing receptor: {e}")
             failed_steps += 1
 
+        flex_pdbqt = None
+        receptor_for_vina = self.cleaned_protein_pdbqt
+        if self.flexible_docking:
+            vina_flex_center, vina_flex_size = get_center_and_size_from_box_file(self.vina_box)
+            flexres_str = get_flexres_string_from_box(
+                self.cleaned_protein, self.protein_chains, vina_flex_center, vina_flex_size
+            )
+            if flexres_str:
+                try:
+                    prepare_flex_receptor_pdbqt(
+                        self.cleaned_protein,
+                        self.cleaned_protein_rigid_pdbqt,
+                        self.cleaned_protein_flex_pdbqt,
+                        flexres_str,
+                        allow_bad_res=True,
+                    )
+                    receptor_for_vina = self.cleaned_protein_rigid_pdbqt
+                    flex_pdbqt = self.cleaned_protein_flex_pdbqt
+                    logger.info(f"Autodock Vina: flex receptor prepared ({flexres_str})")
+                except Exception as e:
+                    logger.warning(f"Autodock Vina: flex prep failed ({e}); falling back to rigid.")
+            else:
+                logger.info("Autodock Vina: no residues inside box — using rigid receptor.")
+
         if os.path.exists(self.vina_output_pdbqt):
             logger.info("Autodock Vina: output file already exists.")
             return failed_steps
         vina_box_center, vina_box_size = get_center_and_size_from_box_file(self.vina_box)
 
+        vina_runners = {
+            POSE_MODE_DOCK: deploy_vina,
+            POSE_MODE_LOCAL: deploy_vina_local_refinement,
+            POSE_MODE_SCORE: deploy_vina_score,
+        }
         try:
-            deploy_vina(
-                receptor_pdbqt=self.cleaned_protein_pdbqt,
+            runner = vina_runners[self.pose_mode]
+        except KeyError as e:
+            raise ValueError(
+                f"Unknown pose_mode={self.pose_mode!r}; expected one of " f"{POSE_MODES}."
+            ) from e
+
+        try:
+            runner(
+                receptor_pdbqt=receptor_for_vina,
                 ligand_pdbqt=self.ligand_pdbqt,
                 center=vina_box_center,
                 size=vina_box_size,
                 output_scores=self.vina_output_scores,
                 output_pdbqt=self.vina_output_pdbqt,
+                **(
+                    {"exhaustiveness": self.vina_exhaustiveness}
+                    if self.vina_exhaustiveness is not None and self.pose_mode == POSE_MODE_DOCK
+                    else {}
+                ),
+                flex_pdbqt=flex_pdbqt,
             )
         except Exception as e:
             logger.error(f"Autodock Vina: error in docking: {e}")
@@ -616,10 +760,59 @@ class Guild:
         """
         failed_steps = 0
 
+        flex_pdbqt = None
+        flexres = self.flexres_gnina or None
+        flexdist_ligand = None
+        flexdist = None
+
+        # Covalent docking: validate the receptor-atom spec against the cleaned
+        # protein (whose per-chain 1-based numbering is what gnina sees in both
+        # input modes). On a bad spec, fall back to normal docking rather than
+        # let gnina mis-bond silently. The ligand warhead is matched by SMARTS.
+        covalent_rec_atom = None
+        covalent_lig_pattern = None
+        if self.covalent_rec_atom and self.covalent_lig_smarts:
+            if covalent_rec_atom_exists(self.cleaned_protein, self.covalent_rec_atom):
+                covalent_rec_atom = self.covalent_rec_atom
+                covalent_lig_pattern = self.covalent_lig_smarts
+                logger.info(
+                    f"gnina: covalent docking — rec atom {covalent_rec_atom}, "
+                    f"ligand SMARTS {covalent_lig_pattern}."
+                )
+            else:
+                logger.error(
+                    f"gnina: covalent_rec_atom '{self.covalent_rec_atom}' did not resolve "
+                    f"in {self.cleaned_protein}; running normal docking."
+                )
+
+        if flexres:
+            logger.info(
+                f"gnina: explicit flexres='{flexres}' — bypassing automatic flex selection."
+            )
+
         if self.gnina_input_mode == "sdf":
             receptor_path = self.cleaned_protein  # PDB
             ligand_path = self.ligand_sdf  # SDF (RDKit-generated upstream)
             logger.info("gnina: SDF-mode — skipping PDBQT prep.")
+            if self.flexible_docking and not flexres:
+                # gnina selects flexible residues automatically at search time
+                # via --flexdist_ligand / --flexdist; no PDBQT split needed.
+                #
+                # KNOWN LIMITATION (flagged, not fixed here): --flexdist_ligand measures
+                # distance from THIS ligand file's own coordinates, not the docking box.
+                # For a ligand built from a bare SMILES (not pose-supplied), self.ligand_sdf
+                # was produced by smiles_to_sdf/_prepare_ligand with no receptor/box context
+                # (see guild/transformers/converters.py::smiles_to_sdf docstring) -- its
+                # coordinates can sit anywhere, unrelated to the real binding site. This
+                # silently makes gnina flex the wrong residues and can fail to find any pose
+                # at all ("ligand outside box" on effectively every sample), which looks like
+                # a docking failure but is actually a setup bug. Prefer the explicit
+                # flexres_gnina/gnina_flexres override for any non-pose-supplied ligand.
+                flexdist_ligand = self.ligand_sdf
+                flexdist = GNINA_FLEX_DISTANCE
+                logger.info(
+                    f"gnina: SDF-mode flexible docking — flexdist={flexdist} Å from ligand."
+                )
         else:
             # Receptor PDBQT prep — same as Vina. Run independently of
             # run_autodock_vina because gnina can be requested without vina.
@@ -635,6 +828,29 @@ class Guild:
                 failed_steps += 1
             receptor_path = self.cleaned_protein_pdbqt
             ligand_path = self.ligand_pdbqt
+            if self.flexible_docking and not flexres:
+                gnina_flex_center, gnina_flex_size = get_center_and_size_from_box_file(
+                    self.vina_box
+                )
+                flexres_str = get_flexres_string_from_box(
+                    self.cleaned_protein, self.protein_chains, gnina_flex_center, gnina_flex_size
+                )
+                if flexres_str:
+                    try:
+                        prepare_flex_receptor_pdbqt(
+                            self.cleaned_protein,
+                            self.cleaned_protein_rigid_pdbqt,
+                            self.cleaned_protein_flex_pdbqt,
+                            flexres_str,
+                            allow_bad_res=True,
+                        )
+                        receptor_path = self.cleaned_protein_rigid_pdbqt
+                        flex_pdbqt = self.cleaned_protein_flex_pdbqt
+                        logger.info(f"gnina: flex receptor prepared ({flexres_str})")
+                    except Exception as e:
+                        logger.warning(f"gnina: flex prep failed ({e}); falling back to rigid.")
+                else:
+                    logger.info("gnina: no residues inside box — using rigid receptor.")
 
         # Require a *non-empty* pose file: older runs (before the OpenBabel
         # plugin fix) left 0-byte pdbqts behind, and treating those as "done"
@@ -656,9 +872,7 @@ class Guild:
         # Per-combination subprocess transcript — predictable path that the
         # orchestrator points users at when this combo fails. See
         # guild/tools/subprocess_log.py for the format.
-        subprocess_log = (
-            f"{self.gnina_dir}/{self.protein_idx}_{self.ligand_idx}.subprocess.log"
-        )
+        subprocess_log = f"{self.gnina_dir}/{self.protein_idx}_{self.ligand_idx}.subprocess.log"
         try:
             deploy_gnina(
                 receptor=receptor_path,
@@ -669,6 +883,18 @@ class Guild:
                 output_scores=self.gnina_output_scores,
                 use_gpu=self.use_gpu,
                 subprocess_log_path=subprocess_log,
+                pose_mode=self.pose_mode,
+                flex_pdbqt=flex_pdbqt,
+                flexres=flexres,
+                flexdist_ligand=flexdist_ligand,
+                flexdist=flexdist,
+                out_flex_pdbqt=(
+                    self.gnina_output_flex_pdbqt
+                    if (flex_pdbqt or flexres or flexdist_ligand)
+                    else None
+                ),
+                covalent_rec_atom=covalent_rec_atom,
+                covalent_lig_atom_pattern=covalent_lig_pattern,
             )
         except Exception as e:
             logger.error(f"gnina: error in docking: {e}")
@@ -718,9 +944,7 @@ class Guild:
                 protein_chain_id=chain,
                 output_a3m_dir=self.msa_cache_dir,
             )
-            for chain, sequence in zip(
-                self.sequence_chains, self.original_sequences, strict=True
-            )
+            for chain, sequence in zip(self.sequence_chains, self.original_sequences, strict=True)
         ]
         print(f"MSA file(s) for Boltz: {msa_files}")
 
