@@ -123,7 +123,12 @@ COPY --chown=appuser:appuser pyproject.toml /app
 COPY --chown=appuser:appuser uv.lock* /app
 COPY --chown=appuser:appuser README.md /app
 
-RUN uv sync --frozen --no-install-project --no-group dev && \
+# --locked, not --frozen. Both install straight from uv.lock without
+# re-resolving, but --frozen does not check that the lock still agrees with
+# pyproject.toml: a dependency added to pyproject and never locked is silently
+# omitted from the image, and the first sign of it is a puzzling test failure
+# much later. --locked fails here instead, telling you to run `uv lock`.
+RUN uv sync --locked --no-install-project --no-group dev && \
     rm -rf /home/appuser/.cache /home/appuser/.config
 
 # Replace pure-Python PyG extension stubs with pre-built CUDA wheels from the
@@ -136,8 +141,8 @@ RUN uv pip install --reinstall --no-deps \
 
 ####################################################################################################
 FROM project-prod-deps AS project-all-deps
-# Dev deps (black, ruff, pytest, ipykernel, pre-commit) are all public — no GH auth needed
-RUN uv sync --frozen --no-install-project
+# Dev deps (black, ruff, pytest, ipykernel, pre-commit) are all public
+RUN uv sync --locked --no-install-project
 
 ####################################################################################################
 FROM project-all-deps AS test
