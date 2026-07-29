@@ -75,6 +75,7 @@ def test_per_batch_log_records_method_start_and_end(test_input_table, cleanup):
                 f"{current_batch_folder}/{OUTPUT_LOG_FILE}",
                 message=f"Completed {name}",
             )
+
         return _noop
 
     with (
@@ -116,7 +117,8 @@ def test_failure_line_appears_in_both_logs(test_input_table, cleanup):
 
     # Directly exercise _log_progress as the helpers do when a combo fails.
     BulkRun._log_progress(
-        batch_log, main_log,
+        batch_log,
+        main_log,
         message="FAILED Vina 3pbl-A-ETQ-A_lig1 (timeout)",
     )
 

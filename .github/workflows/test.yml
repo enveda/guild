@@ -26,5 +26,8 @@ jobs:
             -f Dockerfile \
             .
 
+      # `e2e` tests invoke real docking binaries and take minutes. gnina is only
+      # copied into the final `docker` stage, so it is absent from `test` by
+      # design -- run them locally against a full image instead.
       - name: Run tests
-        run: docker run --rm guild-test python -m pytest -v tests/
+        run: docker run --rm guild-test python -m pytest -v -m "not e2e" tests/

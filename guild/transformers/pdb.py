@@ -20,6 +20,9 @@ warnings.filterwarnings("ignore", category=PDBConstructionWarning)
 
 logger = logging.getLogger(__name__)
 
+# Maximum distance (Å) to search for a warhead atom when adding a covalent CONECT.
+_COVALENT_BOND_DIST_MAX = 2.5
+
 
 def calculate_centroid(atom_list):
     """
@@ -331,13 +334,23 @@ def _parse_pdb_atom_fields(
 
 def _convert_pdbqt_to_pdb(ligand_pdbqt: str, out_pdb: str) -> None:
     """
-    Convert PDBQT -> PDB.
+    Convert PDBQT -> PDB, keeping only the top-ranked pose (MODEL 1).
+
+    Vina/gnina PDBQT output is score-sorted, so MODEL 1 is always the
+    best-scoring pose. Without restricting to it, a multi-pose PDBQT
+    converts to a PDB with every pose's atoms stacked into the same
+    ligand residue — e.g. 8 poses x 46 atoms = 368 "atoms" all sharing
+    resname/resseq, which downstream RDKit template matching
+    (AssignBondOrdersFromTemplate in PLIP/prolif analysis) cannot
+    resolve and can hang for a very long time trying.
+
     Prefer OpenBabel CLI (obabel). If not available, fall back to stripping
     extra PDBQT columns (best-effort).
     """
     obabel = shutil.which("obabel")
     if obabel:
-        cmd = [obabel, ligand_pdbqt, "-O", out_pdb]
+        # -f 1 -l 1: only convert the first model (top pose).
+        cmd = [obabel, ligand_pdbqt, "-O", out_pdb, "-f", "1", "-l", "1"]
         res = subprocess.run(cmd, capture_output=True, text=True)
         if res.returncode != 0:
             raise RuntimeError(
@@ -345,12 +358,15 @@ def _convert_pdbqt_to_pdb(ligand_pdbqt: str, out_pdb: str) -> None:
             )
         return
 
-    # Fallback: treat PDBQT as PDB and strip after column 66 (keep coords/occ/temp)
+    # Fallback: treat PDBQT as PDB and strip after column 66 (keep coords/occ/temp).
+    # Stop at the first ENDMDL so only MODEL 1 (the top pose) is kept.
     with (
         open(ligand_pdbqt, "r", encoding="utf-8", errors="replace") as fin,
         open(out_pdb, "w", encoding="utf-8") as fout,
     ):
         for line in fin:
+            if line.startswith("ENDMDL"):
+                break
             if _is_atom_line(line):
                 # Keep up to tempFactor (col 66), then try to preserve element if present.
                 base = line[:66]
@@ -368,6 +384,24 @@ def _convert_pdbqt_to_pdb(ligand_pdbqt: str, out_pdb: str) -> None:
                 continue
 
 
+def _sdf_to_pdb_rdkit(sdf_path: str, out_pdb: str) -> None:
+    """
+    Convert SDF -> PDB using RDKit (not OpenBabel).
+    RDKit assigns unique atom names (C1, C2, …) and writes CONECT records for
+    every bond — both required because viewers (e.g. PyMOL) disable auto-bonding
+    when any explicit CONECT is present.
+    """
+    suppl = Chem.SDMolSupplier(sdf_path, removeHs=False, sanitize=True)
+    mol = next((m for m in suppl if m is not None), None)
+    if mol is None:
+        # Fallback for molecules with unusual valences (e.g. gnina covalent output)
+        suppl2 = Chem.SDMolSupplier(sdf_path, removeHs=False, sanitize=False)
+        mol = next((m for m in suppl2 if m is not None), None)
+    if mol is None:
+        raise ValueError(f"Could not parse any molecule from {sdf_path}")
+    Chem.MolToPDBFile(mol, out_pdb)
+
+
 def build_complex_pdb(
     protein_pdb: str,
     ligand_file: str,
@@ -382,7 +416,7 @@ def build_complex_pdb(
     """
     Build a single "complex" PDB file suitable for PLIP from:
       - protein PDB
-      - ligand PDB or ligand PDBQT
+      - ligand PDB, PDBQT, or SDF
 
     The ligand will be rewritten as HETATM with (resname, chain, resseq),
     and atom serials will be renumbered to follow the protein serials.
@@ -391,6 +425,7 @@ def build_complex_pdb(
     """
     if ligand_is_pdbqt is None:
         ligand_is_pdbqt = ligand_file.lower().endswith(".pdbqt")
+    ligand_is_sdf = ligand_file.lower().endswith(".sdf")
 
     # Read protein, keep non-END records
     with open(protein_pdb, "r", encoding="utf-8", errors="replace") as f:
@@ -399,32 +434,28 @@ def build_complex_pdb(
     # Determine where to start ligand serials
     start_serial = _max_atom_serial(protein_lines) + 1
 
-    # Get ligand PDB path (convert if needed)
+    shared_kwargs = dict(
+        protein_lines=protein_lines,
+        out_complex_pdb=out_complex_pdb,
+        start_serial=start_serial,
+        ligand_resname=ligand_resname,
+        ligand_chain=ligand_chain,
+        ligand_resseq=ligand_resseq,
+        insert_ter_between=insert_ter_between,
+    )
+
     if ligand_is_pdbqt:
         with tempfile.TemporaryDirectory() as td:
             ligand_pdb = os.path.join(td, "ligand.pdb")
             _convert_pdbqt_to_pdb(ligand_file, ligand_pdb)
-            _write_complex(
-                protein_lines=protein_lines,
-                ligand_pdb=ligand_pdb,
-                out_complex_pdb=out_complex_pdb,
-                start_serial=start_serial,
-                ligand_resname=ligand_resname,
-                ligand_chain=ligand_chain,
-                ligand_resseq=ligand_resseq,
-                insert_ter_between=insert_ter_between,
-            )
+            _write_complex(ligand_pdb=ligand_pdb, **shared_kwargs)
+    elif ligand_is_sdf:
+        with tempfile.TemporaryDirectory() as td:
+            ligand_pdb = os.path.join(td, "ligand.pdb")
+            _sdf_to_pdb_rdkit(ligand_file, ligand_pdb)
+            _write_complex(ligand_pdb=ligand_pdb, **shared_kwargs)
     else:
-        _write_complex(
-            protein_lines=protein_lines,
-            ligand_pdb=ligand_file,
-            out_complex_pdb=out_complex_pdb,
-            start_serial=start_serial,
-            ligand_resname=ligand_resname,
-            ligand_chain=ligand_chain,
-            ligand_resseq=ligand_resseq,
-            insert_ter_between=insert_ter_between,
-        )
+        _write_complex(ligand_pdb=ligand_file, **shared_kwargs)
 
     return out_complex_pdb
 
@@ -440,9 +471,12 @@ def _write_complex(
     ligand_resseq: int,
     insert_ter_between: bool,
 ) -> None:
-    # Read ligand, keep only atom records
+    # Read ligand: keep atom records and any CONECT records
     with open(ligand_pdb, "r", encoding="utf-8", errors="replace") as f:
-        ligand_atom_lines = [ln for ln in f if _is_atom_line(ln)]
+        ligand_lines = f.readlines()
+
+    ligand_atom_lines = [ln for ln in ligand_lines if _is_atom_line(ln)]
+    ligand_conect_lines = [ln for ln in ligand_lines if ln.startswith("CONECT")]
 
     if not ligand_atom_lines:
         raise ValueError(f"No ATOM/HETATM records found in ligand file: {ligand_pdb}")
@@ -455,7 +489,11 @@ def _write_complex(
         if insert_ter_between:
             out.write("TER\n")
 
-        # Rewrite ligand lines as HETATM, with controlled residue/chain/serial
+        # Rewrite ligand lines as HETATM, with controlled residue/chain/serial.
+        # Track old→new serial mapping so CONECT records can be remapped below.
+        first_ligand_serial = int(_parse_pdb_atom_fields(ligand_atom_lines[0])[1])
+        serial_offset = start_serial - first_ligand_serial
+
         serial = start_serial
         for ln in ligand_atom_lines:
             (
@@ -502,6 +540,22 @@ def _write_complex(
                 )
             )
             serial += 1
+
+        # Carry internal ligand CONECT records with remapped serials.
+        # When any CONECT exists for an atom, PyMOL uses only explicit CONECTs
+        # for that atom and disables auto-bonding — so all bonds must be listed.
+        for ln in ligand_conect_lines:
+            raw = ln[6:].rstrip("\n")
+            serials = []
+            for i in range(0, len(raw), 5):
+                chunk = raw[i : i + 5].strip()
+                if chunk:
+                    try:
+                        serials.append(int(chunk) + serial_offset)
+                    except ValueError:
+                        pass
+            if serials:
+                out.write("CONECT" + "".join(f"{s:5d}" for s in serials) + "\n")
 
         out.write("END\n")
 
@@ -646,6 +700,253 @@ def get_pocket_contacts_from_box(
         f"inside box center={center} size={size} in {protein_pdb}."
     )
     return contacts
+
+
+def get_flexres_string_from_box(
+    protein_pdb: str,
+    protein_chain,
+    center: Tuple[float, float, float],
+    size: Tuple[float, float, float],
+    max_flexres: int | None = None,
+) -> str | None:
+    """
+    Return an AutoDock-format flexible-residue string (e.g. ``"A:1_A:3_B:7"``)
+    for protein residues whose Cα lies inside the docking box.
+
+    Uses the same Cα-in-AABB check as :func:`get_pocket_contacts_from_box` but
+    returns ``chain:resSeq`` tokens joined by ``_`` rather than Boltz-schema
+    ``[chain, index]`` pairs.  Residue numbers are read directly from the PDB
+    record (``residue.id[1]``), which for ``cleaned_protein`` (produced by
+    ``isolate_protein_chain`` + ``renumber_pdb_residues``) are 1-based per-chain
+    integers — consistent with what ``mk_prepare_receptor.py --flexres`` expects.
+
+    :param protein_pdb: Path to the cleaned protein PDB.
+    :param protein_chain: Chain ID, list of chain IDs, or comma-separated string.
+    :param center: ``(x, y, z)`` of the box center.
+    :param size: ``(sx, sy, sz)`` full edge lengths of the box.
+    :param max_flexres: If set, keep only the ``max_flexres`` residues whose Cα
+        is closest to the box center. Vina/gnina search time grows sharply with
+        the number of flexible residues; values above ~8 become impractical.
+    :return: AutoDock flexres string, or ``None`` if no residues fall inside the box.
+    """
+    cx, cy, cz = center
+    sx, sy, sz = size
+    half = np.array([sx / 2.0, sy / 2.0, sz / 2.0])
+    center_arr = np.array([cx, cy, cz])
+
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("receptor", protein_pdb)
+    model = structure[0]
+    available = [c.id for c in model]
+
+    hits = []  # (distance_to_center, token)
+    for chain_id in _normalize_chain_list(protein_chain):
+        if chain_id not in available:
+            logger.warning(
+                f"get_flexres_string_from_box: chain '{chain_id}' not found in {protein_pdb}."
+            )
+            continue
+        for residue in model[chain_id]:
+            if residue.id[0] != " ":
+                continue
+            if "CA" not in residue:
+                continue
+            ca_coord = residue["CA"].get_coord()
+            if np.all(np.abs(ca_coord - center_arr) <= half):
+                dist = float(np.linalg.norm(ca_coord - center_arr))
+                hits.append((dist, f"{chain_id}:{residue.id[1]}"))
+
+    if not hits:
+        logger.debug(
+            f"get_flexres_string_from_box: no residues inside box center={center} "
+            f"size={size} in {protein_pdb}."
+        )
+        return None
+
+    if max_flexres is not None and len(hits) > max_flexres:
+        hits.sort(key=lambda x: x[0])
+        hits = hits[:max_flexres]
+        logger.debug(f"get_flexres_string_from_box: capped to {max_flexres} closest residues.")
+
+    flexres_str = "_".join(token for _, token in hits)
+    logger.debug(f"get_flexres_string_from_box: {len(hits)} flexible residues: {flexres_str}")
+    return flexres_str
+
+
+def covalent_rec_atom_exists(protein_pdb: str, spec: str) -> bool:
+    """
+    Check that a gnina ``chain:resnum:atomname`` covalent receptor-atom spec
+    resolves to a real atom in ``protein_pdb``.
+
+    gnina silently mis-bonds (or aborts) when ``--covalent_rec_atom`` points at
+    a non-existent atom, so guild validates the spec against the *cleaned*
+    protein up-front. The residue number is read from ``residue.id[1]`` — the
+    same per-chain 1-based numbering produced by ``renumber_pdb_residues`` and
+    used by :func:`get_flexres_string_from_box`.
+
+    :param protein_pdb: Path to the cleaned protein PDB gnina will dock against.
+    :param spec: ``chain:resnum:atomname`` string, e.g. ``"A:145:SG"``.
+    :return: ``True`` if the chain, residue, and atom all exist; ``False``
+        otherwise (including malformed specs).
+    """
+    parts = spec.split(":")
+    if len(parts) != 3:
+        logger.warning(
+            f"covalent_rec_atom_exists: malformed spec '{spec}' "
+            "(expected chain:resnum:atomname)."
+        )
+        return False
+    chain_id, resnum_str, atom_name = parts[0], parts[1], parts[2].strip()
+    try:
+        resnum = int(resnum_str)
+    except ValueError:
+        logger.warning(f"covalent_rec_atom_exists: non-integer resnum in '{spec}'.")
+        return False
+
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("receptor", protein_pdb)
+    model = structure[0]
+    if chain_id not in [c.id for c in model]:
+        logger.warning(f"covalent_rec_atom_exists: chain '{chain_id}' not found in {protein_pdb}.")
+        return False
+    for residue in model[chain_id]:
+        # residue.id is (hetflag, resseq, icode): hetflag is blank for standard
+        # residues, "W" for water and "H_*" for hetero. renumber_pdb_residues
+        # renumbers every residue in a chain, so a water or cofactor can end up
+        # carrying a protein residue's number. Match the protein residue, which is
+        # also the only kind add_covalent_conect will resolve (it reads ATOM records).
+        if residue.id[0] != " ":
+            continue
+        if residue.id[1] == resnum:
+            if atom_name in residue:
+                return True
+            logger.warning(
+                f"covalent_rec_atom_exists: atom '{atom_name}' not in "
+                f"{chain_id}:{resnum} of {protein_pdb}."
+            )
+            return False
+    logger.warning(
+        f"covalent_rec_atom_exists: residue {chain_id}:{resnum} not found in {protein_pdb}."
+    )
+    return False
+
+
+def add_covalent_conect(complex_pdb: str, covalent_rec_atom: str, ligand_chain: str = "Z") -> None:
+    """
+    Append ``CONECT`` records to a complex PDB for a covalent gnina pose.
+
+    gnina positions the warhead atom at covalent-bond distance (~1.8 Å) but
+    does not write explicit connectivity records.  Calling this function after
+    :func:`build_complex_pdb` makes the bond visible in PyMOL and PLIP without
+    any manual post-processing.
+
+    The receptor attachment atom is located by matching the
+    ``chain:resnum:atomname`` spec against ``ATOM`` records.  The warhead is the
+    nearest ``HETATM`` atom **on the ligand chain** — gnina enforces a
+    bond-length geometry, so it should always be within 2.5 Å.  If no such atom
+    is found within that threshold the function logs a warning and returns
+    without modifying the file.
+
+    Restricting the search to the ligand chain matters because
+    :func:`build_complex_pdb` copies the receptor through verbatim: a metal,
+    cofactor or ordered water carried over as a ``HETATM`` can sit closer to a
+    reactive residue than the warhead does, and would otherwise win.
+
+    :param complex_pdb: Path to the complex PDB produced by :func:`build_complex_pdb`.
+    :param covalent_rec_atom: Receptor atom spec, ``chain:resnum:atomname``
+        (e.g. ``"A:145:SG"``).  Must match the spec that was passed to gnina.
+    :param ligand_chain: Chain the docked ligand was written to, matching the
+        ``ligand_chain`` given to :func:`build_complex_pdb`.
+    :raises ValueError: If the spec is malformed or the receptor atom is not
+        found in the complex PDB.
+    """
+    parts = covalent_rec_atom.split(":")
+    if len(parts) != 3:
+        raise ValueError(
+            f"add_covalent_conect: malformed spec '{covalent_rec_atom}' "
+            "(expected chain:resnum:atomname)."
+        )
+    chain_id, resnum_str, atom_name = parts[0], parts[1], parts[2].strip()
+    try:
+        resnum = int(resnum_str)
+    except ValueError as exc:
+        raise ValueError(
+            f"add_covalent_conect: non-integer resnum in '{covalent_rec_atom}'."
+        ) from exc
+
+    with open(complex_pdb, "r", encoding="utf-8", errors="replace") as fh:
+        lines = fh.readlines()
+
+    # Locate the receptor ATOM record.
+    rec_serial = None
+    rec_coords = None
+    for ln in lines:
+        if not ln.startswith("ATOM"):
+            continue
+        # PDB fixed-column format:
+        # cols 13-16 atom name, 22 chain, 23-26 resseq
+        ln_chain = ln[21:22].strip()
+        try:
+            ln_resseq = int(ln[22:26].strip())
+        except ValueError:
+            continue
+        ln_atom = ln[12:16].strip()
+        if ln_chain == chain_id and ln_resseq == resnum and ln_atom == atom_name:
+            try:
+                rec_serial = int(ln[6:11].strip())
+                rec_coords = np.array([float(ln[30:38]), float(ln[38:46]), float(ln[46:54])])
+            except (ValueError, IndexError):
+                pass
+            break
+
+    if rec_serial is None or rec_coords is None:
+        raise ValueError(
+            f"add_covalent_conect: receptor atom '{covalent_rec_atom}' "
+            f"not found in {complex_pdb}."
+        )
+
+    # Find the closest ligand-chain HETATM within 2.5 Å.
+    best_serial = None
+    best_dist = float("inf")
+    for ln in lines:
+        if not ln.startswith("HETATM"):
+            continue
+        if ln[21:22].strip() != ligand_chain:
+            continue
+        try:
+            lig_serial = int(ln[6:11].strip())
+            coords = np.array([float(ln[30:38]), float(ln[38:46]), float(ln[46:54])])
+        except (ValueError, IndexError):
+            continue
+        dist = float(np.linalg.norm(coords - rec_coords))
+        if dist < best_dist:
+            best_dist = dist
+            best_serial = lig_serial
+
+    if best_serial is None or best_dist > _COVALENT_BOND_DIST_MAX:
+        logger.warning(
+            f"add_covalent_conect: no chain-{ligand_chain} HETATM within "
+            f"{_COVALENT_BOND_DIST_MAX} Å of "
+            f"'{covalent_rec_atom}' in {complex_pdb} "
+            f"(closest={best_dist:.2f} Å) — CONECT not written."
+        )
+        return
+
+    # Insert CONECT records before the final END line.
+    conect_a = f"CONECT{rec_serial:5d}{best_serial:5d}\n"
+    conect_b = f"CONECT{best_serial:5d}{rec_serial:5d}\n"
+    if lines and lines[-1].strip() == "END":
+        lines = lines[:-1] + [conect_a, conect_b, "END\n"]
+    else:
+        lines += [conect_a, conect_b]
+
+    with open(complex_pdb, "w", encoding="utf-8") as fh:
+        fh.writelines(lines)
+
+    logger.debug(
+        f"add_covalent_conect: wrote CONECT {rec_serial}↔{best_serial} "
+        f"({best_dist:.2f} Å) in {complex_pdb}."
+    )
 
 
 def relabel_ligand_chain_in_pdb(

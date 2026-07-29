@@ -163,9 +163,12 @@ def test_no_known_binders_mode(test_input_table, cleanup_bulk_test):
     assert len(bulk.all_combinations_table) == input_row_count
 
 
-def test_no_database_mode(test_input_table, cleanup_bulk_test):
+def test_existing_scores_start_empty(test_input_table, cleanup_bulk_test):
     """
-    Test that existing_rp_scores starts empty when no database is connected.
+    Test that a fresh BulkRun starts with an empty existing-scores frame.
+
+    The scoring path merges against this frame, so it has to be a real empty
+    DataFrame rather than None.
     """
     bulk = BulkRun(
         input_table=test_input_table,
@@ -179,7 +182,6 @@ def test_no_database_mode(test_input_table, cleanup_bulk_test):
     # Should have empty existing scores dataframe
     assert bulk.existing_rp_scores is not None
     assert isinstance(bulk.existing_rp_scores, pd.DataFrame)
-    # Should be empty (no external database)
     assert len(bulk.existing_rp_scores) == 0
 
 

@@ -2,16 +2,23 @@
 #
 # Curated gnina runtime bundle.
 #
-# Pulls the upstream gnina/gnina image (~9 GB, mostly static archives + MKL
-# we don't need at runtime), then extracts the binary plus the ~1.4 GB of
-# shared libraries the binary actually loads — boost 1.71, jsoncpp, ICU 66,
-# numa, openblas, gfortran, the CUDA 12 runtime libs, and gnina's own
-# libtorch / libmolgrid / libopenbabel.so.7 — into ``/export``.
+# gnina v1.3.3+ ships a *statically linked* release binary that bakes in
+# gnina's own deps (libtorch, libmolgrid, libopenbabel, boost, jsoncpp, ICU,
+# numa, openblas, gfortran) — only the CUDA 12 runtime remains dynamic.
+# That eliminates the ~40 lines of cross-distro SONAME extraction from the
+# upstream Ubuntu 20.04 ``gnina/gnina`` image the old bundle relied on, and
+# also lets us drop the libopenbabel-plugin shim that used to live in
+# ``guild/docking/gnina.py`` (OB is now statically linked with plugins baked
+# into the binary).
+#
+# The remaining ~7 CUDA libs (libcudart, libcudnn, libcublas{,Lt}, libcufft,
+# libcusparse, libcusolver) come from nvidia's pip wheels — matches the
+# CUDA-12 major version the binary is built against without inheriting
+# whatever CUDA layout ``gnina/gnina:latest`` happens to ship.
 #
 # The final stage is ``FROM scratch`` so the published image is just the
 # /export tree. Build it once and tag it (locally or in your own registry),
-# then point the main Dockerfile's GNINA_BUNDLE_IMAGE build arg at that tag.
-# Consumers (see [Dockerfile](Dockerfile) in this repo) do:
+# then point the main Dockerfile's GNINA_BUNDLE_IMAGE build arg at that tag:
 #
 #     docker build -f Dockerfile.gnina-bundle -t gnina-bundle:local .
 #     docker build --build-arg GNINA_BUNDLE_IMAGE=gnina-bundle:local -t guild .
@@ -24,32 +31,59 @@
 #     COPY --from=gnina-source /export /opt/gnina
 #
 # and invokes ``gnina`` with ``LD_LIBRARY_PATH=/opt/gnina/lib`` so the bundle's
-# libtorch / libopenbabel don't clash with the main image's CUDA 13 torch
-# and system openbabel.
+# CUDA runtime doesn't clash with the main image's venv-managed one.
 #
-# Rebuild this bundle whenever you want to pick up a newer upstream gnina.
+# --- Bumping gnina --------------------------------------------------------
+# 1. Update the three ARGs below (GNINA_VERSION / GNINA_ASSET / GNINA_SHA256)
+#    from the GitHub release page: https://github.com/gnina/gnina/releases
+# 2. Rebuild locally: ``docker build -f Dockerfile.gnina-bundle -t gnina-bundle:local .``
+# 3. Verify no new dynamic deps appeared:
+#      docker run --rm -e LD_LIBRARY_PATH=/opt/gnina/lib \
+#        --entrypoint ldd guild:latest /opt/gnina/bin/gnina | grep 'not found'
+#    If any lib prints, add its matching ``nvidia-*-cu12`` wheel to the
+#    pip install below and rebuild.
 
-FROM gnina/gnina:latest AS extract
+# Debian slim base — glibc + libstdc++ compatible with dkoes' static build.
+# We only need Python + curl for the fetch/install steps; the resulting
+# /export tree is copied into a ``FROM scratch`` image at the end so none
+# of this base's contents ship downstream.
+FROM debian:bookworm-slim AS extract
+
+ARG GNINA_VERSION=v1.3.3
+ARG GNINA_ASSET=gnina.cuda12.8.static
+ARG GNINA_SHA256=3340c1f49cd3c7c84d8699182a1c6af13c7fa2a22448d1204640446106f72172
+
 RUN set -eux; \
-    mkdir -p /export/bin /export/lib; \
-    cp -L /usr/local/bin/gnina /export/bin/; \
-    cp -L /usr/local/lib/*.so* /export/lib/ 2>/dev/null || true; \
-    cp -L /usr/lib/x86_64-linux-gnu/libboost_*.so.1.71.0 /export/lib/ 2>/dev/null || true; \
-    cp -L /usr/lib/x86_64-linux-gnu/libjsoncpp.so* /export/lib/ 2>/dev/null || true; \
-    # Ubuntu 20.04 ICU + libnuma + openblas — Debian bookworm ships
-    # newer/different SONAMEs, so gnina would fail to find these at runtime.
-    cp -L /usr/lib/x86_64-linux-gnu/libicui18n.so.66* /export/lib/ 2>/dev/null || true; \
-    cp -L /usr/lib/x86_64-linux-gnu/libicuuc.so.66* /export/lib/ 2>/dev/null || true; \
-    cp -L /usr/lib/x86_64-linux-gnu/libicudata.so.66* /export/lib/ 2>/dev/null || true; \
-    cp -L /usr/lib/x86_64-linux-gnu/libnuma.so* /export/lib/ 2>/dev/null || true; \
-    cp -L /usr/lib/x86_64-linux-gnu/libopenblas.so* /export/lib/ 2>/dev/null || true; \
-    cp -L /usr/lib/x86_64-linux-gnu/libgfortran.so* /export/lib/ 2>/dev/null || true; \
-    cp -L /usr/lib/x86_64-linux-gnu/libquadmath.so* /export/lib/ 2>/dev/null || true; \
-    if [ -d /usr/local/cuda-12.0/targets/x86_64-linux/lib ]; then \
-      cp -RL /usr/local/cuda-12.0/targets/x86_64-linux/lib/*.so* /export/lib/ 2>/dev/null || true; \
-    fi
+    apt-get update; \
+    # ``openbabel`` on Debian bookworm ships UFF.prm and the other data files
+    # gnina's static OpenBabel needs at runtime for --covalent_optimize_lig
+    # (the code was linked in but the data tree wasn't — without this, gnina
+    # prints "Cannot open UFF.prm" and skips the post-bond UFF minimisation).
+    apt-get install -y --no-install-recommends \
+        curl ca-certificates python3 python3-pip openbabel; \
+    rm -rf /var/lib/apt/lists/*; \
+    mkdir -p /export/bin /export/lib /export/share/openbabel; \
+    curl -fL -o /export/bin/gnina \
+        https://github.com/gnina/gnina/releases/download/${GNINA_VERSION}/${GNINA_ASSET}; \
+    echo "${GNINA_SHA256}  /export/bin/gnina" | sha256sum -c -; \
+    chmod +x /export/bin/gnina; \
+    # Copy OB data files (UFF.prm etc.) into the bundle so
+    # ``BABEL_DATADIR=/opt/gnina/share/openbabel`` at runtime resolves them.
+    OB_DATA=$(find /usr/share/openbabel /usr/local/share/openbabel \
+                 -maxdepth 3 -name "UFF.prm" -printf "%h\n" 2>/dev/null | head -1); \
+    if [ -z "${OB_DATA}" ]; then \
+        echo "!! UFF.prm not found in the openbabel Debian package"; exit 1; \
+    fi; \
+    cp -RL "${OB_DATA}"/* /export/share/openbabel/; \
+    # CUDA 12 runtime libs — see header for the diagnostic command to run
+    # after a version bump if any new ``not found`` lib appears.
+    pip3 install --no-cache-dir --break-system-packages \
+        nvidia-cudnn-cu12 nvidia-cuda-runtime-cu12 nvidia-cublas-cu12 \
+        nvidia-cufft-cu12 nvidia-cusparse-cu12 nvidia-cusolver-cu12; \
+    NVIDIA_ROOT=$(python3 -c "import nvidia; print(nvidia.__path__[0])"); \
+    find "${NVIDIA_ROOT}" -name "*.so*" -exec cp -L {} /export/lib/ \;
 
 ####################################################################################################
-# Tiny published image: just /export, nothing else. ~1.4 GB on disk.
+# Tiny published image: just /export, nothing else. ~2 GB on disk.
 FROM scratch AS bundle
 COPY --from=extract /export /export

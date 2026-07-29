@@ -23,6 +23,9 @@ Guild is an open-source Protein-Ligand Binding Tools orchestrator that covers th
   * [Vina rescore (automatic with DiffDock and Boltz)](#vina-rescore-automatic-with-diffdock-and-boltz)
   * [Custom binding pocket](#custom-binding-pocket)
   * [Multi-chain binding pocket](#multi-chain-binding-pocket)
+  * [Starting from a user-supplied pose](#starting-from-a-user-supplied-pose)
+  * [Flexible receptor docking](#flexible-receptor-docking)
+  * [Covalent docking (gnina)](#covalent-docking-gnina)
   * [Post-analysis](#post-analysis)
 
 ## Docker
@@ -80,6 +83,11 @@ make run-vina \
 | `BOX` | *(empty)* | Global fallback Vina box file (`center_{x,y,z}` + `size_{x,y,z}`). Used for combinations whose CSV `box_location` cell is empty; per-row values always take precedence. See [Custom binding pocket](#custom-binding-pocket). |
 | `USE_GPU` | `1` | Set empty (`USE_GPU=`) to drop `--gpus all` from `docker run` and forward `--no-gpu` to the python script. Use on no-GPU hosts. gnina falls back to CPU; vina and diffdock are unaffected. **Do not combine with `METHODS=boltz`** — Boltz is genuinely GPU-bound. |
 | `GNINA_INPUT_MODE` | *(empty)* | Set to `sdf` to skip OpenBabel PDBQT prep entirely when gnina is the only docking method requested — gnina then reads the RDKit-generated SDF + cleaned PDB directly. Co-requesting Vina or any Vina-rescore (boltz/diffdock auto-add a Vina-rescore) silently falls back to PDBQT with a warning, since OpenBabel still has to run for those methods. |
+| `POSES_DIR` | *(empty)* | Directory of user-supplied ligand starting poses, one `<ligand_id>.sdf` per ligand. Every `ligand_id` in the combinations CSV must have a match or the run aborts before docking. Requires `POSE_MODE=local` or `score`, and `NO_DECOYS=1`. See [Starting from a user-supplied pose](#starting-from-a-user-supplied-pose). |
+| `POSE_MODE` | *(empty → `dock`)* | `dock` \| `local` \| `score`. How Vina/gnina consume a supplied pose. `dock` ignores the supplied coordinates, so it is rejected together with `POSES_DIR`. |
+| `FLEXIBLE_DOCKING` | *(empty)* | Set to `1` to let side chains of residues inside the docking box move during the search (Vina and gnina only). See [Flexible receptor docking](#flexible-receptor-docking). |
+| `FLEXRES_GNINA` | *(empty)* | gnina-only explicit flexible-residue spec, e.g. `"A:88,91"`. Takes priority over `FLEXIBLE_DOCKING`'s automatic selection for gnina. |
+| `VINA_EXHAUSTIVENESS` | *(empty)* | Vina search exhaustiveness. Higher improves pose quality at the cost of runtime. Defaults to `16` when omitted. |
 | `MIN_MOL_WT` | `250` | Minimum molecular weight filter for known-binder expansion |
 | `MAX_MOL_WT` | `450` | Maximum molecular weight filter for known-binder expansion |
 | `CHEMBL_VERSION` | `chembl_36` | ChEMBL version string used for known-binder lookup |
@@ -514,6 +522,247 @@ that covers the interface. The co-crystal-ligand pocket derivation
 whole interface cleanly. If you encode the chain segment of `protein_config_id`,
 use the same comma form (`6CTA-A,B-...`) so DiffDock/complex receptor extraction
 keeps both chains.
+
+### Starting from a user-supplied pose
+
+By default Guild generates a 3D conformer of each ligand from its SMILES with
+OpenBabel `--gen3d`, then hands that to Vina / gnina / KarmaDock for docking.
+For experiments where you already have an **experimentally-informed starting
+pose** (a crystal-ligand placement, a known cognate-binder pose, a manually-built
+hypothesis) you can ask Guild to start from that pose instead.
+
+Drop one `<ligand_id>.sdf` file per ligand into a directory and pass it as
+`POSES_DIR`. The file name *must* match the `ligand_id` column in the
+combinations CSV.
+
+```shell
+make run-vina \
+    PROJECT=myproject \
+    COMBINATIONS=/workspace/combos.csv \
+    POSES_DIR=/workspace/poses/ \
+    POSE_MODE=local \
+    NO_DECOYS=1
+```
+
+**Fail-fast contract.** When `POSES_DIR` is set, *every* `ligand_id` in the
+combinations CSV must have a matching `<ligand_id>.sdf` in the directory. Any
+missing file aborts the run before docking starts, with a single error
+message listing all missing IDs (capped at 20 with `(+N more)`). Partial
+coverage would silently mix pose-anchored and SMILES-random ligands in the
+same project, invalidating cross-ligand comparisons, so we reject it.
+
+`POSES_DIR` is also rejected together with `KNOWN_BINDERS=1` or decoy
+expansion (`NO_DECOYS=1` is required) — those expansions add ChEMBL ligands
+the caller couldn't have prepared poses for.
+
+#### Pose modes
+
+The `POSE_MODE` flag controls how Vina / gnina consume the supplied pose:
+
+| `POSE_MODE` | Vina behaviour | When to use |
+|---|---|---|
+| `dock` *(default)* | Normal global stochastic search. **The supplied pose has *no effect* on Vina's starting coordinates** — Vina samples random positions/orientations/torsions inside the box per run. The pose is used only for ligand topology / connectivity. | Backwards-compatible default. Don't combine with `POSES_DIR`. |
+| `local` | `Vina.optimize()` — single local minimisation starting from the supplied coords. No global search. | **Recommended for biasing toward an experimental pose.** The mode that actually honours the supplied coordinates. |
+| `score` | `Vina.score()` — evaluate the supplied pose as-is, no movement. | Pure energy evaluation of a known pose. |
+
+Setting `POSES_DIR` with `POSE_MODE=dock` is rejected — the combination would
+do no useful work (Vina/gnina's global search ignores the supplied coords)
+and would burn ligand-prep cycles for nothing. Pass `POSE_MODE=local` or
+`POSE_MODE=score` explicitly to opt in.
+
+For gnina specifically, `POSE_MODE=local` pairs naturally with the default
+`--cnn_scoring=rescore`/`refinement` knobs for CNN-aided local refinement.
+
+#### Supported engines
+
+| Engine | Honours `POSES_DIR`? | Notes |
+|---|---|---|
+| **Vina** | yes | `dock` / `local` / `score` all wired. |
+| **gnina** | yes | `dock` / `local` / `score` all wired (`--local_only` / `--score_only`). |
+| **KarmaDock** | no | KarmaDock isn't currently supported in this codepath (deferred). |
+| **Boltz** | no — logged on `BulkRun.__init__` | End-to-end sequence/SMILES → complex predictor; no starting-pose API. |
+| **DiffDock** | no — logged on `BulkRun.__init__` | Score-based diffusion sampler; no starting-pose API in our pinned version. |
+
+#### What we don't support
+
+Hard distance / harmonic positional restraints (e.g. "stay within 2 Å of these
+anchor atoms"). Stock AutoDock Vina has no API for them; you'd need a
+Smina-style fork. If you need stronger biasing than `local` provides, that's
+the future direction.
+
+### Flexible receptor docking
+
+By default, Guild treats the receptor as fully rigid during docking. Enabling flexible receptor docking allows the **side chains** of residues inside the docking box to adjust their conformation to accommodate the ligand, which can improve pose quality for tightly packed binding sites.
+
+Flexible docking is supported for **Vina and gnina only**. Boltz, DiffDock, and KarmaDock are unaffected.
+
+#### Enabling it
+
+Via Make:
+
+```shell
+make run-vina \
+  COMBINATIONS=/workspace/path/to/combos.csv \
+  PROJECT=myproject \
+  FLEXIBLE_DOCKING=1
+```
+
+Via Python:
+
+```python
+from guild.bulk import BulkRun
+
+bulk = BulkRun(
+    input_table=input_table,
+    project_name="myproject",
+    methods_to_run=["vina", "gnina"],
+    flexible_docking=True,
+)
+bulk.run_docking()
+```
+
+Via the script directly:
+
+```shell
+python scripts/run_guild.py \
+    --project myproject \
+    --combinations /workspace/combos.csv \
+    --methods vina gnina \
+    --flexible-docking
+```
+
+#### How residues are selected
+
+**Vina and gnina (pdbqt mode):** residues whose Cα atom falls inside the docking box are automatically identified and passed to `mk_prepare_receptor.py --flexres`. The receptor is split into a rigid PDBQT (backbone + non-flexible residues) and a flex PDBQT (mobile side chains). Vina receives both via `set_receptor(rigid, flex)`; gnina receives the flex PDBQT via `--flex`.
+
+**gnina (sdf mode):** when gnina is running in `GNINA_INPUT_MODE=sdf`, no PDBQT splitting is needed. Instead, gnina's `--flexdist_ligand` / `--flexdist` flags are used: gnina selects flexible residues automatically at search time by finding all residues within **4 Å** of the docked ligand.
+
+> **⚠️ Known limitation — not safe for SMILES-only ligands.** "Within 4 Å of the docked
+> ligand" means 4 Å of the ligand *input file's own coordinates*, not the docking box. A
+> ligand built from a bare SMILES (via `smiles_to_sdf`, i.e. anything that isn't a
+> `--poses-dir`-supplied or otherwise pre-aligned pose) is embedded in an arbitrary local
+> frame with no reference to the receptor at all — its coordinates can end up nowhere
+> near the real binding site. When that happens, `--flexdist_ligand` locks onto whatever
+> happens to be nearby (observed in practice: residues on an unrelated chain), and the
+> search can fail to find *any* valid pose ("ligand outside box" on effectively every
+> sample) — which looks like a docking failure but is actually this setup bug. If your
+> ligands aren't pose-supplied, use the explicit `gnina_flexres`/`FLEXRES_GNINA`
+> override below instead of automatic sdf-mode `FLEXIBLE_DOCKING`.
+
+#### Fallback behaviour
+
+If flex prep fails for any combination (e.g. `mk_prepare_receptor.py` rejects a residue, or no residues fall inside the box), that combination falls back silently to **rigid docking** with a warning in the log. No combination is dropped.
+
+#### Explicit residue selection (gnina)
+
+Instead of the automatic box-based or flexdist-based selection, you can pin specific residues as flexible for gnina by naming them explicitly. The spec is passed directly as gnina's `--flexres` flag and takes priority over `FLEXIBLE_DOCKING`'s automatic selection for gnina. Vina is unaffected.
+
+There are two ways to supply the spec, which can be combined:
+
+| Scope | How to set | Precedence |
+|---|---|---|
+| Per-combination | `gnina_flexres` column in the combinations CSV | Wins over the project-level flag |
+| Project-wide | `FLEXRES_GNINA` (Make) / `--flexres-gnina` (CLI) / `flexres_gnina=` (Python) | Used when the CSV column is absent or empty |
+
+**Residue spec format:** comma-separated residue numbers within a chain block, with chain-blocks joined by underscores:
+
+```
+chain:resnum[,resnum,...]_chain:resnum[,resnum,...]
+```
+
+| Example spec | Meaning |
+|---|---|
+| `A:88` | Residue 88 on chain A |
+| `A:88,91` | Residues 88 and 91 on chain A |
+| `A:88,91_B:7` | Residues 88 and 91 on chain A, and residue 7 on chain B |
+
+> **Residue numbering.** Use residue numbers from the **cleaned receptor** (per-chain 1-based after Guild's `renumber_pdb_residues`), not the original PDB. This is the same frame used by `covalent_rec_atom`. The easiest way to confirm the right numbers is to look at the cleaned PDB under `data/<project>/batches/<batch>/gnina/<protein>_cleaned.pdb`.
+
+##### Per-combination (CSV column)
+
+Add a `gnina_flexres` column to the combinations CSV. Rows with a value use it; rows with an empty/missing cell fall back to the project-wide flag (or no explicit flexres if that is also unset).
+
+```csv
+protein_config_id,ligand_id,smiles,...,gnina_flexres
+3pbl-A-ETQ-A,lig1,CC(=O)O,...,"A:88,91"
+3pbl-A-ETQ-A,lig2,c1ccccc1,...,"A:88,91_B:7"
+3pbl-A-ETQ-A,lig3,CCN,...,
+```
+
+##### Project-wide
+
+Via Make (gnina only):
+
+```shell
+make run-gnina \
+  COMBINATIONS=/workspace/path/to/combos.csv \
+  PROJECT=myproject \
+  FLEXRES_GNINA="A:88,91"
+```
+
+To combine with `FLEXIBLE_DOCKING` for Vina (gnina uses the explicit list, Vina uses box-based automatic selection):
+
+```shell
+make run-guild \
+  COMBINATIONS=/workspace/path/to/combos.csv \
+  PROJECT=myproject \
+  METHODS="vina gnina" \
+  FLEXIBLE_DOCKING=1 \
+  FLEXRES_GNINA="A:88,91"
+```
+
+Via Python:
+
+```python
+bulk = BulkRun(
+    input_table=input_table,
+    project_name="myproject",
+    methods_to_run=["gnina"],
+    flexres_gnina="A:88,91",
+)
+bulk.run_docking()
+```
+
+Via the script directly:
+
+```shell
+python scripts/run_guild.py \
+    --project myproject \
+    --combinations /workspace/combos.csv \
+    --methods gnina \
+    --flexres-gnina "A:88,91"
+```
+
+#### Caveats
+
+- Flexible docking increases runtime — side-chain sampling adds conformational degrees of freedom to the search.
+- The residue selection is box-driven (Cα inside the AABB), not contact-driven, so very large boxes may include more residues than needed.
+- For pdbqt mode, the box file must exist before flex prep runs. Per-row `box_location` values and the global `BOX=` fallback both work.
+- To vary flexible residues per combination, use the `gnina_flexres` CSV column. The project-wide `FLEXRES_GNINA` / `flexres_gnina=` flag is a convenient shorthand when every combination should use the same residues.
+
+### Covalent docking (gnina)
+
+Covalent docking models inhibitors that form a covalent bond to a specific receptor atom (e.g. a catalytic cysteine). It is supported for **gnina only** — gnina exposes covalent docking natively, whereas Vina has no native covalent mode. Boltz, DiffDock, KarmaDock, and Vina are unaffected.
+
+Unlike flexible docking (a global on/off), covalent docking is configured **per combination** through two optional combinations-CSV columns:
+
+| Column | Example | Meaning |
+|---|---|---|
+| `covalent_rec_atom` | `A:145:SG` | The receptor atom the ligand bonds to, as `chain:resnum:atomname`. |
+| `covalent_lig_smarts` | `C#N` | SMARTS matching the ligand warhead atom that forms the bond. |
+
+gnina runs covalent docking for a row only when **both** columns are present and non-empty; otherwise that row docks normally. No Make flag or CLI option is required — the data flows in through the CSV like `box_location`.
+
+> **Residue numbering — important.** `covalent_rec_atom` must reference the residue numbers of the **cleaned receptor** that Guild docks against. Guild runs `isolate_protein_chain` + `renumber_pdb_residues`, which resets residue numbers to **1-based per chain**. A number copied from the original PDB will usually be wrong. Guild validates the spec against the cleaned protein up-front; if `chain:resnum:atomname` does not resolve, it logs an error and that row falls back to normal (non-covalent) docking.
+
+> **gnina build.** Covalent docking requires a gnina build that accepts the `--covalent_*` flags. Verify with `docker run --rm guild:latest gnina --help | grep -i covalent` after `make docker-local`.
+
+Example combinations CSV row (covalent inhibitor against a catalytic Cys):
+
+```csv
+protein_config_id,protein_id,protein_chain,protein_path,smiles,ligand_id,ligand_category,is_pdb,original_ligand,original_ligand_chain,box_location,covalent_rec_atom,covalent_lig_smarts
+6CTA-A,6CTA,A,/workspace/.../6cta.pdb,O=C(CCl)Nc1ccccc1,cov_1,ex,False,,,/workspace/.../box.txt,A:145:SG,[CH2]Cl
+```
 
 ### Post-analysis
 

@@ -19,6 +19,9 @@ PROTEIN_CHAIN = "protein_chain"
 ORIGINAL_LIGAND = "original_ligand"
 ORIGINAL_LIGAND_CHAIN = "original_ligand_chain"
 BOX_LOCATION = "box_location"
+COVALENT_REC_ATOM = "covalent_rec_atom"
+COVALENT_LIG_SMARTS = "covalent_lig_smarts"
+GNINA_FLEXRES = "gnina_flexres"
 
 
 """

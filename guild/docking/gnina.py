@@ -13,7 +13,6 @@ import logging
 import os
 import re
 import subprocess
-import tempfile
 
 import numpy as np
 import pandas as pd
@@ -26,13 +25,14 @@ from guild.constants.bulk import (
 from guild.constants.general import RANDOM_SEED
 from guild.constants.gnina import (
     GNINA_BINARY,
+    GNINA_COVALENT_BOND_ORDER,
+    GNINA_COVALENT_OPTIMIZE_LIG,
     GNINA_DEFAULT_CNN_SCORING,
+    GNINA_DEFAULT_CNN_SCORING_COVALENT_ONLY,
     GNINA_DEFAULT_EXHAUSTIVENESS,
     GNINA_DEFAULT_NUMBER_OF_POSES,
     GNINA_LIB_PATH,
     GNINA_OB_DATA_DIR,
-    GNINA_OB_PLUGIN_DIR,
-    GNINA_OB_SYSTEM_LIB,
 )
 from guild.constants.guild import (
     GNINA_CNN_SCORE,
@@ -40,6 +40,12 @@ from guild.constants.guild import (
     GNINA_SCORE,
     LIGAND_ID,
     PROTEIN_CONF_ID,
+)
+from guild.constants.poses import (
+    DEFAULT_POSE_MODE,
+    POSE_MODE_LOCAL,
+    POSE_MODE_SCORE,
+    POSE_MODES,
 )
 from guild.docking.vina import _validate_pdbqt
 from guild.tools.subprocess_log import write_subprocess_log
@@ -61,53 +67,18 @@ GNINA_SUBPROCESS_TIMEOUT = 600  # seconds
 #         ...
 #
 # Each data row starts with the integer mode number; the rest are floats.
-_GNINA_POSE_ROW = re.compile(
-    r"^\s*(\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)"
-)
+_GNINA_POSE_ROW = re.compile(r"^\s*(\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)")
 
 
-def _ensure_openbabel_plugin_shim() -> tuple[str, str, str] | None:
+def _ensure_openbabel_plugin_shim() -> None:
+    """Deprecated no-op.
+
+    Kept as a stub for one release cycle in case external callers imported
+    it.  gnina v1.3.3+ statically links OpenBabel with plugins baked in, so
+    the shim is no longer needed — remove this stub in the following
+    release.
     """
-    Make gnina's Open Babel able to write pose files.
-
-    gnina's bundled ``libopenbabel.so.7`` has no format-plugin tree in the
-    image, so its OB can't write any ``--out`` format and every pose file ends
-    up empty. The system Open Babel 3.2 (``.so.8``) *does* ship a complete
-    plugin set. We create a tiny shim dir holding ``libopenbabel.so.7`` ->
-    system ``.so.8`` symlink; prepending it to ``LD_LIBRARY_PATH`` makes gnina
-    resolve its OB to the .so.8 (ABI-compatible for gnina's calls), which then
-    finds the plugins via ``BABEL_LIBDIR``/``BABEL_DATADIR``.
-
-    :return: ``(shim_dir, plugin_dir, data_dir)`` to feed into the gnina
-        subprocess env, or ``None`` if the system OpenBabel isn't present (in
-        which case the caller leaves the env untouched — gnina still scores via
-        its native pdbqt parser, just with empty pose files as before).
-    """
-    if not (
-        os.path.exists(GNINA_OB_SYSTEM_LIB)
-        and os.path.isdir(GNINA_OB_PLUGIN_DIR)
-        and os.path.isdir(GNINA_OB_DATA_DIR)
-    ):
-        return None
-
-    shim_dir = os.path.join(tempfile.gettempdir(), "guild_gnina_ob_shim")
-    os.makedirs(shim_dir, exist_ok=True)
-    link = os.path.join(shim_dir, "libopenbabel.so.7")
-    # Idempotent + race-safe across parallel gnina workers: the target is a
-    # fixed path, so a pre-existing link is already correct.
-    try:
-        if os.path.islink(link):
-            if os.readlink(link) != GNINA_OB_SYSTEM_LIB:
-                os.unlink(link)
-        elif os.path.exists(link):
-            os.remove(link)
-
-        if not os.path.lexists(link):
-            os.symlink(GNINA_OB_SYSTEM_LIB, link)
-    except OSError as e:
-        logger.warning("gnina: failed to set up OpenBabel shim (%s)", e)
-        return None
-    return shim_dir, GNINA_OB_PLUGIN_DIR, GNINA_OB_DATA_DIR
+    return None
 
 
 def parse_gnina_stdout(stdout: str) -> list[tuple[int, float, float, float]]:
@@ -145,9 +116,19 @@ def deploy_gnina(
     exhaustiveness: int = GNINA_DEFAULT_EXHAUSTIVENESS,
     n_poses: int = GNINA_DEFAULT_NUMBER_OF_POSES,
     seed: int = RANDOM_SEED,
-    cnn_scoring: str = GNINA_DEFAULT_CNN_SCORING,
+    cnn_scoring: str | None = None,
     use_gpu: bool = True,
     subprocess_log_path: str | None = None,
+    pose_mode: str = DEFAULT_POSE_MODE,
+    flex_pdbqt: str | None = None,
+    flexres: str | None = None,
+    flexdist_ligand: str | None = None,
+    flexdist: float | None = None,
+    out_flex_pdbqt: str | None = None,
+    covalent_rec_atom: str | None = None,
+    covalent_lig_atom_pattern: str | None = None,
+    covalent_optimize_lig: bool = GNINA_COVALENT_OPTIMIZE_LIG,
+    covalent_bond_order: int = GNINA_COVALENT_BOND_ORDER,
 ) -> dict:
     """
     Run docking with the gnina CLI.
@@ -164,66 +145,140 @@ def deploy_gnina(
     :param output_scores: Path to write the per-pose score file. Format mirrors
         Vina's (``mode: affinity``) extended with a tab-separated CNN score:
         ``mode: affinity\\tcnn_score``.
-    :param exhaustiveness: Search exhaustiveness (gnina default 8).
-    :param n_poses: Number of poses to keep (``--num_modes``).
+    :param exhaustiveness: Search exhaustiveness (gnina default 8). Ignored
+        when ``pose_mode`` is ``local`` or ``score`` (gnina drops the
+        global-search step in those modes).
+    :param n_poses: Number of poses to keep (``--num_modes``). Effectively
+        forced to 1 in ``local`` / ``score`` modes — those emit a single
+        pose row.
     :param seed: RNG seed.
     :param cnn_scoring: One of gnina's CNN modes (``none``/``rescore``/
         ``refinement``/``metrorescore``/``metrorefine``/``all``). Default
         ``rescore`` does Vina search then CNN-rescores the top poses.
     :param use_gpu: When False, pass ``--no_gpu`` to gnina (CPU-only inference).
+    :param pose_mode: One of ``"dock"`` (default; normal global search),
+        ``"local"`` (appends ``--local_only`` — single local refinement of
+        the supplied pose), or ``"score"`` (appends ``--score_only`` —
+        evaluate the supplied pose, no movement). ``local``/``score`` are
+        the modes that honour an experimentally-informed starting pose;
+        the global search in ``dock`` mode ignores the supplied
+        coordinates.
+    :param flex_pdbqt: Pre-prepared flexible-residue PDBQT (from obabel split).
+        Mutually exclusive with ``flexres``/``flexdist_ligand``/``flexdist``.
+    :param flexres: Explicit flexible-residue spec in gnina's ``chain:resnum[,resnum]``
+        format (e.g. ``"A:88,91"``).  Passed directly as ``--flexres``.  Takes
+        priority over ``flexdist_ligand``/``flexdist``; ``flex_pdbqt`` takes
+        priority over this.
+    :param flexdist_ligand: Path to the ligand file used as the flexdist anchor.
+        gnina selects flexible residues within ``flexdist`` Å of this ligand.
+    :param flexdist: Distance threshold (Å) for automatic flexible-residue
+        selection via ``--flexdist_ligand``.
+    :param out_flex_pdbqt: Where gnina should write the flexible-residue poses.
+    :param covalent_rec_atom: Receptor atom the ligand covalently bonds to, in
+        gnina's ``chain:resnum:atomname`` form (e.g. ``A:145:SG``). Triggers
+        covalent docking when given together with ``covalent_lig_atom_pattern``.
+        The residue number must match the *receptor file passed here* — for
+        guild that is the cleaned/renumbered protein.
+    :param covalent_lig_atom_pattern: SMARTS matching the ligand warhead atom
+        that forms the covalent bond (e.g. ``[CX4]Cl`` for a chloroacetamide,
+        ``C#N`` for a nitrile).
+    :param covalent_optimize_lig: Pass ``--covalent_optimize_lig`` to UFF-optimise
+        the ligand+residue adduct (recommended for sensible covalent geometry).
+    :param covalent_bond_order: Bond order of the covalent bond (default 1).
     :return: ``{"scores": [...affinities], "cnn_scores": [...], "out_pdbqt":
         output_pdbqt, "output_scores": output_scores}``.
     """
+    if pose_mode not in POSE_MODES:
+        raise ValueError(f"Invalid pose_mode={pose_mode!r}; expected one of {POSE_MODES}.")
+
     if receptor.endswith(".pdbqt"):
         _validate_pdbqt(receptor, "receptor")
     if ligand.endswith(".pdbqt"):
         _validate_pdbqt(ligand, "ligand")
+    if flex_pdbqt:
+        _validate_pdbqt(flex_pdbqt, "flex receptor")
 
     cx, cy, cz = center
     sx, sy, sz = size
 
+    if cnn_scoring is None:
+        if covalent_rec_atom and covalent_lig_atom_pattern:
+            cnn_scoring = GNINA_DEFAULT_CNN_SCORING_COVALENT_ONLY
+        else:
+            cnn_scoring = GNINA_DEFAULT_CNN_SCORING
+
     argv = [
         GNINA_BINARY,
-        "--receptor", receptor,
-        "--ligand", ligand,
-        "--center_x", str(cx),
-        "--center_y", str(cy),
-        "--center_z", str(cz),
-        "--size_x", str(sx),
-        "--size_y", str(sy),
-        "--size_z", str(sz),
-        "--out", output_pdbqt,
-        "--num_modes", str(n_poses),
-        "--exhaustiveness", str(exhaustiveness),
-        "--seed", str(seed),
-        "--cnn_scoring", cnn_scoring,
+        "--receptor",
+        receptor,
+        "--ligand",
+        ligand,
+        "--center_x",
+        str(cx),
+        "--center_y",
+        str(cy),
+        "--center_z",
+        str(cz),
+        "--size_x",
+        str(sx),
+        "--size_y",
+        str(sy),
+        "--size_z",
+        str(sz),
+        "--out",
+        output_pdbqt,
+        "--num_modes",
+        str(n_poses),
+        "--exhaustiveness",
+        str(exhaustiveness),
+        "--seed",
+        str(seed),
+        "--cnn_scoring",
+        cnn_scoring,
     ]
     if not use_gpu:
         argv.append("--no_gpu")
+    if pose_mode == POSE_MODE_LOCAL:
+        argv.append("--local_only")
+    elif pose_mode == POSE_MODE_SCORE:
+        argv.append("--score_only")
+    if flex_pdbqt:
+        argv += ["--flex", flex_pdbqt]
+    elif flexres:
+        argv += ["--flexres", flexres]
+    elif flexdist_ligand and flexdist is not None:
+        argv += ["--flexdist_ligand", flexdist_ligand, "--flexdist", str(flexdist)]
+    if out_flex_pdbqt and (flex_pdbqt or flexres or (flexdist_ligand and flexdist is not None)):
+        argv += ["--out_flex", out_flex_pdbqt]
+    if covalent_rec_atom and covalent_lig_atom_pattern:
+        argv += [
+            "--covalent_rec_atom",
+            covalent_rec_atom,
+            "--covalent_lig_atom_pattern",
+            covalent_lig_atom_pattern,
+            "--covalent_bond_order",
+            str(covalent_bond_order),
+        ]
+        if covalent_optimize_lig:
+            argv.append("--covalent_optimize_lig")
 
-    # gnina's torch/openbabel/boost live under /opt/gnina/lib, isolated from
+    # gnina's torch/CUDA runtime live under /opt/gnina/lib, isolated from
     # the rest of the image. Prepend that to LD_LIBRARY_PATH for this call
-    # only — gnina ABI demands its own libtorch + libcudart 12, which would
-    # clash with our venv-managed CUDA 13 torch if we set it globally.
+    # only — gnina's CUDA 12 runtime would otherwise clash with the main
+    # image's venv-managed torch if we set it globally.
     env = os.environ.copy()
     ld_parts = [GNINA_LIB_PATH]
-
-    # Repoint gnina's broken OpenBabel at the system .so.8 + its plugins so the
-    # ``--out`` pose file isn't written empty. The shim dir goes *ahead* of
-    # GNINA_LIB_PATH so its libopenbabel.so.7 symlink wins over the bundled
-    # (plugin-less) one, while gnina's own libtorch/boost still resolve from
-    # /opt/gnina/lib. No-ops to today's behaviour if the system OB is absent.
-    ob_shim = _ensure_openbabel_plugin_shim()
-    if ob_shim is not None:
-        shim_dir, plugin_dir, data_dir = ob_shim
-        ld_parts.insert(0, shim_dir)
-        env["BABEL_LIBDIR"] = plugin_dir
-        env["BABEL_DATADIR"] = data_dir
 
     existing_ld = env.get("LD_LIBRARY_PATH", "")
     if existing_ld:
         ld_parts.append(existing_ld)
     env["LD_LIBRARY_PATH"] = ":".join(ld_parts)
+
+    # OpenBabel data files (UFF.prm etc.) live under /opt/gnina/share/openbabel.
+    # gnina's static OB needs BABEL_DATADIR set to find them — without this,
+    # --covalent_optimize_lig prints "Cannot open UFF.prm" and skips the
+    # post-bond UFF minimisation.
+    env["BABEL_DATADIR"] = GNINA_OB_DATA_DIR
 
     try:
         completed = subprocess.run(
@@ -265,7 +320,7 @@ def deploy_gnina(
     cnn_scores = [cnn for (_mode, _affinity, cnn, _cnn_aff) in poses]
 
     with open(output_scores, "w") as f:
-        for (mode, affinity, cnn, _cnn_aff) in poses:
+        for mode, affinity, cnn, _cnn_aff in poses:
             # mode is 1-based in gnina's table; keep that to make the file
             # round-trippable to the CLI output.
             f.write(f"{mode}: {affinity}\t{cnn}\n")

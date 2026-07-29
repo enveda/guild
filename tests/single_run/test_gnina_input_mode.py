@@ -33,7 +33,9 @@ TEST_DATA_DIR = TEST_DIR / "test_data"
 def fake_inputs(tmp_path: Path):
     """Create minimal placeholder receptor + ligand files for both formats."""
     pdb = tmp_path / "receptor.pdb"
-    pdb.write_text("ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00  0.00           N\nEND\n")
+    pdb.write_text(
+        "ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00  0.00           N\nEND\n"
+    )
 
     sdf = tmp_path / "ligand.sdf"
     sdf.write_text("dummy\n\n\n  0  0  0  0  0  0  0  0  0  0999 V2000\nM  END\n$$$$\n")
@@ -53,8 +55,10 @@ def fake_inputs(tmp_path: Path):
     )
 
     return {
-        "pdb": str(pdb), "sdf": str(sdf),
-        "pdbqt_receptor": str(pdbqt_r), "pdbqt_ligand": str(pdbqt_l),
+        "pdb": str(pdb),
+        "sdf": str(sdf),
+        "pdbqt_receptor": str(pdbqt_r),
+        "pdbqt_ligand": str(pdbqt_l),
         "out_pdbqt": str(tmp_path / "out.pdbqt"),
         "out_scores": str(tmp_path / "scores.txt"),
     }
@@ -142,9 +146,7 @@ def cleanup_bulk():
         shutil.rmtree(test_project, ignore_errors=True)
 
 
-def test_bulkrun_downgrades_sdf_to_pdbqt_when_vina_also_requested(
-    bulk_table, cleanup_bulk, caplog
-):
+def test_bulkrun_downgrades_sdf_to_pdbqt_when_vina_also_requested(bulk_table, cleanup_bulk, caplog):
     """Co-requesting Vina forces gnina back to PDBQT mode with a warning."""
     caplog.set_level(logging.WARNING, logger="guild.bulk")
 
@@ -161,8 +163,7 @@ def test_bulkrun_downgrades_sdf_to_pdbqt_when_vina_also_requested(
 
     assert bulk.gnina_input_mode == "pdbqt"
     assert any(
-        "SDF-mode requested for gnina but Vina" in rec.message
-        for rec in caplog.records
+        "SDF-mode requested for gnina but Vina" in rec.message for rec in caplog.records
     ), f"expected downgrade warning, got: {[r.message for r in caplog.records]}"
 
 
