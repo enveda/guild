@@ -1,0 +1,32 @@
+name: relock
+
+# Temporary: regenerates uv.lock on Linux and uploads it as an artifact.
+# `uv lock` cannot run on Windows or macOS for this project because
+# deepspeed==0.5.9 (via fair-esm[esmfold]) is sdist-only and compiles CPU ops
+# while generating metadata. Delete this workflow once the lock is committed.
+on:
+  push:
+    branches: [sync/flexible-covalent-docking-interactions]
+
+jobs:
+  relock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Regenerate lockfile
+        run: uv lock --verbose 2>&1 | tail -40
+
+      - name: Show what changed
+        run: git --no-pager diff --stat uv.lock
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uv-lock
+          path: uv.lock
+          if-no-files-found: error
