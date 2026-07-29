@@ -99,10 +99,16 @@ def analyze_prolif_interactions(
     try:
         import prolif
         from prolif.molecule import Molecule
-    except ImportError:
+    except ImportError as error:
+        # Report the real exception. prolif pulls in MDAnalysis and RDKit, so an
+        # ImportError here often means an installed-but-broken dependency rather
+        # than a missing prolif, and reporting only the latter sends you looking
+        # in the wrong place.
         logger.warning(
-            "prolif not available — skipping ProLIF analysis. "
-            "Ensure 'prolif>=2.0.0,<3' is listed in pyproject.toml dependencies."
+            f"ProLIF analysis unavailable — {type(error).__name__}: {error}. "
+            f"If prolif itself is missing, check 'prolif>=2.0.0,<3' is in "
+            f"pyproject.toml and that uv.lock is up to date; otherwise this is a "
+            f"broken or incompatible transitive dependency."
         )
         return []
 

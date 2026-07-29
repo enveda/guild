@@ -1,0 +1,38 @@
+name: diagnose-prolif
+
+# Temporary: reproduces the ProLIF import on Linux/CPython 3.10 at the locked
+# versions and prints the real traceback. The library swallows the exception by
+# design, so this is the quickest way to see it without a 40-minute image build.
+# Delete once the cause is understood.
+on:
+  push:
+    branches: [sync/flexible-covalent-docking-interactions]
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Import prolif at locked versions
+        run: |
+          uv run --python 3.10 --no-project \
+            --with "numpy==1.26.4" \
+            --with "mdanalysis==2.9.0" \
+            --with "prolif==2.1.0" \
+            --with "rdkit==2025.9.3" \
+            python -c "
+          import traceback
+          try:
+              import prolif
+              from prolif.molecule import Molecule
+              print('IMPORT OK', prolif.__version__)
+          except BaseException:
+              print('IMPORT FAILED:')
+              traceback.print_exc()
+          "
