@@ -689,7 +689,16 @@ class Guild:
 
         flex_pdbqt = None
         receptor_for_vina = self.cleaned_protein_pdbqt
-        if self.flexible_docking:
+        # Flexible docking applies to the global search only. The local/score runners
+        # call set_receptor() with a single rigid file, so splitting the receptor here
+        # would dock against one whose flexible side chains had been moved into a file
+        # nothing reads -- silently wrong rather than merely unsupported.
+        if self.flexible_docking and self.pose_mode != POSE_MODE_DOCK:
+            logger.warning(
+                f"Autodock Vina: flexible_docking is not supported in "
+                f"pose_mode={self.pose_mode!r}; docking against the full rigid receptor."
+            )
+        elif self.flexible_docking:
             vina_flex_center, vina_flex_size = get_center_and_size_from_box_file(self.vina_box)
             flexres_str = get_flexres_string_from_box(
                 self.cleaned_protein, self.protein_chains, vina_flex_center, vina_flex_size
@@ -741,7 +750,11 @@ class Guild:
                     if self.vina_exhaustiveness is not None and self.pose_mode == POSE_MODE_DOCK
                     else {}
                 ),
-                flex_pdbqt=flex_pdbqt,
+                # Only deploy_vina takes a flex receptor; the local/score runners have
+                # no such parameter, so passing it unconditionally raised TypeError and
+                # -- being caught below -- turned every pose-guided Vina run into a
+                # logged "error in docking".
+                **({"flex_pdbqt": flex_pdbqt} if self.pose_mode == POSE_MODE_DOCK else {}),
             )
         except Exception as e:
             logger.error(f"Autodock Vina: error in docking: {e}")
