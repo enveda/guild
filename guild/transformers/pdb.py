@@ -810,6 +810,13 @@ def covalent_rec_atom_exists(protein_pdb: str, spec: str) -> bool:
         logger.warning(f"covalent_rec_atom_exists: chain '{chain_id}' not found in {protein_pdb}.")
         return False
     for residue in model[chain_id]:
+        # residue.id is (hetflag, resseq, icode): hetflag is blank for standard
+        # residues, "W" for water and "H_*" for hetero. renumber_pdb_residues
+        # renumbers every residue in a chain, so a water or cofactor can end up
+        # carrying a protein residue's number. Match the protein residue, which is
+        # also the only kind add_covalent_conect will resolve (it reads ATOM records).
+        if residue.id[0] != " ":
+            continue
         if residue.id[1] == resnum:
             if atom_name in residue:
                 return True
@@ -824,7 +831,7 @@ def covalent_rec_atom_exists(protein_pdb: str, spec: str) -> bool:
     return False
 
 
-def add_covalent_conect(complex_pdb: str, covalent_rec_atom: str) -> None:
+def add_covalent_conect(complex_pdb: str, covalent_rec_atom: str, ligand_chain: str = "Z") -> None:
     """
     Append ``CONECT`` records to a complex PDB for a covalent gnina pose.
 
@@ -834,15 +841,22 @@ def add_covalent_conect(complex_pdb: str, covalent_rec_atom: str) -> None:
     any manual post-processing.
 
     The receptor attachment atom is located by matching the
-    ``chain:resnum:atomname`` spec against ``ATOM`` records.  The warhead is
-    the nearest ``HETATM`` (chain Z) atom — gnina enforces a bond-length
-    geometry, so it should always be within 2.5 Å.  If no HETATM is found
-    within that threshold the function logs a warning and returns without
-    modifying the file.
+    ``chain:resnum:atomname`` spec against ``ATOM`` records.  The warhead is the
+    nearest ``HETATM`` atom **on the ligand chain** — gnina enforces a
+    bond-length geometry, so it should always be within 2.5 Å.  If no such atom
+    is found within that threshold the function logs a warning and returns
+    without modifying the file.
+
+    Restricting the search to the ligand chain matters because
+    :func:`build_complex_pdb` copies the receptor through verbatim: a metal,
+    cofactor or ordered water carried over as a ``HETATM`` can sit closer to a
+    reactive residue than the warhead does, and would otherwise win.
 
     :param complex_pdb: Path to the complex PDB produced by :func:`build_complex_pdb`.
     :param covalent_rec_atom: Receptor atom spec, ``chain:resnum:atomname``
         (e.g. ``"A:145:SG"``).  Must match the spec that was passed to gnina.
+    :param ligand_chain: Chain the docked ligand was written to, matching the
+        ``ligand_chain`` given to :func:`build_complex_pdb`.
     :raises ValueError: If the spec is malformed or the receptor atom is not
         found in the complex PDB.
     """
@@ -891,11 +905,13 @@ def add_covalent_conect(complex_pdb: str, covalent_rec_atom: str) -> None:
             f"not found in {complex_pdb}."
         )
 
-    # Find the closest HETATM (ligand chain Z) within 2.5 Å.
+    # Find the closest ligand-chain HETATM within 2.5 Å.
     best_serial = None
     best_dist = float("inf")
     for ln in lines:
         if not ln.startswith("HETATM"):
+            continue
+        if ln[21:22].strip() != ligand_chain:
             continue
         try:
             lig_serial = int(ln[6:11].strip())
@@ -909,7 +925,8 @@ def add_covalent_conect(complex_pdb: str, covalent_rec_atom: str) -> None:
 
     if best_serial is None or best_dist > _COVALENT_BOND_DIST_MAX:
         logger.warning(
-            f"add_covalent_conect: no HETATM within {_COVALENT_BOND_DIST_MAX} Å of "
+            f"add_covalent_conect: no chain-{ligand_chain} HETATM within "
+            f"{_COVALENT_BOND_DIST_MAX} Å of "
             f"'{covalent_rec_atom}' in {complex_pdb} "
             f"(closest={best_dist:.2f} Å) — CONECT not written."
         )
