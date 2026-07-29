@@ -35,6 +35,16 @@ ENV APP_USER_HOME="/home/${APP_USER}"
 ENV PROJECT_ROOT="${APP_ROOT}/${APP_NAME}"
 ENV PROJECT_TEST_ROOT="${APP_ROOT}/${APP_TESTS}"
 
+# RDKit's drawing module links libXrender/libXext, and importing ProLIF pulls it
+# in, so `import prolif` fails with "libXrender.so.1: cannot open shared object
+# file" without these. They live in `base` rather than in the final `docker`
+# stage because `test` branches off `base-build`, not off `docker` -- putting
+# them downstream leaves the test image unable to import ProLIF at all.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends libxrender1 libxext6; \
+    rm -rf /var/lib/apt/lists/*
+
 RUN groupadd --gid 1000 ${APP_USER} && \
     useradd --uid 1000 --gid 1000 -m ${APP_USER} && \
     mkdir -p ${APP_ROOT} ${PROJECT_ROOT} ${PROJECT_TEST_ROOT} && \
@@ -173,8 +183,6 @@ RUN set -eux; \
       libxml2 \
       libinchi1 \
       libc-bin \
-      libxrender1 \
-      libxext6 \
     ; \
     rm -rf /var/lib/apt/lists/* && \
     ln -sf /usr/lib/x86_64-linux-gnu/libinchi.so.1 /usr/lib/x86_64-linux-gnu/libinchi.so.0 && \
