@@ -3,7 +3,7 @@ Rank percentile scoring functions.
 
 Simple rank percentile per protein, per method:
   For each molecule, compute what fraction of ALL molecules (same protein)
-  have a worse docking score.
+  score at least as well as it does (itself included).
 
       rp_score = rank / N     (0 ≈ best, 1 ≈ worst)
 

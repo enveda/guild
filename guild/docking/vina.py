@@ -12,11 +12,14 @@ from vina import Vina
 from guild.constants.bulk import (
     BATCH_FOLDER,
     COMBINATION_ID,
+    COMBINATIONS_TABLE_KEY,
     COMBINATIONS_TO_RUN_KEY,
+    VINA_SCORES_FILE,
 )
 from guild.constants.general import RANDOM_SEED
 from guild.constants.guild import (
     LIGAND_ID,
+    POSE,
     PROTEIN_CONF_ID,
     VINA_FOLDER,
     VINA_SCORE,
@@ -360,6 +363,75 @@ def vina_guild_scoring(batch_dictionary):
     return combinations_df[[COMBINATION_ID, VINA_SCORE, PROTEIN_CONF_ID, LIGAND_ID]]
 
 
+def _read_vina_pose_scores(input_file: str) -> pd.DataFrame:
+    """
+    Read a Vina score file (written by :func:`deploy_vina`) into a DataFrame
+    with one row per pose: columns ``[POSE, VINA_SCORE]``.
+
+    :param input_file: Path to the ``mode: affinity`` score file.
+    :raises: Whatever ``pandas.read_csv`` raises for a missing/empty file —
+        callers are expected to handle that per-combination.
+    """
+    df = pd.read_csv(input_file, sep=":", header=None, names=[POSE, VINA_SCORE])
+    df[POSE] = df[POSE].astype(int)
+    df[VINA_SCORE] = df[VINA_SCORE].astype(float)
+    return df
+
+
+def write_vina_pose_scores_file(batch_dictionary) -> pd.DataFrame:
+    """
+    Aggregate every pose's Vina score across the whole batch into one file,
+    ``{batch_folder}/vina_scores.txt``.
+
+    ``guild_scores.txt`` (the final ranked output) keeps only the single best
+    (minimum) pose score per combination — the rest is otherwise only
+    recoverable by re-opening each per-combination score file under
+    ``{batch_folder}/vina/{protein_conf_id}_{ligand_id}.txt``. This writes the
+    full distribution once per batch instead.
+
+    Iterates every combination in the batch's combinations table (not just
+    ``COMBINATIONS_TO_RUN_KEY``) so the file stays complete across resumed
+    runs — the per-combination score files persist on disk regardless of
+    which combinations were newly run this call.
+
+    :param batch_dictionary: Standard bulk batch dictionary.
+    :return: DataFrame with columns
+        ``[COMBINATION_ID, PROTEIN_CONF_ID, LIGAND_ID, POSE, VINA_SCORE]``,
+        one row per pose. Also written as CSV to
+        ``{batch_folder}/vina_scores.txt``.
+    """
+    combinations = batch_dictionary[COMBINATIONS_TABLE_KEY][
+        [PROTEIN_CONF_ID, LIGAND_ID]
+    ].drop_duplicates()
+
+    pose_frames = []
+    for _, row in combinations.iterrows():
+        protein_conf_id, ligand_id = row[PROTEIN_CONF_ID], row[LIGAND_ID]
+        score_file = (
+            f"{batch_dictionary[BATCH_FOLDER]}/{VINA_FOLDER}/" f"{protein_conf_id}_{ligand_id}.txt"
+        )
+        try:
+            poses_df = _read_vina_pose_scores(score_file)
+        except Exception as e:
+            logger.info(f"No Vina pose scores for {(protein_conf_id, ligand_id)}: {e}")
+            continue
+        poses_df[COMBINATION_ID] = f"{protein_conf_id}_{ligand_id}"
+        poses_df[PROTEIN_CONF_ID] = protein_conf_id
+        poses_df[LIGAND_ID] = ligand_id
+        pose_frames.append(poses_df)
+
+    columns = [COMBINATION_ID, PROTEIN_CONF_ID, LIGAND_ID, POSE, VINA_SCORE]
+    poses_scores_df = (
+        pd.concat(pose_frames, ignore_index=True)[columns]
+        if pose_frames
+        else pd.DataFrame(columns=columns)
+    )
+
+    output_path = f"{batch_dictionary[BATCH_FOLDER]}/{VINA_SCORES_FILE}"
+    poses_scores_df.to_csv(output_path, index=False)
+    return poses_scores_df
+
+
 # ── Vina score-only re-scoring of pre-docked poses ──────────────────────────
 # NOTE: Method-specific orchestration (rescore_boltz_pose, rescore_diffdock_pose,
 # vina_rescore_*_batch, vina_rescore_*_guild_scoring) lives in
@@ -367,7 +439,8 @@ def vina_guild_scoring(batch_dictionary):
 # layout of their respective methods. This module keeps only the Vina-grid
 # primitives that any pose source can reuse (compute_box_from_sdf,
 # _compute_box_from_pdb_atoms, _extract_ligand_records,
-# _extract_protein_from_complex, vina_score_pose).
+# _extract_protein_from_complex, _validate_connected_ligand_pdbqt,
+# vina_score_pose).
 
 
 def compute_box_from_sdf(sdf_path: str, padding: float = 4.0):
@@ -519,3 +592,28 @@ def _extract_protein_from_complex(complex_pdb: str, output_pdb: str, ligand_resn
             f"No protein atoms left in {complex_pdb} after excluding resname '{ligand_resname}'"
         )
     return output_pdb
+
+
+def _validate_connected_ligand_pdbqt(pdbqt_path: str) -> None:
+    """
+    Raise if ``pdbqt_path`` is not a single connected ligand.
+
+    Callers that build the ligand PDBQT from an isolated-ligand PDB with no
+    ``CONECT`` records (e.g. Boltz rescoring's ``_extract_ligand_records``
+    output) rely on OpenBabel to infer bonds from 3D distance alone. When the
+    source pose is physically implausible (atoms placed too far apart to
+    bond — seen with some Boltz-predicted ligand geometries), OpenBabel can't
+    connect them and silently writes one single-atom ``ROOT``/``ENDROOT``
+    torsion-tree block per atom instead of one connected ligand. Vina would
+    then score each fragment independently with no intra-ligand bonds,
+    producing a meaningless energy without ever raising — so this must be
+    checked explicitly before scoring.
+    """
+    with open(pdbqt_path) as f:
+        n_roots = sum(1 for line in f if line.startswith("ROOT"))
+    if n_roots != 1:
+        raise ValueError(
+            f"Ligand PDBQT {pdbqt_path} is not a single connected molecule "
+            f"({n_roots} disconnected fragment(s), expected 1) — likely a "
+            "physically implausible predicted pose; refusing to rescore."
+        )

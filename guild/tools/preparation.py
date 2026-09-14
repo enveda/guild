@@ -48,13 +48,33 @@ def _is_metal_res(res):
 
 
 def _pick_altloc_atoms(res, prefer_altloc="A", occ_floor=0.01):
+    """
+    Resolve alternate side-chain conformers to a single atom per name.
+
+    Must iterate ``res.get_unpacked_list()`` rather than the residue
+    directly: Biopython pre-merges same-named atoms into a single
+    ``DisorderedAtom`` wrapper per name at parse time, so a plain
+    ``for a in res`` loop only ever sees one (already-collapsed) entry per
+    atom name and this function's own arbitration never fires — the
+    wrapper's other conformer(s) still ride along when copied and get
+    written back out by PDBIO regardless of what's "chosen" here.
+    ``get_unpacked_list()`` is what actually exposes the individual
+    per-altloc atoms to pick between.
+
+    Returns ``(picked_atoms, disordered)`` where ``disordered`` maps atom
+    name -> sorted list of altloc letters seen, for any name that had more
+    than one — used upstream to report what was collapsed.
+    """
     chosen = {}
-    for a in res:
+    seen_altlocs = {}
+    for a in res.get_unpacked_list():
         name = a.get_name().strip()
         occ = a.get_occupancy() or 0.0
         if occ < occ_floor:  # drop zero/near-zero occupancy
             continue
         alt = (a.get_altloc() or "").strip()
+        if alt:
+            seen_altlocs.setdefault(name, set()).add(alt)
         cur = chosen.get(name)
         take = False
         if cur is None:
@@ -69,7 +89,38 @@ def _pick_altloc_atoms(res, prefer_altloc="A", occ_floor=0.01):
                 take = True
         if take:
             chosen[name] = a
-    return list(chosen.values())
+    disordered = {name: sorted(alts) for name, alts in seen_altlocs.items() if len(alts) > 1}
+    return list(chosen.values()), disordered
+
+
+def detect_altloc_residues(input_pdb: str) -> list[str]:
+    """
+    Scan a raw receptor PDB for residues with alternate side-chain
+    conformers, without writing anything out.
+
+    ``clean_receptor`` collapses these silently later in the pipeline
+    (during ``Guild._prepare_protein``); this is a cheap read-only pass
+    callers can run up front — e.g. across every unique receptor in a bulk
+    run, before any batch/docking work starts — so the collapse decision is
+    surfaced immediately rather than discovered only in a per-target log.
+
+    :return: One human-readable string per affected residue, e.g.
+        ``"A:65 MET (CG,SD,CE: A/B)"``.
+    """
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("receptor", input_pdb)
+    model = next(structure.get_models())
+    findings = []
+    for chain in model:
+        for res in chain:
+            _, disordered = _pick_altloc_atoms(res, occ_floor=0.0)
+            if disordered:
+                names = ",".join(disordered.keys())
+                alts = sorted({alt for alts in disordered.values() for alt in alts})
+                findings.append(
+                    f"{chain.id}:{res.id[1]} {res.get_resname()} ({names}: {'/'.join(alts)})"
+                )
+    return findings
 
 
 def clean_receptor(
@@ -83,6 +134,7 @@ def clean_receptor(
     parser = PDBParser(QUIET=True)
     in_struct = parser.get_structure("receptor", input_pdb)
     in_model = next(in_struct.get_models())
+    altloc_report = []
 
     # build output
     structure_builder = StructureBuilder.StructureBuilder()
@@ -114,9 +166,21 @@ def clean_receptor(
             if het and not ((_is_metal_res(res) and keep_metals) or (resname in keep_resnames)):
                 continue
 
-            picked = _pick_altloc_atoms(res, prefer_altloc=prefer_altloc, occ_floor=0.0)
+            picked, disordered = _pick_altloc_atoms(res, prefer_altloc=prefer_altloc, occ_floor=0.0)
             if not picked:
                 picked = list(res)
+            if disordered:
+                kept = {
+                    a.get_name().strip(): (a.get_altloc() or "").strip() or prefer_altloc
+                    for a in picked
+                }
+                altloc_report.append(
+                    f"{cid_base}:{res.id[1]}{res.get_resname()} "
+                    + ", ".join(
+                        f"{name}[{'/'.join(alts)}]->{kept.get(name, '?')}"
+                        for name, alts in disordered.items()
+                    )
+                )
 
             out_chain = ensure_chain(cid)
             structure_builder.init_residue(res.get_resname(), res.id[0], res.id[1], res.id[2])
@@ -124,13 +188,28 @@ def clean_receptor(
             out_res.child_list[:] = []
             for current_atom in picked:
                 atom_copy = current_atom.copy()
-                # altloc/occ normalize
-                alt = (atom_copy.get_altloc() or "").strip()
-                if alt and alt != prefer_altloc:
-                    atom_copy.set_altloc(" ")
+                # This is now the sole conformer kept for its atom name, so
+                # clear the altloc code AND Biopython's disordered_flag
+                # (inherited from the original altloc atom via .copy()) —
+                # otherwise PDBIO's writer sees a truthy is_disordered() on a
+                # plain Atom and crashes looking for disordered_get_list().
+                atom_copy.set_altloc(" ")
+                atom_copy.disordered_flag = 0
                 if getattr(atom_copy, "segid", None) is None:
                     atom_copy.segid = "    "
                 out_res.add(atom_copy)
+
+    if altloc_report:
+        logger.warning(
+            "clean_receptor: %d residue(s) in %s had alternate side-chain conformers; "
+            "collapsed to a single atom per name (kept altloc '%s' where present, else "
+            "highest occupancy) so downstream flexres/PDBQT tooling sees one conformer. "
+            "Affected: %s",
+            len(altloc_report),
+            input_pdb,
+            prefer_altloc,
+            "; ".join(altloc_report),
+        )
 
     io = PDBIO()
     io.set_structure(out_struct)  # write OUTPUT structure

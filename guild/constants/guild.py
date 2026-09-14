@@ -22,6 +22,9 @@ BOX_LOCATION = "box_location"
 COVALENT_REC_ATOM = "covalent_rec_atom"
 COVALENT_LIG_SMARTS = "covalent_lig_smarts"
 GNINA_FLEXRES = "gnina_flexres"
+# Per-pose index column in the batch-level all-poses score files
+# (VINA_SCORES_FILE / GNINA_SCORES_FILE in guild/constants/bulk.py).
+POSE = "pose"
 
 
 """
@@ -32,10 +35,16 @@ KARMADOCK_PREFIX = "karmadock"
 DIFFDOCK_PREFIX = "diffdock"
 BOLTZ_PREFIX = "boltz"
 GNINA_PREFIX = "gnina"
+NESSO_PREFIX = "nesso"
 # Vina re-scoring is now split by upstream pose source so a run that produces
 # both Boltz and DiffDock complexes gets two distinct re-score columns.
 VINA_RESCORE_BOLTZ_PREFIX = "vina_rescore_boltz"
 VINA_RESCORE_DIFFDOCK_PREFIX = "vina_rescore_diffdock"
+# gnina re-scoring mirrors the Vina rescore tracks above — same split by
+# upstream pose source, additive alongside (not a replacement for) the Vina
+# rescore columns.
+GNINA_RESCORE_BOLTZ_PREFIX = "gnina_rescore_boltz"
+GNINA_RESCORE_DIFFDOCK_PREFIX = "gnina_rescore_diffdock"
 VINA_SCORE = f"{VINA_PREFIX}_score"
 KARMADOCK_SCORE = f"{KARMADOCK_PREFIX}_score"
 DIFFDOCK_SCORE = f"{DIFFDOCK_PREFIX}_score"
@@ -48,6 +57,32 @@ GNINA_SCORE = f"{GNINA_PREFIX}_score"
 GNINA_CNN_SCORE = f"{GNINA_PREFIX}_cnn_score"
 VINA_RESCORE_BOLTZ_SCORE = f"{VINA_RESCORE_BOLTZ_PREFIX}_score"
 VINA_RESCORE_DIFFDOCK_SCORE = f"{VINA_RESCORE_DIFFDOCK_PREFIX}_score"
+GNINA_RESCORE_BOLTZ_SCORE = f"{GNINA_RESCORE_BOLTZ_PREFIX}_score"
+GNINA_RESCORE_DIFFDOCK_SCORE = f"{GNINA_RESCORE_DIFFDOCK_PREFIX}_score"
+# Side-channel CNN confidence, same status as GNINA_CNN_SCORE above: rides
+# along for analysis but is not registered in RANKS_DICTIONARY/RP_SCORES_DICTIONARY.
+GNINA_RESCORE_BOLTZ_CNN_SCORE = f"{GNINA_RESCORE_BOLTZ_PREFIX}_cnn_score"
+GNINA_RESCORE_DIFFDOCK_CNN_SCORE = f"{GNINA_RESCORE_DIFFDOCK_PREFIX}_cnn_score"
+# Nesso-1's affinity head is a real predicted potency — log10(IC50/uM), lower
+# is more potent — unlike boltz_score (ipTM confidence) or the docking ΔG
+# scores. It is therefore guild's first "minimum" direction that is also a
+# potency rather than an energy; see SCORES_DIRECTION_DICTIONARY in
+# guild/constants/bulk.py.
+NESSO_SCORE = f"{NESSO_PREFIX}_score"
+# Side channels from Nesso's affinity.json: the Hit-ID binder-probability
+# head and the protein-ligand interface entropy (the paper's H_PL, a
+# confidence gate). Saved alongside nesso_score but, like GNINA_CNN_SCORE,
+# deliberately absent from ALL_AVAILABLE_METHODS / SCORES_DICTIONARY /
+# RANKS_DICTIONARY / RP_SCORES_DICTIONARY.
+NESSO_BINDER_PROBABILITY = f"{NESSO_PREFIX}_binder_probability"
+NESSO_ENTROPY_PL = f"{NESSO_PREFIX}_entropy_pl"
+# Side channel: Boltz-2's own affinity head (log10(IC50/uM)), read from the
+# same output tree boltz_guild_scoring already produces. guild's primary
+# boltz_score is an ipTM confidence, not this — this column exists purely as
+# a free, same-quantity comparator for validating Nesso-1 against. Also
+# deliberately absent from ALL_AVAILABLE_METHODS / SCORES_DICTIONARY /
+# RANKS_DICTIONARY / RP_SCORES_DICTIONARY.
+BOLTZ_AFFINITY_SCORE = f"{BOLTZ_PREFIX}_affinity_score"
 
 
 SCORES_DICTIONARY = {
@@ -56,8 +91,11 @@ SCORES_DICTIONARY = {
     DIFFDOCK_PREFIX: DIFFDOCK_SCORE,
     BOLTZ_PREFIX: BOLTZ_SCORE,
     GNINA_PREFIX: GNINA_SCORE,
+    NESSO_PREFIX: NESSO_SCORE,
     VINA_RESCORE_BOLTZ_PREFIX: VINA_RESCORE_BOLTZ_SCORE,
     VINA_RESCORE_DIFFDOCK_PREFIX: VINA_RESCORE_DIFFDOCK_SCORE,
+    GNINA_RESCORE_BOLTZ_PREFIX: GNINA_RESCORE_BOLTZ_SCORE,
+    GNINA_RESCORE_DIFFDOCK_PREFIX: GNINA_RESCORE_DIFFDOCK_SCORE,
 }
 
 ALL_AVAILABLE_METHODS = [
@@ -66,6 +104,7 @@ ALL_AVAILABLE_METHODS = [
     DIFFDOCK_PREFIX,
     BOLTZ_PREFIX,
     GNINA_PREFIX,
+    NESSO_PREFIX,
 ]
 
 RP_SCORES_COLUMNS = [
@@ -77,6 +116,7 @@ RP_SCORES_COLUMNS = [
     VINA_SCORE,
     BOLTZ_SCORE,
     GNINA_SCORE,
+    NESSO_SCORE,
 ]
 
 """
@@ -93,6 +133,9 @@ KARMADOCK_FOLDER = KARMADOCK_PREFIX
 DIFFDOCK_FOLDER = DIFFDOCK_PREFIX
 BOLTZ_FOLDER = BOLTZ_PREFIX
 GNINA_FOLDER = GNINA_PREFIX
+NESSO_FOLDER = NESSO_PREFIX
 VINA_RESCORE_BOLTZ_FOLDER = VINA_RESCORE_BOLTZ_PREFIX
 VINA_RESCORE_DIFFDOCK_FOLDER = VINA_RESCORE_DIFFDOCK_PREFIX
+GNINA_RESCORE_BOLTZ_FOLDER = GNINA_RESCORE_BOLTZ_PREFIX
+GNINA_RESCORE_DIFFDOCK_FOLDER = GNINA_RESCORE_DIFFDOCK_PREFIX
 MSA_FOLDER = "msa"
