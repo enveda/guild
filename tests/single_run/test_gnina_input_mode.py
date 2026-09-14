@@ -157,7 +157,6 @@ def test_bulkrun_downgrades_sdf_to_pdbqt_when_vina_also_requested(bulk_table, cl
         gnina_input_mode="sdf",
         use_decoys=False,
         use_known_binders=False,
-        database_update=False,
         use_gpu=False,
         n_workers=1,
     )
@@ -177,7 +176,6 @@ def test_bulkrun_keeps_sdf_when_gnina_alone(bulk_table, cleanup_bulk):
         gnina_input_mode="sdf",
         use_decoys=False,
         use_known_binders=False,
-        database_update=False,
         use_gpu=False,
         n_workers=1,
     )
@@ -193,7 +191,6 @@ def test_bulkrun_keeps_sdf_when_gnina_with_boltz(bulk_table, cleanup_bulk):
         gnina_input_mode="sdf",
         use_decoys=False,
         use_known_binders=False,
-        database_update=False,
         use_gpu=False,
         n_workers=1,
     )

@@ -60,7 +60,6 @@ def test_boltz_auto_enables_both_vina_and_gnina_rescore(test_input_table, cleanu
         methods_to_run=[BOLTZ_PREFIX],
         use_decoys=False,
         use_known_binders=False,
-        database_update=False,
         use_gpu=False,
         n_workers=1,
     )
@@ -80,7 +79,6 @@ def test_diffdock_auto_enables_both_vina_and_gnina_rescore(test_input_table, cle
         methods_to_run=[DIFFDOCK_PREFIX],
         use_decoys=False,
         use_known_binders=False,
-        database_update=False,
         use_gpu=False,
         n_workers=1,
     )
@@ -99,7 +97,6 @@ def test_both_methods_enable_all_four_rescore_tracks(test_input_table, cleanup):
         methods_to_run=[BOLTZ_PREFIX, DIFFDOCK_PREFIX],
         use_decoys=False,
         use_known_binders=False,
-        database_update=False,
         use_gpu=False,
         n_workers=1,
     )
@@ -117,7 +114,6 @@ def test_vina_alone_does_not_enable_any_rescore(test_input_table, cleanup):
         methods_to_run=[VINA_PREFIX],
         use_decoys=False,
         use_known_binders=False,
-        database_update=False,
         use_gpu=False,
         n_workers=1,
     )

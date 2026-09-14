@@ -871,7 +871,6 @@ class TestRunPoseValidityAnalysis:
             methods_to_run=[VINA_PREFIX],
             use_decoys=False,
             use_known_binders=False,
-            database_update=False,
             use_gpu=False,
             n_workers=1,
         )
@@ -969,7 +968,6 @@ class TestScoresMerge:
             methods_to_run=[VINA_PREFIX],
             use_decoys=False,
             use_known_binders=False,
-            database_update=False,
             use_gpu=False,
             n_workers=1,
         )
@@ -1147,7 +1145,6 @@ class TestAllMethodsAreCovered:
             methods_to_run=list(self.METHODS),
             use_decoys=False,
             use_known_binders=False,
-            database_update=False,
             use_gpu=False,
             n_workers=1,
         )

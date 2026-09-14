@@ -82,7 +82,6 @@ def test_nesso_alone_does_not_enable_any_rescore(test_input_table, cleanup):
         methods_to_run=[NESSO_PREFIX],
         use_decoys=False,
         use_known_binders=False,
-        database_update=False,
         use_gpu=False,
         n_workers=1,
     )
