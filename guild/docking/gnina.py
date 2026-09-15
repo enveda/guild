@@ -20,7 +20,6 @@ import pandas as pd
 from guild.constants.bulk import (
     BATCH_FOLDER,
     COMBINATION_ID,
-    COMBINATIONS_TABLE_KEY,
     COMBINATIONS_TO_RUN_KEY,
     GNINA_SCORES_FILE,
 )
@@ -52,6 +51,7 @@ from guild.constants.poses import (
     POSE_MODES,
 )
 from guild.docking.vina import _validate_pdbqt
+from guild.tools.pose_scores import write_pose_scores_file
 from guild.tools.subprocess_log import write_subprocess_log
 
 logger = logging.getLogger(__name__)
@@ -558,54 +558,12 @@ def gnina_guild_scoring(batch_dictionary) -> pd.DataFrame:
 
 
 def write_gnina_pose_scores_file(batch_dictionary) -> pd.DataFrame:
-    """
-    Aggregate every pose's gnina score (+ CNN score) across the whole batch
-    into one file, ``{batch_folder}/gnina_scores.txt``.
-
-    Same rationale as :func:`guild.docking.vina.write_vina_pose_scores_file`:
-    ``guild_scores.txt`` keeps only the single best (minimum-affinity) pose
-    per combination, discarding the rest.
-
-    Iterates every combination in the batch's combinations table (not just
-    ``COMBINATIONS_TO_RUN_KEY``) so the file stays complete across resumed
-    runs — the per-combination score files persist on disk regardless of
-    which combinations were newly run this call.
-
-    :param batch_dictionary: Standard bulk batch dictionary.
-    :return: DataFrame with columns
-        ``[COMBINATION_ID, PROTEIN_CONF_ID, LIGAND_ID, POSE, GNINA_SCORE, GNINA_CNN_SCORE]``,
-        one row per pose. Also written as CSV to
-        ``{batch_folder}/gnina_scores.txt``.
-    """
-    combinations = batch_dictionary[COMBINATIONS_TABLE_KEY][
-        [PROTEIN_CONF_ID, LIGAND_ID]
-    ].drop_duplicates()
-
-    pose_frames = []
-    for _, row in combinations.iterrows():
-        protein_conf_id, ligand_id = row[PROTEIN_CONF_ID], row[LIGAND_ID]
-        score_file = (
-            f"{batch_dictionary[BATCH_FOLDER]}/{GNINA_FOLDER}/" f"{protein_conf_id}_{ligand_id}.txt"
-        )
-        try:
-            poses_df = _read_gnina_pose_scores(score_file)
-        except Exception as e:
-            logger.info(f"No gnina pose scores for {(protein_conf_id, ligand_id)}: {e}")
-            continue
-        if poses_df.empty:
-            continue
-        poses_df[COMBINATION_ID] = f"{protein_conf_id}_{ligand_id}"
-        poses_df[PROTEIN_CONF_ID] = protein_conf_id
-        poses_df[LIGAND_ID] = ligand_id
-        pose_frames.append(poses_df)
-
-    columns = [COMBINATION_ID, PROTEIN_CONF_ID, LIGAND_ID, POSE, GNINA_SCORE, GNINA_CNN_SCORE]
-    poses_scores_df = (
-        pd.concat(pose_frames, ignore_index=True)[columns]
-        if pose_frames
-        else pd.DataFrame(columns=columns)
+    """Aggregate every gnina pose score (+ CNN score) into ``{batch_folder}/gnina_scores.txt``."""
+    return write_pose_scores_file(
+        batch_dictionary,
+        method_folder=GNINA_FOLDER,
+        output_file=GNINA_SCORES_FILE,
+        score_columns=[GNINA_SCORE, GNINA_CNN_SCORE],
+        read_pose_scores=_read_gnina_pose_scores,
+        method_label="gnina",
     )
-
-    output_path = f"{batch_dictionary[BATCH_FOLDER]}/{GNINA_SCORES_FILE}"
-    poses_scores_df.to_csv(output_path, index=False)
-    return poses_scores_df

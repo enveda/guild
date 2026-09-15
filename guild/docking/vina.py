@@ -12,7 +12,6 @@ from vina import Vina
 from guild.constants.bulk import (
     BATCH_FOLDER,
     COMBINATION_ID,
-    COMBINATIONS_TABLE_KEY,
     COMBINATIONS_TO_RUN_KEY,
     VINA_SCORES_FILE,
 )
@@ -32,6 +31,8 @@ from guild.tools.ligand_properties import (
     radius_of_gyration_from_smiles,
     vina_box_edge_from_radius_of_gyration,
 )
+from guild.tools.pose_molecules import is_atom_record, residue_name
+from guild.tools.pose_scores import write_pose_scores_file
 
 logger = logging.getLogger(__name__)
 
@@ -379,57 +380,15 @@ def _read_vina_pose_scores(input_file: str) -> pd.DataFrame:
 
 
 def write_vina_pose_scores_file(batch_dictionary) -> pd.DataFrame:
-    """
-    Aggregate every pose's Vina score across the whole batch into one file,
-    ``{batch_folder}/vina_scores.txt``.
-
-    ``guild_scores.txt`` (the final ranked output) keeps only the single best
-    (minimum) pose score per combination — the rest is otherwise only
-    recoverable by re-opening each per-combination score file under
-    ``{batch_folder}/vina/{protein_conf_id}_{ligand_id}.txt``. This writes the
-    full distribution once per batch instead.
-
-    Iterates every combination in the batch's combinations table (not just
-    ``COMBINATIONS_TO_RUN_KEY``) so the file stays complete across resumed
-    runs — the per-combination score files persist on disk regardless of
-    which combinations were newly run this call.
-
-    :param batch_dictionary: Standard bulk batch dictionary.
-    :return: DataFrame with columns
-        ``[COMBINATION_ID, PROTEIN_CONF_ID, LIGAND_ID, POSE, VINA_SCORE]``,
-        one row per pose. Also written as CSV to
-        ``{batch_folder}/vina_scores.txt``.
-    """
-    combinations = batch_dictionary[COMBINATIONS_TABLE_KEY][
-        [PROTEIN_CONF_ID, LIGAND_ID]
-    ].drop_duplicates()
-
-    pose_frames = []
-    for _, row in combinations.iterrows():
-        protein_conf_id, ligand_id = row[PROTEIN_CONF_ID], row[LIGAND_ID]
-        score_file = (
-            f"{batch_dictionary[BATCH_FOLDER]}/{VINA_FOLDER}/" f"{protein_conf_id}_{ligand_id}.txt"
-        )
-        try:
-            poses_df = _read_vina_pose_scores(score_file)
-        except Exception as e:
-            logger.info(f"No Vina pose scores for {(protein_conf_id, ligand_id)}: {e}")
-            continue
-        poses_df[COMBINATION_ID] = f"{protein_conf_id}_{ligand_id}"
-        poses_df[PROTEIN_CONF_ID] = protein_conf_id
-        poses_df[LIGAND_ID] = ligand_id
-        pose_frames.append(poses_df)
-
-    columns = [COMBINATION_ID, PROTEIN_CONF_ID, LIGAND_ID, POSE, VINA_SCORE]
-    poses_scores_df = (
-        pd.concat(pose_frames, ignore_index=True)[columns]
-        if pose_frames
-        else pd.DataFrame(columns=columns)
+    """Aggregate every Vina pose score in the batch into ``{batch_folder}/vina_scores.txt``."""
+    return write_pose_scores_file(
+        batch_dictionary,
+        method_folder=VINA_FOLDER,
+        output_file=VINA_SCORES_FILE,
+        score_columns=[VINA_SCORE],
+        read_pose_scores=_read_vina_pose_scores,
+        method_label="Vina",
     )
-
-    output_path = f"{batch_dictionary[BATCH_FOLDER]}/{VINA_SCORES_FILE}"
-    poses_scores_df.to_csv(output_path, index=False)
-    return poses_scores_df
 
 
 # ── Vina score-only re-scoring of pre-docked poses ──────────────────────────
@@ -551,14 +510,9 @@ def _extract_ligand_records(input_pdb: str, output_pdb: str, resname: str = "LIG
     the chain ID is not a reliable marker because ``cif_to_pdb`` may rename it).
     """
     kept = 0
-    resname_padded = resname.ljust(3)[:3]
     with open(input_pdb) as fin, open(output_pdb, "w") as fout:
         for line in fin:
-            if (
-                line.startswith(("ATOM", "HETATM"))
-                and len(line) > 20
-                and line[17:20] == resname_padded
-            ):
+            if is_atom_record(line) and len(line) > 20 and residue_name(line) == resname:
                 fout.write(line)
                 kept += 1
         fout.write("END\n")
@@ -576,11 +530,10 @@ def _extract_protein_from_complex(complex_pdb: str, output_pdb: str, ligand_resn
     Boltz-output ligand are not in the same physical space.
     """
     kept = 0
-    resname_padded = ligand_resname.ljust(3)[:3]
     with open(complex_pdb) as fin, open(output_pdb, "w") as fout:
         for line in fin:
-            if line.startswith(("ATOM", "HETATM")) and len(line) > 20:
-                if line[17:20] == resname_padded:
+            if is_atom_record(line) and len(line) > 20:
+                if residue_name(line) == ligand_resname:
                     continue
                 fout.write(line)
                 kept += 1

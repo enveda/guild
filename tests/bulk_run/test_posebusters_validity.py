@@ -27,11 +27,8 @@ import pandas as pd
 import pytest
 
 from guild.analysis.posebusters import (
-    _mol_from_pdb_block,
     _normalise_check_name,
     _pose_mols,
-    _split_complex_pdb,
-    _split_pdbqt_models,
     validate_batch_poses,
     validate_pose,
 )
@@ -88,6 +85,11 @@ from guild.constants.posebusters import (
     POSE_SCOPE_ESCALATE,
     POSEBUSTERS_COLUMNS,
     POSEBUSTERS_SUPPORTED_METHODS,
+)
+from guild.tools.pose_molecules import (
+    mol_from_pdb_block,
+    split_complex_records,
+    split_pdbqt_models,
 )
 
 TEST_DIR = Path(__file__).parent.parent
@@ -160,7 +162,7 @@ def _fake_buster(frames):
 
 
 def _ligand_block():
-    ligand_lines, _ = _split_complex_pdb(open(COMPLEX_PDB).read(), "LIG")
+    ligand_lines, _ = split_complex_records(open(COMPLEX_PDB).read(), "LIG")
     return "".join(ligand_lines) + "END\n"
 
 
@@ -253,7 +255,7 @@ class TestLigandMol:
         """
         from rdkit import Chem
 
-        mol, reason, used_fallback = _mol_from_pdb_block(_ligand_block(), SMILES)
+        mol, reason, used_fallback = mol_from_pdb_block(_ligand_block(), SMILES)
         assert mol is not None
         assert reason is None
         assert used_fallback is False
@@ -272,24 +274,24 @@ class TestLigandMol:
         indistinguishable from success at the call site, so the heavy-atom
         counts have to be compared explicitly.
         """
-        mol, reason, used_fallback = _mol_from_pdb_block(_ligand_block(), "CCO")
+        mol, reason, used_fallback = mol_from_pdb_block(_ligand_block(), "CCO")
         assert mol is not None, "the pose is still usable, just weakened"
         assert used_fallback is True
         assert "heavy atoms" in reason
 
     def test_missing_smiles_falls_back_without_raising(self):
-        mol, reason, used_fallback = _mol_from_pdb_block(_ligand_block(), "")
+        mol, reason, used_fallback = mol_from_pdb_block(_ligand_block(), "")
         assert mol is not None
         assert used_fallback is True
         assert "template" in reason
 
     def test_unparseable_block_returns_none(self):
-        mol, reason, used_fallback = _mol_from_pdb_block("not a pdb\n", SMILES)
+        mol, reason, used_fallback = mol_from_pdb_block("not a pdb\n", SMILES)
         assert mol is None
         assert reason
 
     def test_empty_block_returns_none(self):
-        mol, reason, _ = _mol_from_pdb_block("   \n", SMILES)
+        mol, reason, _ = mol_from_pdb_block("   \n", SMILES)
         assert mol is None
         assert "empty" in reason
 
@@ -315,7 +317,7 @@ class TestPoseSources:
     def test_pdbqt_models_split_in_order(self, tmp_path):
         pdbqt = tmp_path / "combo.pdbqt"
         self._write_pdbqt(pdbqt, 3)
-        blocks = _split_pdbqt_models(str(pdbqt))
+        blocks = split_pdbqt_models(str(pdbqt))
         assert len(blocks) == 3
         # Vina writes best-first, so block order is the ranking.
         assert "1.000" in blocks[0]
@@ -324,7 +326,7 @@ class TestPoseSources:
     def test_pdbqt_lines_are_truncated_for_the_pdb_parser(self, tmp_path):
         pdbqt = tmp_path / "combo.pdbqt"
         self._write_pdbqt(pdbqt, 1)
-        block = _split_pdbqt_models(str(pdbqt))[0]
+        block = split_pdbqt_models(str(pdbqt))[0]
         for line in block.splitlines():
             if line.startswith("ATOM"):
                 assert len(line) <= 66
@@ -334,7 +336,7 @@ class TestPoseSources:
         pdbqt.write_text(
             "ATOM      1  C   LIG Z   1       0.000   0.000   0.000  1.00  0.00     0.000 C \n"
         )
-        assert len(_split_pdbqt_models(str(pdbqt))) == 1
+        assert len(split_pdbqt_models(str(pdbqt))) == 1
 
     def test_boltz_falls_back_to_the_complex_pdb_ligand(self, tmp_path):
         """Boltz predicts one complex, so its best pose is its only pose."""
@@ -380,7 +382,7 @@ class TestPoseSources:
             with Chem.SDWriter(str(results / f"rank{rank}_confidence{confidence}.sdf")) as w:
                 w.write(mol)
 
-        with patch("guild.analysis.posebusters._mols_from_sdf") as mocked:
+        with patch("guild.analysis.posebusters.mols_from_sdf") as mocked:
             mocked.side_effect = lambda path, smiles: [(path, None, False)]
             poses = _pose_mols(
                 COMPLEX_PDB, str(tmp_path), DIFFDOCK_PREFIX, COMBO_ID, SMILES, "LIG", 9
@@ -448,7 +450,7 @@ class TestDegradation:
 
     def test_protein_only_complex_has_no_pose(self, tmp_path):
         protein_only = tmp_path / "prot_complex.pdb"
-        protein_only.write_text("".join(_split_complex_pdb(open(COMPLEX_PDB).read(), "LIG")[1]))
+        protein_only.write_text("".join(split_complex_records(open(COMPLEX_PDB).read(), "LIG")[1]))
         summary, _ = validate_pose(
             str(protein_only), COMBO_ID, PCONF_ID, SMILES, METHOD, str(tmp_path)
         )

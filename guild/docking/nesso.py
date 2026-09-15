@@ -22,7 +22,6 @@ batch; never invoke Nesso per-ligand.
 
 import json
 import logging
-import os
 import subprocess
 
 import pandas as pd
@@ -47,6 +46,7 @@ from guild.constants.nesso import (
     NESSO_AFFINITY_FILE,
     NESSO_AFFINITY_PRED_VALUE_FIELD,
     NESSO_AFFINITY_PROBABILITY_BINARY_FIELD,
+    NESSO_BIN,
     NESSO_ENTROPY_CROP_PL_FIELD,
 )
 
@@ -55,7 +55,6 @@ logger = logging.getLogger(__name__)
 # The isolated venv installed at build time (see Dockerfile). Invoking this
 # binary directly — rather than "nesso" on PATH — avoids ever needing
 # nesso's numpy>=2 / transformers>=4.40 requirements inside guild's own venv.
-NESSO_BIN = os.environ.get("NESSO_BIN", "/opt/nesso/bin/nesso")
 
 
 def generate_nesso_yaml(

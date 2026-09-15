@@ -1,39 +1,25 @@
-"""
-PoseBusters pose-validity analysis.
+"""PoseBusters pose-validity analysis.
 
 Runs PoseBusters' ``dock`` check suite over guild's docked poses and reports
 which are physically implausible. This is a *filter input*, not a filter: no
-score is ever blanked and no row is ever dropped — every pose gets a verdict
-and downstream consumers decide what to do with it.
+score is blanked and no row is dropped — every pose gets a verdict and
+downstream consumers decide what to do with it.
 
-Three things about this module are load-bearing and easy to break:
+Two invariants are load-bearing:
 
-1. **Bond orders must be right.** Complex PDBs carry no ligand ``CONECT``
-   records, so RDKit would infer bonds from 3D distance — and 3D geometry is
-   exactly what is under suspicion. The intramolecular checks (bond lengths,
-   bond angles, aromatic-ring flatness, internal energy) are meaningless
-   against inferred bonds. ``mol_pred`` is therefore an in-memory
-   :class:`rdkit.Chem.Mol`: taken straight from the engine's SDF where one
-   exists, and otherwise rebuilt from the combination's SMILES via
-   ``AssignBondOrdersFromTemplate``, mirroring
-   :func:`guild.analysis.prolif.analyze_prolif_interactions`. "Simplifying"
-   this to a file path silently guts half the checks.
-
-2. **The receptor comes from the complex PDB, not from the template.** Boltz
+1. **``mol_pred`` is an in-memory Mol, never a file path.** Bond orders come
+   from the combination's SMILES (see
+   :func:`guild.tools.pose_molecules.mol_from_pdb_block`); inferring them from
+   geometry would make the intramolecular checks judge the very coordinates
+   under suspicion.
+2. **The receptor comes from the complex PDB, not the template.** Boltz
    re-centres its predicted complex, so a template-frame receptor and a
-   Boltz-frame ligand are not in the same physical space (see the Boltz
-   coordinate-frame note in CLAUDE.md). Extracting both sides from one complex
-   PDB makes the frames agree by construction, for every engine.
+   Boltz-frame ligand are not in the same space. Extracting both sides from
+   one complex PDB makes the frames agree by construction, for every engine.
 
-3. **PoseBusters raises on a bad molecule; it does not record a failure row.**
-   An unusable pose surfaces as ``ValueError: Bad Conformer Id`` out of
-   ``bust()``. Every call is wrapped, and every failure becomes a row with a
-   ``posebusters_status`` explaining itself.
-
-``pb_valid`` fails **closed** — it is never ``None``, so ``df[df.pb_valid]``
-can never admit a pose that was not actually verified. Use
-``posebusters_status`` to tell an invalid pose (``ok`` + ``pb_valid`` False)
-from one that could not be checked.
+``pb_valid`` fails **closed** — never ``None``, so ``df[df.pb_valid]`` cannot
+admit an unverified pose. ``posebusters_status`` distinguishes an invalid pose
+(``ok`` + ``pb_valid`` False) from one that could not be checked.
 """
 
 import glob
@@ -41,6 +27,7 @@ import logging
 import multiprocessing as mp
 import os
 import tempfile
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -85,176 +72,28 @@ from guild.constants.posebusters import (
     POSEBUSTERS_MAX_POSES,
     POSEBUSTERS_REPORT_ID_COLUMNS,
 )
+from guild.tools.pose_molecules import (
+    mol_from_pdb_block,
+    mols_from_sdf,
+    split_complex_records,
+    split_pdbqt_models,
+)
 
 logger = logging.getLogger(__name__)
 
-# PDBQT lines carry extra columns past 66 (partial charge, autodock type) that
-# a PDB parser chokes on. Same truncation _convert_pdbqt_to_pdb falls back to
-# in guild/transformers/pdb.py.
-_PDB_LINE_KEEP = 66
+
+def _read_complex(path: str) -> str:
+    return Path(path).read_text(encoding="utf-8", errors="replace")
 
 
 def _normalise_check_name(name: str) -> str:
-    """
-    Normalise a PoseBusters output column to a guild column name.
+    """Normalise a PoseBusters output column to a guild column name.
 
-    PoseBusters emits lowercase snake_case with embedded hyphens —
-    ``non-aromatic_ring_non-flatness``, ``protein-ligand_maximum_distance``.
-    Guild's constants use underscores throughout. Spaces are folded too so a
-    future upstream relabelling to human-readable headers still maps cleanly.
+    PoseBusters emits embedded hyphens (``protein-ligand_maximum_distance``)
+    where guild's constants use underscores. Spaces are folded too, so an
+    upstream relabelling to human-readable headers still maps cleanly.
     """
     return name.strip().lower().replace("-", "_").replace(" ", "_")
-
-
-def _read_text(path: str) -> str:
-    with open(path, "r", encoding="utf-8", errors="replace") as handle:
-        return handle.read()
-
-
-def _split_complex_pdb(pdb_text: str, ligand_resname: str) -> Tuple[List[str], List[str]]:
-    """
-    Split complex-PDB text into (ligand_lines, protein_lines) on residue name.
-
-    Resname is the reliable ligand marker, not chain ID — ``cif_to_pdb`` may
-    rename Boltz's ligand chain, which is why the chain rewrite in
-    :func:`guild.docking.boltz.relabel_ligand_chain_in_pdb` cannot be trusted
-    here.
-    """
-    ligand_lines, protein_lines = [], []
-    for line in pdb_text.splitlines(keepends=True):
-        if line.startswith(("ATOM  ", "HETATM")) and len(line) > 20:
-            if line[17:20].strip() == ligand_resname:
-                ligand_lines.append(line)
-            else:
-                protein_lines.append(line)
-    return ligand_lines, protein_lines
-
-
-def _split_pdbqt_models(pdbqt_path: str) -> List[str]:
-    """
-    Split a multi-model Vina/gnina PDBQT into per-pose PDB text blocks.
-
-    Vina and gnina write their poses score-sorted, so the returned list is
-    already best-first. Extra PDBQT columns are truncated so RDKit's PDB parser
-    accepts each block.
-
-    :return: One PDB text block per MODEL. A PDBQT with no MODEL records (a
-        single-pose file) yields one block.
-    """
-    blocks, current = [], []
-    with open(pdbqt_path, "r", encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            if line.startswith("MODEL"):
-                current = []
-            elif line.startswith("ENDMDL"):
-                if current:
-                    blocks.append("".join(current) + "END\n")
-                current = []
-            elif line.startswith(("ATOM", "HETATM")):
-                current.append(line[:_PDB_LINE_KEEP].rstrip("\n") + "\n")
-
-    # No MODEL/ENDMDL framing (single-pose PDBQT) — emit what we collected.
-    if not blocks and current:
-        blocks.append("".join(current) + "END\n")
-    return blocks
-
-
-def _mol_from_pdb_block(pdb_block: str, smiles: str):
-    """
-    Build an RDKit ligand from a PDB block, taking bond orders from ``smiles``.
-
-    Ported from :func:`guild.analysis.prolif.analyze_prolif_interactions` so
-    both analyses perceive the same molecule. See this module's docstring for
-    why the SMILES template is not optional.
-
-    :return: ``(mol, reason, used_template_fallback)``. ``mol`` is None only
-        when the block itself is unusable, in which case ``reason`` says so.
-        ``used_template_fallback`` is True when the SMILES did not match and
-        bonds were inferred from geometry instead.
-    """
-    from rdkit import Chem
-    from rdkit.Chem import AllChem
-
-    if not pdb_block.strip():
-        return None, "empty ligand PDB block", False
-
-    raw = Chem.MolFromPDBBlock(pdb_block, removeHs=False, sanitize=False)
-    if raw is None:
-        return None, "RDKit could not parse the ligand PDB block", False
-
-    template = Chem.MolFromSmiles(smiles) if smiles else None
-    if template is None:
-        reason = f"unusable SMILES template: {smiles!r}"
-    elif template.GetNumHeavyAtoms() != raw.GetNumHeavyAtoms():
-        # Guard against a partial substructure match. AssignBondOrdersFromTemplate
-        # does NOT require the template to describe the whole molecule — given a
-        # template that merely matches part of the pose it succeeds silently and
-        # returns a molecule whose unmatched bonds keep their geometry-inferred
-        # orders. That is indistinguishable from success at the call site, so the
-        # atom counts have to be compared explicitly. Heavy atoms only:
-        # protonation differences between the SMILES and the pose are expected
-        # and harmless, a different heavy-atom skeleton is not.
-        reason = (
-            f"SMILES template has {template.GetNumHeavyAtoms()} heavy atoms but the "
-            f"pose has {raw.GetNumHeavyAtoms()} — template does not describe this ligand"
-        )
-    else:
-        try:
-            mol = AllChem.AssignBondOrdersFromTemplate(template, raw)
-            Chem.SanitizeMol(mol)
-            return mol, None, False
-        except Exception as error:
-            reason = f"{type(error).__name__}: {error}"
-
-    # Fall back to the geometry-perceived molecule. Intermolecular checks stay
-    # fully valid; the intramolecular ones are judged against inferred bonds,
-    # which is why the caller promotes this to its own status value.
-    try:
-        Chem.SanitizeMol(
-            raw, Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_PROPERTIES
-        )
-    except Exception as error:
-        return None, f"sanitization failed after template fallback: {error}", False
-    return raw, reason, True
-
-
-def _mols_from_sdf(sdf_path: str, smiles: str) -> List[Tuple[object, Optional[str], bool]]:
-    """
-    Read every record of an SDF as a ligand, preserving file order.
-
-    Used for DiffDock's ranked pose SDFs and gnina's ``--gnina-input-mode sdf``
-    output. An SDF already carries bond orders, so these poses skip the SMILES
-    template entirely — which also means they are immune to the
-    template-mismatch weakening that PDB-sourced poses can hit. A record that
-    will not sanitize falls back to the template path via its PDB block.
-    """
-    from rdkit import Chem
-
-    mols = []
-    supplier = Chem.SDMolSupplier(sdf_path, removeHs=False, sanitize=True)
-
-    fallback_records = None
-    for index, mol in enumerate(supplier):
-        if mol is not None:
-            mols.append((mol, None, False))
-            continue
-
-        # Unusual valences (e.g. gnina covalent output) defeat sanitization;
-        # re-read unsanitized and rebuild through the SMILES template.
-        if fallback_records is None:
-            fallback = Chem.SDMolSupplier(sdf_path, removeHs=False, sanitize=False)
-fallback_records = list(fallback)
-
-        if index < len(fallback_records):
-            try:
-                block = Chem.MolToPDBBlock(fallback_records[index])
-            except Exception as error:
-                mols.append((None, f"unreadable SDF record {index}: {error}", False))
-                continue
-            mols.append(_mol_from_pdb_block(block, smiles))
-        else:
-            mols.append((None, f"unreadable SDF record {index}", False))
-    return mols
 
 
 def _pose_mols(
@@ -266,41 +105,34 @@ def _pose_mols(
     ligand_resname: str,
     max_poses: int,
 ) -> List[Tuple[object, Optional[str], bool]]:
-    """
-    Collect this combination's poses as RDKit mols, best-first.
+    """Collect this combination's poses as RDKit mols, best-first.
 
-    Only the top pose lives in ``<combination>_complex.pdb`` (``build_complex_pdb``
-    merges MODEL 1 only), so escalating past it means reading each engine's own
-    output. Every pose of a given engine shares the coordinate frame of the
-    receptor that engine's complex PDB was built from, so one extracted
-    receptor serves them all.
+    Only the top pose lives in ``<combination>_complex.pdb``, so going past it
+    means reading each engine's own output. Every pose of an engine shares the
+    coordinate frame of the receptor its complex PDB was built from, so one
+    extracted receptor serves them all.
 
-    Falls back to the complex PDB's own ligand whenever the native pose file is
-    absent — a pruned or partially-synced project tree still yields the top pose
-    rather than nothing. Boltz always lands on that path: it predicts one
-    complex, so its best pose is its only pose.
-
-    :return: ``(mol, reason, used_template_fallback)`` triples, capped at
-        ``max_poses``.
+    Falls back to the complex PDB's own ligand when the native pose file is
+    absent, so a pruned project tree still yields the top pose. Boltz always
+    lands there: it predicts one complex, so its best pose is its only pose.
     """
     method_folder = f"{batch_folder}/{docking_method}"
     poses: List[Tuple[object, Optional[str], bool]] = []
 
     if docking_method in (VINA_PREFIX, GNINA_PREFIX):
-        # gnina in --gnina-input-mode sdf writes an SDF instead of a PDBQT.
-        # Prefer it when present: native SDF bond orders need no template.
+        # gnina in sdf input mode writes an SDF instead of a PDBQT; prefer it,
+        # since native bond orders need no template.
         sdf_path = f"{method_folder}/{combination_id}.sdf"
         pdbqt_path = f"{method_folder}/{combination_id}.pdbqt"
         if os.path.exists(sdf_path):
-            poses = _mols_from_sdf(sdf_path, smiles)
+            poses = mols_from_sdf(sdf_path, smiles)
         elif os.path.exists(pdbqt_path):
-            poses = [_mol_from_pdb_block(b, smiles) for b in _split_pdbqt_models(pdbqt_path)]
+            poses = [mol_from_pdb_block(b, smiles) for b in split_pdbqt_models(pdbqt_path)]
 
     elif docking_method == DIFFDOCK_PREFIX:
-        # Rank by the confidence encoded in the filename, matching how
-        # generate_diffdock_complex_pdbs picks its best pose, so pose 1 here is
-        # the same pose that ended up in the complex PDB. Parsing confidence
-        # also sidesteps the rank<N> lexicographic trap (rank10 sorts before
+        # Rank by the confidence in the filename, as generate_diffdock_complex_pdbs
+        # does, so pose 1 is the pose that reached the complex PDB. Parsing
+        # confidence also sidesteps the rank<N> lexicographic trap (rank10 <
         # rank2).
         results_dir = f"{method_folder}/results/{combination_id}"
         scored = []
@@ -313,15 +145,15 @@ def _pose_mols(
                 continue
             scored.append((confidence, path))
         for _, path in sorted(scored, key=lambda item: item[0], reverse=True):
-            poses.extend(_mols_from_sdf(path, smiles))
+            poses.extend(mols_from_sdf(path, smiles))
 
     if not poses:
         try:
-            ligand_lines, _ = _split_complex_pdb(_read_text(complex_pdb_path), ligand_resname)
+            ligand_lines, _ = split_complex_records(_read_complex(complex_pdb_path), ligand_resname)
         except OSError:
             return []
         if ligand_lines:
-            poses = [_mol_from_pdb_block("".join(ligand_lines) + "END\n", smiles)]
+            poses = [mol_from_pdb_block("".join(ligand_lines) + "END\n", smiles)]
 
     return poses[:max_poses]
 
@@ -346,12 +178,10 @@ def _base_record(
 
 
 def _failed_record(base: Dict, status: str, error: Optional[str]) -> Dict:
-    """
-    A row for a pose that could not be evaluated.
+    """A row for a pose that could not be evaluated.
 
-    Check columns are left absent (they become NaN on DataFrame construction):
-    "not checked" must not read as "checked and passed". The verdicts fail
-    closed so the row can never survive a ``df[df.pb_valid]`` filter.
+    Check columns are left absent (NaN on DataFrame construction): "not
+    checked" must not read as "checked and passed".
     """
     return {
         **base,
@@ -366,19 +196,21 @@ def _failed_record(base: Dict, status: str, error: Optional[str]) -> Dict:
 
 
 def _passed(value) -> bool:
-    """A check counts as passed only when it is present and truthy."""
+    """A check counts as passed only when it is present and truthy.
+
+    NaN is explicitly excluded: ``bool(float('nan'))`` is True, so a check
+    PoseBusters could not evaluate would otherwise count as a pass and make
+    ``pb_valid`` fail open.
+    """
     return value is not None and not pd.isna(value) and bool(value) is True
 
 
 def _summarise_checks(base: Dict, results: Dict, status: str, error: Optional[str]) -> Dict:
-    """
-    Turn one normalised PoseBusters result row into a guild summary record.
+    """Turn one normalised PoseBusters result row into a guild summary record.
 
-    Only checks actually present in the result are judged — the ``dock_fast``
-    config legitimately omits ``internal_energy``, and an absent check must not
-    count against the pose. A check present but None (PoseBusters could not
-    evaluate it — e.g. every intermolecular check when the receptor fails to
-    load) does count as not-passed: nothing about it was verified.
+    Only checks present in the result are judged — ``dock_fast`` legitimately
+    omits ``internal_energy``. A check present but None (PoseBusters could not
+    evaluate it) does count as not-passed: nothing about it was verified.
     """
     record = {**base, PB_STATUS: status, PB_ERROR: error}
 
@@ -403,16 +235,12 @@ def _summarise_checks(base: Dict, results: Dict, status: str, error: Optional[st
 
 
 def _warn_missing_checks(results: Dict, config: str) -> None:
-    """
-    Warn when a declared check is absent from PoseBusters' output.
+    """Warn when a declared check is absent from PoseBusters' output.
 
-    This is the upgrade-safety valve, and it guards the dangerous direction: a
-    renamed check silently drops out of the verdict, which makes ``pb_valid``
-    *more* permissive rather than less. Missing columns therefore warn; newly
-    added ones do not (they are simply not used yet).
-
-    ``internal_energy`` is expected to be absent under ``dock_fast``, which
-    omits it by design.
+    Guards the dangerous direction: a renamed check silently drops out of the
+    verdict, making ``pb_valid`` *more* permissive. Newly added checks do not
+    warn — they are simply not used yet. ``internal_energy`` is expected to be
+    absent under ``dock_fast``.
     """
     missing = [c for c in PB_CHECK_COLUMNS if c not in results]
     if config.endswith("_fast"):
@@ -439,23 +267,19 @@ def validate_pose(
     max_poses: int = POSEBUSTERS_MAX_POSES,
     buster=None,
 ) -> Tuple[List[Dict], List[Dict]]:
-    """
-    Validate one combination's pose(s) with PoseBusters.
+    """Validate one combination's pose(s) with PoseBusters.
 
-    Never raises, and always returns at least one summary row — a combination
-    that could not be evaluated must still appear in the output table, with a
-    ``posebusters_status`` saying why.
+    Never raises, and always returns at least one summary row: a combination
+    that could not be evaluated must still appear, with a status saying why.
 
     :param complex_pdb_path: Path to ``<combination>_complex.pdb``.
     :param combination_id: ``f"{protein_conf_id}_{ligand_id}"``.
-    :param smiles: Ligand SMILES — the bond-order template. See module docstring.
-    :param docking_method: Method prefix, e.g. ``"vina"``.
-    :param batch_folder: Batch root, used to locate the engine's own pose files
-        when escalating past the top pose.
+    :param smiles: Ligand SMILES — the bond-order template.
+    :param batch_folder: Batch root, used to locate the engine's own pose files.
     :param pose_scope: ``best`` | ``escalate`` | ``all``.
     :param max_poses: Hard cap on poses validated, for escalate and all.
-    :param buster: Optional pre-built ``PoseBusters`` instance, so a batch pays
-        the config-YAML parse once rather than per pose.
+    :param buster: Pre-built ``PoseBusters``, so a batch parses the config YAML
+        once rather than per pose.
     :return: ``(summary_rows, full_report_rows)``.
     """
     base = _base_record(combination_id, protein_conf_id, smiles, docking_method, complex_pdb_path)
@@ -463,12 +287,8 @@ def validate_pose(
     try:
         from posebusters import PoseBusters
     except ImportError as error:
-        # Report the real exception. posebusters pulls in rdkit, so an
-        # ImportError here often means an installed-but-broken dependency
-        # rather than a missing posebusters, and reporting only the latter sends
-        # you looking in the wrong place. The step is on by default, so an image
-        # built before the dependency was added must degrade to a row plus a
-        # warning rather than breaking every run.
+        # Report the real exception: posebusters pulls in rdkit, so this often
+        # means a broken dependency rather than a missing posebusters.
         logger.warning(
             f"PoseBusters analysis unavailable — {type(error).__name__}: {error}. "
             f"If posebusters itself is missing, check it is in pyproject.toml, that "
@@ -511,7 +331,9 @@ def validate_pose(
     with tempfile.TemporaryDirectory() as tmp_dir:
         receptor_path = os.path.join(tmp_dir, "receptor.pdb")
         try:
-            _, protein_lines = _split_complex_pdb(_read_text(complex_pdb_path), ligand_resname)
+            _, protein_lines = split_complex_records(
+                _read_complex(complex_pdb_path), ligand_resname
+            )
             if not protein_lines:
                 raise ValueError(
                     f"no protein atoms left after excluding resname {ligand_resname!r}"
@@ -542,9 +364,8 @@ def validate_pose(
                 )
 
             try:
-                # full_report=True returns the boolean checks AND the numeric
-                # measurements behind them in one pass, so the report file costs
-                # nothing beyond the summary.
+                # full_report=True returns the booleans AND the numeric
+                # measurements behind them in one pass.
                 frame = buster.bust(
                     mol_pred=mol, mol_true=None, mol_cond=receptor_path, full_report=True
                 )
@@ -571,16 +392,14 @@ def validate_pose(
             report_rows.append({**pose_base, **results})
 
             if pose_scope != POSE_SCOPE_ALL and summary_rows[-1][PB_VALID]:
-                # best/escalate: the question is whether a valid pose exists, so
-                # stop as soon as one does.
+                # best/escalate ask only whether a valid pose exists.
                 break
 
     return summary_rows, report_rows
 
 
-# Per-process PoseBusters cache for the multiprocessing path, keyed by config.
-# Building one parses a YAML config, so without this every pose in a worker
-# would pay that cost again.
+# Per-process PoseBusters cache for the multiprocessing path, keyed by config:
+# building one parses a YAML config.
 _WORKER_BUSTERS: Dict[str, object] = {}
 
 
@@ -601,8 +420,8 @@ def _validate_pose_worker(task: Dict) -> Tuple[List[Dict], List[Dict]]:
 
             _WORKER_BUSTERS[config] = PoseBusters(config=config)
         except Exception as error:
-            # validate_pose will surface the reason as a per-row status; cache a
-            # stub so we don't retry construction for every task.
+            # validate_pose surfaces the reason per row; cache a stub so
+            # construction is not retried for every task.
             _WORKER_BUSTERS[config] = _UnavailableBuster(error)
     return validate_pose(**task, buster=_WORKER_BUSTERS[config])
 
@@ -616,23 +435,20 @@ def validate_batch_poses(
     max_poses: int = POSEBUSTERS_MAX_POSES,
     n_processes: int = 1,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Validate every complex in one batch.
+    """Validate every complex in one batch.
 
-    :param complex_metadata: List of
-        ``(complex_pdb, combination_id, protein_conf_id, smiles, docking_method)``
-        — the same 5-tuple
-        :func:`guild.analysis.prolif.get_batch_prolif_interactions` takes, so one
-        discovery pass feeds PLIP, ProLIF and PoseBusters alike.
+    :param complex_metadata: ``(complex_pdb, combination_id, protein_conf_id,
+        smiles, docking_method)`` tuples — the same shape
+        :func:`guild.analysis.prolif.get_batch_prolif_interactions` takes, so
+        one discovery pass feeds PLIP, ProLIF and PoseBusters alike.
     :param n_processes: Guild-level worker count. PoseBusters' own
-        ``max_workers`` is deliberately left at its in-process default: its pool
-        raises ``BrokenProcessPool`` when a worker dies, and this codebase has
-        already been burned by exactly that (the OpenBabel-abort recovery loops
-        in guild/bulk.py). One pool boundary we control beats two we do not.
+        ``max_workers`` is left at its in-process default: its pool raises
+        ``BrokenProcessPool`` when a worker dies, and one pool boundary we
+        control beats two we do not.
     :return: ``(summary_df, report_df)``. The summary always has exactly
         :data:`POSEBUSTERS_COLUMNS`; both are header-only when there is nothing
-        to validate. Every input combination is represented in the summary, so
-        row identity never has to be recovered positionally.
+        to validate. Every input combination is represented, so row identity
+        never has to be recovered positionally.
     """
     if not complex_metadata:
         return (
@@ -663,22 +479,20 @@ def validate_batch_poses(
 
     if n_processes and n_processes > 1 and len(tasks) > 1:
         # Never start more workers than there is work: n_processes defaults to
-        # BulkRun.n_workers, which is mp.cpu_count() unless set, and spawning 64
-        # interpreters to validate 3 poses costs far more than it saves.
+        # mp.cpu_count(), and 64 interpreters to validate 3 poses costs more
+        # than it saves.
         with mp.Pool(processes=min(n_processes, len(tasks))) as pool:
             for summary_rows, report_rows in pool.imap(_validate_pose_worker, tasks):
                 summary_records.extend(summary_rows)
                 report_records.extend(report_rows)
     else:
-        # Serial path builds the PoseBusters instance once for the whole batch.
         buster = None
         try:
             from posebusters import PoseBusters
 
             buster = PoseBusters(config=config)
         except Exception as error:
-            # validate_pose surfaces this as a per-row status; note it once here
-            # instead of once per pose.
+            # validate_pose surfaces this per row; note it once here.
             logger.debug(f"Deferring PoseBusters construction to per-pose handling: {error}")
         for task in tasks:
             summary_rows, report_rows = validate_pose(**task, buster=buster)
@@ -691,13 +505,11 @@ def validate_batch_poses(
 
 
 def _frame_with_schema(records: List[Dict], columns: List[str], exact: bool) -> pd.DataFrame:
-    """
-    Build a DataFrame with ``columns`` guaranteed present and leading.
+    """Build a DataFrame with ``columns`` guaranteed present and leading.
 
-    :param exact: When True the result holds exactly ``columns`` (the summary
-        table's fixed schema). When False any extra keys are kept after them —
-        the full report is deliberately open-ended so a posebusters upgrade that
-        adds a measurement widens the file instead of tripping an assert.
+    :param exact: When True the result holds exactly ``columns``. When False
+        extra keys are kept after them — the full report is open-ended so a
+        posebusters upgrade that adds a measurement widens the file.
     """
     if not records:
         return pd.DataFrame(columns=columns)

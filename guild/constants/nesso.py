@@ -7,6 +7,17 @@ protein structure, MSA, template, or pocket — only a protein sequence and a
 ligand SMILES — and writes a single scalar ``affinity.json`` per complex.
 """
 
+import os
+
+"""
+Binary
+
+Nesso lives in its own venv at /opt/nesso (see the Dockerfile) because it
+requires numpy>=2, which conflicts with guild's pin; it is invoked purely by
+subprocess, never imported.
+"""
+NESSO_BIN = os.environ.get("NESSO_BIN", "/opt/nesso/bin/nesso")
+
 """
 Files
 """
