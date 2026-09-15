@@ -7,6 +7,7 @@ type-specific angles alongside residue/atom identifiers.
 """
 
 import logging
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import pandas as pd
@@ -38,6 +39,7 @@ from guild.constants.interactions import (
     INTERACTION_TYPE_WATERBRIDGE,
     LIGAND_RESNAME,
 )
+from guild.tools.pose_molecules import mol_from_pdb_block, split_complex_records
 
 logger = logging.getLogger(__name__)
 
@@ -100,10 +102,8 @@ def analyze_prolif_interactions(
         import prolif
         from prolif.molecule import Molecule
     except ImportError as error:
-        # Report the real exception. prolif pulls in MDAnalysis and RDKit, so an
-        # ImportError here often means an installed-but-broken dependency rather
-        # than a missing prolif, and reporting only the latter sends you looking
-        # in the wrong place.
+        # prolif pulls in MDAnalysis and RDKit, so this is often a broken
+        # dependency rather than a missing prolif.
         logger.warning(
             f"ProLIF analysis unavailable — {type(error).__name__}: {error}. "
             f"If prolif itself is missing, check 'prolif>=2.0.0,<3' is in "
@@ -120,24 +120,12 @@ def analyze_prolif_interactions(
 
     try:
         from rdkit import Chem
-        from rdkit.Chem import AllChem
 
-        pdb_text = open(complex_pdb_path).read()
+        pdb_text = Path(complex_pdb_path).read_text(encoding="utf-8", errors="replace")
 
-        # Split PDB into per-residue blocks for ligand and protein separately.
-        # Build ligand mol via SMILES template (preserves bond orders and avoids
-        # the MDAnalysis vdW-radii crash on halogens).
-        lig_lines, prot_lines = [], []
-        for line in pdb_text.splitlines(keepends=True):
-            if line.startswith(("ATOM  ", "HETATM")):
-                resname = line[17:20].strip()
-                if resname == ligand_resname:
-                    lig_lines.append(line)
-                else:
-                    prot_lines.append(line)
-            elif line.startswith(("CONECT", "END")):
-                continue
-
+        # SMILES bond orders also avoid the MDAnalysis vdW-radii crash on
+        # halogens.
+        lig_lines, prot_lines = split_complex_records(pdb_text, ligand_resname)
         if not lig_lines or not prot_lines:
             logger.warning(
                 f"ProLIF: empty ligand ({len(lig_lines)} lines) or protein "
@@ -145,25 +133,16 @@ def analyze_prolif_interactions(
             )
             return []
 
-        # Ligand: parse heavy-atom PDB block, assign bond orders from SMILES
-        lig_pdb_block = "".join(lig_lines) + "END\n"
-        lig_raw = Chem.MolFromPDBBlock(lig_pdb_block, removeHs=False, sanitize=False)
-        if lig_raw is None:
-            logger.warning(f"ProLIF: RDKit failed to parse ligand block in {complex_pdb_path}")
+        lig_block = "".join(lig_lines) + "END\n"
+        lig_rdmol, reason, used_fallback = mol_from_pdb_block(lig_block, smiles)
+        if lig_rdmol is None:
+            logger.warning(f"ProLIF: could not build ligand from {complex_pdb_path}: {reason}")
             return []
-        tmpl = Chem.MolFromSmiles(smiles)
-        if tmpl is not None:
-            try:
-                lig_rdmol = AllChem.AssignBondOrdersFromTemplate(tmpl, lig_raw)
-                Chem.SanitizeMol(lig_rdmol)
-            except Exception:
-                lig_rdmol = lig_raw
-                Chem.SanitizeMol(
-                    lig_rdmol,
-                    Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_PROPERTIES,
-                )
-        else:
-            lig_rdmol = lig_raw
+        if used_fallback:
+            logger.warning(
+                f"ProLIF: SMILES template did not match the ligand in "
+                f"{complex_pdb_path} - bond orders inferred from geometry. {reason}"
+            )
 
         # Protein: parse as a single PDB block
         prot_pdb_block = "".join(prot_lines) + "END\n"

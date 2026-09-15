@@ -18,6 +18,7 @@ from guild.analysis.plip import (
     analyze_batch_interactions,
     get_batch_detailed_interactions,
 )
+from guild.analysis.posebusters import validate_batch_poses
 from guild.analysis.prolif import get_batch_prolif_interactions
 from guild.constants.bulk import (
     ALL_COMBINATIONS_FILE,
@@ -56,11 +57,15 @@ from guild.constants.guild import (
     GNINA_FLEXRES,
     GNINA_FOLDER,
     GNINA_PREFIX,
+    GNINA_RESCORE_BOLTZ_PREFIX,
+    GNINA_RESCORE_DIFFDOCK_PREFIX,
     KARMADOCK_FOLDER,
     KARMADOCK_PREFIX,
     LIGAND_CATEGORY,
     LIGAND_ID,
     MSA_FOLDER,
+    NESSO_FOLDER,
+    NESSO_PREFIX,
     ORIGINAL_LIGAND,
     ORIGINAL_LIGAND_CHAIN,
     PLOTS_FOLDER,
@@ -72,7 +77,6 @@ from guild.constants.guild import (
     PROTEINS_FOLDER,
     # Scores lists
     RP_SCORES_COLUMNS,
-    # Dictionaries
     SMILES,
     # Folders
     VINA_FOLDER,
@@ -99,6 +103,25 @@ from guild.constants.karmadock import (
     KARMADOCK_GRAPHS_FOLDER,
     KARMADOCK_RESULTS_FOLDER,
 )
+from guild.constants.posebusters import (
+    DEFAULT_POSE_SCOPE,
+    DEFAULT_POSEBUSTERS_CONFIG,
+    PB_COMBINATION_ID,
+    PB_DOCKING_METHOD,
+    PB_ERROR,
+    PB_FAILED_CHECKS,
+    PB_POSE,
+    PB_STATUS,
+    PB_STATUS_OK,
+    PB_VALID,
+    POSEBUSTERS_COLUMNS,
+    POSEBUSTERS_FILE,
+    POSEBUSTERS_MAX_POSES,
+    POSEBUSTERS_POSE_DICTIONARY,
+    POSEBUSTERS_REPORT_FILE,
+    POSEBUSTERS_REPORT_ID_COLUMNS,
+    POSEBUSTERS_VALID_DICTIONARY,
+)
 from guild.constants.poses import (
     DEFAULT_POSE_MODE,
     POSE_MODE_DOCK,
@@ -109,19 +132,27 @@ from guild.docking.boltz import (
     boltz_guild_scoring,
     deploy_boltz,
     generate_boltz_yaml,
+    gnina_rescore_boltz_guild_scoring,
     vina_rescore_boltz_guild_scoring,
 )
 from guild.docking.diffdock import (
     deploy_diffdock,
     diffdock_guild_scoring,
+    gnina_rescore_diffdock_guild_scoring,
     vina_rescore_diffdock_guild_scoring,
     write_diffdock_combinations_table,
 )
-from guild.docking.gnina import gnina_guild_scoring
+from guild.docking.gnina import gnina_guild_scoring, write_gnina_pose_scores_file
 from guild.docking.karmadock import deploy_karmadock, karmadock_guild_scoring
+from guild.docking.nesso import (
+    deploy_nesso,
+    generate_nesso_yaml,
+    nesso_guild_scoring,
+)
 from guild.docking.vina import (
     get_center_and_size_from_box_file,
     vina_guild_scoring,
+    write_vina_pose_scores_file,
 )
 from guild.run import Guild
 from guild.tools.bulk import (
@@ -136,7 +167,11 @@ from guild.tools.bulk import (
     kickstart_batch_dictionary,
 )
 from guild.tools.poses import _resolve_pose_path, _validate_poses_dir
-from guild.tools.preparation import _normalize_chain_list, clean_smiles
+from guild.tools.preparation import (
+    _normalize_chain_list,
+    clean_smiles,
+    detect_altloc_residues,
+)
 from guild.tools.protein_sequence import (
     get_original_sequence_dictionary,
     process_into_fasta_string,
@@ -208,6 +243,63 @@ def _row_flexres_gnina(row):
         return None
     value = str(value).strip()
     return value or None
+
+
+# Methods that emit `<combination>_complex.pdb`, mapped to its batch
+# sub-folder. karmadock, nesso and the score-only rescore tracks write no
+# complex PDB of their own.
+_COMPLEX_PDB_FOLDER_BY_METHOD = {
+    BOLTZ_PREFIX: BOLTZ_FOLDER,
+    VINA_PREFIX: VINA_FOLDER,
+    DIFFDOCK_PREFIX: DIFFDOCK_FOLDER,
+    GNINA_PREFIX: GNINA_FOLDER,
+}
+
+
+def _collect_complex_metadata(batch_dict, methods_to_analyze):
+    """
+    Discover every existing complex PDB in one batch, grouped by method.
+
+    Discovery probes deterministic paths derived from the batch's combinations
+    table rather than globbing, so a stray file cannot enter the analysis.
+
+    :param batch_dict: Standard bulk batch dictionary.
+    :param methods_to_analyze: Method prefixes to consider. Anything outside
+        ``_COMPLEX_PDB_FOLDER_BY_METHOD`` is ignored.
+    :return: ``{method_prefix: [(complex_pdb, combination_id, protein_conf_id,
+        smiles, method_prefix), ...]}``. Methods with no surviving file are
+        omitted entirely, so ``if not collected:`` means "nothing to analyze".
+        The 5-tuple matches what ``guild.analysis.prolif`` and
+        ``guild.analysis.posebusters`` both consume.
+    """
+    batch_folder = batch_dict[BATCH_FOLDER]
+    combinations_df = batch_dict[COMBINATIONS_TABLE_KEY]
+    smiles_by_ligand = batch_dict[SMILES_NAMES_DICTIONARY_KEY]
+
+    collected = {}
+    for method, folder in _COMPLEX_PDB_FOLDER_BY_METHOD.items():
+        if method not in methods_to_analyze:
+            continue
+        method_folder = f"{batch_folder}/{folder}"
+        found = []
+        for _, row in combinations_df.iterrows():
+            protein_conf_id = row[PROTEIN_CONF_ID]
+            ligand_id = row[LIGAND_ID]
+            combination_id = f"{protein_conf_id}_{ligand_id}"
+            complex_pdb = f"{method_folder}/{combination_id}{COMPLEX_PDB_SUFFIX}"
+            if os.path.exists(complex_pdb):
+                found.append(
+                    (
+                        complex_pdb,
+                        combination_id,
+                        protein_conf_id,
+                        smiles_by_ligand[ligand_id],
+                        method,
+                    )
+                )
+        if found:
+            collected[method] = found
+    return collected
 
 
 class BulkRun:
@@ -343,33 +435,50 @@ class BulkRun:
 
         self.methods_to_run = methods_to_run
 
-        # Automatically enable Vina rescore for each pose-producing method that
-        # was requested. The Boltz-rescore and DiffDock-rescore tracks are
-        # independent — running both methods produces both columns.
-        # DiffDock gives many ranked poses; Boltz gives a confidence-only score
-        # (ipTM) which doesn't reflect binding energy — re-scoring the predicted
-        # complex with Vina's physics-based function provides a comparable ΔG.
+        # Automatically enable Vina rescore AND gnina rescore for each
+        # pose-producing method that was requested. The Boltz-rescore and
+        # DiffDock-rescore tracks are independent per engine — running both
+        # methods produces all four columns. DiffDock gives many ranked
+        # poses; Boltz gives a confidence-only score (ipTM) which doesn't
+        # reflect binding energy — re-scoring the predicted complex with a
+        # physics-based function provides a comparable ΔG. gnina rescore is
+        # additive alongside Vina rescore, not a replacement for it.
         if (
             DIFFDOCK_PREFIX in self.methods_to_run
             and VINA_RESCORE_DIFFDOCK_PREFIX not in self.methods_to_run
         ):
             self.methods_to_run = list(self.methods_to_run) + [VINA_RESCORE_DIFFDOCK_PREFIX]
         if (
+            DIFFDOCK_PREFIX in self.methods_to_run
+            and GNINA_RESCORE_DIFFDOCK_PREFIX not in self.methods_to_run
+        ):
+            self.methods_to_run = list(self.methods_to_run) + [GNINA_RESCORE_DIFFDOCK_PREFIX]
+        if (
             BOLTZ_PREFIX in self.methods_to_run
             and VINA_RESCORE_BOLTZ_PREFIX not in self.methods_to_run
         ):
             self.methods_to_run = list(self.methods_to_run) + [VINA_RESCORE_BOLTZ_PREFIX]
+        if (
+            BOLTZ_PREFIX in self.methods_to_run
+            and GNINA_RESCORE_BOLTZ_PREFIX not in self.methods_to_run
+        ):
+            self.methods_to_run = list(self.methods_to_run) + [GNINA_RESCORE_BOLTZ_PREFIX]
 
         # Resolve gnina_input_mode against the (now auto-extended) methods
         # list. SDF-mode only applies when gnina is the *sole* PDBQT-relevant
-        # method requested; if Vina or any of the Vina-rescore tracks are in
-        # the mix, OpenBabel has to run for them anyway, so we silently fall
-        # back to PDBQT for gnina (with a warning so the caller knows their
-        # upstream protonation work will be overwritten by Gasteiger).
+        # method requested; if Vina, any Vina-rescore track, or the
+        # gnina_rescore_boltz track (its ligand prep still runs OpenBabel —
+        # see guild/docking/boltz.py) are in the mix, OpenBabel has to run for
+        # them anyway, so we silently fall back to PDBQT for gnina (with a
+        # warning so the caller knows their upstream protonation work will be
+        # overwritten by Gasteiger). gnina_rescore_diffdock is excluded here —
+        # it needs no PDBQT conversion at all (DiffDock's SDF pose + a plain
+        # PDB receptor go straight to gnina).
         _pdbqt_requiring = {
             VINA_PREFIX,
             VINA_RESCORE_BOLTZ_PREFIX,
             VINA_RESCORE_DIFFDOCK_PREFIX,
+            GNINA_RESCORE_BOLTZ_PREFIX,
         }
         if (
             gnina_input_mode == "sdf"
@@ -412,6 +521,7 @@ class BulkRun:
         logger.info("BulkRun object initialized")
 
         self._generate_all_combinations_table(input_table)
+        self._warn_altloc_receptors()
         self.existing_rp_scores = pd.DataFrame(
             columns=[COMBINATION_ID, PROTEIN_CONF_ID, SMILES] + RP_SCORES_COLUMNS
         )
@@ -436,6 +546,8 @@ class BulkRun:
             os.makedirs(folder, exist_ok=True)
 
         self.rp_scores_path = f"{self.project_folder}/{RP_SCORES_FILE}"
+        self.posebusters_path = f"{self.project_folder}/{POSEBUSTERS_FILE}"
+        self.posebusters_report_path = f"{self.project_folder}/{POSEBUSTERS_REPORT_FILE}"
         self.all_combinations_path = f"{self.project_folder}/{ALL_COMBINATIONS_FILE}"
         self.known_binders_file_path = f"{self.project_folder}/{KNOWN_BINDERS_FILE}"
 
@@ -450,6 +562,49 @@ class BulkRun:
             input_table[PROTEIN_ID], input_table[PROTEIN_PATH], strict=True
         ):
             self.protein_path_mapper[current_protein] = protein_path
+
+    def _warn_altloc_receptors(self):
+        """
+        Scan every unique receptor in this run for alternate side-chain
+        conformers (altloc A/B, common in crystal structures at partial
+        occupancy) and log one consolidated warning up front.
+
+        ``clean_receptor`` (guild/tools/preparation.py) collapses these to a
+        single conformer per atom later, per-target, inside
+        ``Guild._prepare_protein`` — silently and correctly. But left
+        undisclosed, a flexible-residue selection that happens to include
+        one of these residues used to be indistinguishable from any other
+        run until gnina failed on it hours in. Running the same detection
+        here, before any batch/docking work starts, means the caller sees
+        which receptors and residues are affected at the very start of the
+        run instead of discovering it via a per-target output.log or a
+        silently empty score row.
+        """
+        findings = {}
+        for protein_id, protein_path in self.protein_path_mapper.items():
+            if not os.path.exists(protein_path):
+                continue  # unresolvable paths are reported elsewhere, not here
+            residues = detect_altloc_residues(protein_path)
+            if residues:
+                findings[protein_id] = residues
+
+        if not findings:
+            return
+
+        detail = "\n".join(
+            f"  {protein_id}: {'; '.join(residues)}"
+            for protein_id, residues in sorted(findings.items())
+        )
+        logger.warning(
+            "%d of %d unique receptor(s) in this run have residues with alternate "
+            "side-chain conformers. Each will be collapsed to a single conformer per "
+            "atom (prefer altloc 'A', else highest occupancy) during receptor prep — "
+            "this is what lets flexible-residue selections safely include them "
+            "instead of gnina failing with 'Multiple copies of residue'.\n%s",
+            len(findings),
+            len(self.protein_path_mapper),
+            detail,
+        )
 
     def _generate_all_combinations_table(self, input_table):
         """
@@ -787,6 +942,7 @@ class BulkRun:
             GNINA_PREFIX: self._run_gnina_for_batch,
             KARMADOCK_PREFIX: self._run_karmadock_for_batch,
             DIFFDOCK_PREFIX: self._run_diffdock_for_batch,
+            NESSO_PREFIX: self._run_nesso_for_batch,
         }
 
         for current_batch in tqdm(self.batched_dictionary, desc="Running docking"):
@@ -1067,6 +1223,115 @@ class BulkRun:
         generate_boltz_complex_pdbs(self.batched_dictionary[current_batch])
 
         self._log_progress(batch_progress_log, message="Completed Boltz")
+
+    def _run_nesso_for_batch(self, current_batch, current_batch_folder):
+        """
+        Run Nesso-1 for the whole batch in a single directory-mode invocation.
+
+        Unlike Boltz (one job per ligand, since it needs per-target MSA/pocket
+        prep), Nesso needs neither a receptor structure nor a box — only a
+        sequence and a SMILES — so every YAML for the batch is written up
+        front and scored with one ``nesso predict <dir>`` call. This is not
+        an optimization: batching across the whole directory in one process
+        is where Nesso's >10x speed-up over Boltz-2 comes from (it amortizes
+        model load across every complex), so per-ligand invocation here would
+        throw away the reason to use it.
+        """
+        batch_progress_log = f"{current_batch_folder}/{OUTPUT_LOG_FILE}"
+        self._log_progress(batch_progress_log, message="Starting Nesso")
+
+        combinations_table_variable = self.batched_dictionary[current_batch][COMBINATIONS_TABLE_KEY]
+        nesso_folder = f"{current_batch_folder}/{NESSO_FOLDER}"
+        nesso_input_dir = f"{nesso_folder}/inputs"
+        os.makedirs(nesso_input_dir, exist_ok=True)
+
+        # One sequence extraction per protein configuration, reused across
+        # every ligand docked against it.
+        sequence_cache = {}
+        n_written = 0
+
+        for _, current_row in (
+            combinations_table_variable[[PROTEIN_CONF_ID, LIGAND_ID, PROTEIN_CHAIN, PROTEIN_PATH]]
+            .drop_duplicates(subset=[PROTEIN_CONF_ID, LIGAND_ID])
+            .iterrows()
+        ):
+            current_protein_configuration_id = current_row[PROTEIN_CONF_ID]
+            current_ligand_id = current_row[LIGAND_ID]
+            run_id = f"{current_protein_configuration_id}_{current_ligand_id}"
+
+            # Resume support: skip combinations already scored in a prior run.
+            affinity_result_file = f"{nesso_folder}/predictions/{run_id}/affinity.json"
+            if os.path.exists(affinity_result_file):
+                logger.info(
+                    f"Nesso already ran for {current_batch}: "
+                    f"protein {current_protein_configuration_id}, ligand {current_ligand_id}"
+                )
+                continue
+
+            if current_protein_configuration_id not in sequence_cache:
+                protein_chains = _normalize_chain_list(current_row[PROTEIN_CHAIN])
+                original_sequence_dictionary = get_original_sequence_dictionary(
+                    current_row[PROTEIN_PATH]
+                )
+                # Nesso has no multi-chain pocket concept — a single sequence
+                # per receptor is all it accepts. Use the first requested
+                # chain that's actually present in the structure.
+                usable_chain = next(
+                    (c for c in protein_chains if c in original_sequence_dictionary), None
+                )
+                if usable_chain is None:
+                    logger.warning(
+                        f"Nesso: no usable chain found for protein "
+                        f"{current_protein_configuration_id}; skipping."
+                    )
+                    sequence_cache[current_protein_configuration_id] = None
+                else:
+                    sequence_cache[current_protein_configuration_id] = process_into_fasta_string(
+                        original_sequence_dictionary[usable_chain]
+                    )
+
+            protein_sequence = sequence_cache[current_protein_configuration_id]
+            if protein_sequence is None:
+                continue
+
+            ligand_smiles = self.batched_dictionary[current_batch][SMILES_NAMES_DICTIONARY_KEY][
+                current_ligand_id
+            ]
+
+            yaml_file = f"{nesso_input_dir}/{run_id}.yaml"
+            generate_nesso_yaml(
+                protein_sequence=protein_sequence,
+                protein_chain="A",
+                ligand_smiles=ligand_smiles,
+                ligand_id="L",
+                output_file=yaml_file,
+            )
+            n_written += 1
+
+        if n_written == 0:
+            logger.info(f"Nesso: nothing new to run for {current_batch}")
+            self._log_progress(batch_progress_log, message="Completed Nesso (nothing new)")
+            return
+
+        nesso_subprocess_log = f"{nesso_folder}/_batch.subprocess.log"
+        result = deploy_nesso(
+            nesso_input_dir,
+            out_dir=nesso_folder,
+            use_gpu=self.use_gpu,
+            subprocess_log_path=nesso_subprocess_log,
+        )
+
+        # None for a missing binary or timeout, non-zero for a failed run.
+        if result is None or result.returncode != 0:
+            detail = (
+                "binary missing or timed out" if result is None else f"exit {result.returncode}"
+            )
+            logger.error(f"Nesso failed for {current_batch} ({detail}); see {nesso_subprocess_log}")
+            self._log_progress(batch_progress_log, message=f"Nesso failed ({detail})")
+            return
+
+        logger.info(f"Nesso docking completed for {current_batch} ({n_written} new complexes)")
+        self._log_progress(batch_progress_log, message="Completed Nesso")
 
     def _run_vina_for_batch(self, current_batch, current_batch_folder):
         """Run Vina docking for the batch, then generate complex PDBs."""
@@ -1524,11 +1789,11 @@ class BulkRun:
 
     def _compute_global_ranks_per_protein(self, all_raw_scores):
         """
-        Compute ranks and rank percentile scores PER PROTEIN across ALL batches.
+        Compute ranks and rank percentile scores PER PROTEIN across ALL data (all batches + database).
         This ensures rankings are consistent across batches - all ligands for a given protein
         are ranked together, not separately per batch.
 
-        :param all_raw_scores: DataFrame with raw scores from all batches.
+        :param all_raw_scores: DataFrame with raw scores from all batches and database.
         :return: DataFrame with ranks and rank percentile scores added.
         """
         return compute_rank_percentile_scores(all_raw_scores, methods=self.methods_to_run)
@@ -1546,6 +1811,14 @@ class BulkRun:
         self._log_progress(batch_progress_log, message="Starting scoring")
 
         logger.info(f"Collecting raw scores for batch {batch}")
+
+        # Read off disk over the full combinations table, so a fully resumed
+        # batch still gets complete per-pose tables.
+        if VINA_PREFIX in self.methods_to_run:
+            write_vina_pose_scores_file(self.batched_dictionary[batch])
+        if GNINA_PREFIX in self.methods_to_run:
+            write_gnina_pose_scores_file(self.batched_dictionary[batch])
+
         if len(self.batched_dictionary[batch]["combinations_to_run"]) == 0:
             logger.info("No new combinations to score")
             self._log_progress(
@@ -1576,8 +1849,25 @@ class BulkRun:
         if VINA_RESCORE_BOLTZ_PREFIX in self.methods_to_run:
             docked_methods.append(vina_rescore_boltz_guild_scoring(self.batched_dictionary[batch]))
 
+        if GNINA_RESCORE_DIFFDOCK_PREFIX in self.methods_to_run:
+            docked_methods.append(
+                gnina_rescore_diffdock_guild_scoring(
+                    self.batched_dictionary[batch], use_gpu=self.use_gpu
+                )
+            )
+
+        if GNINA_RESCORE_BOLTZ_PREFIX in self.methods_to_run:
+            docked_methods.append(
+                gnina_rescore_boltz_guild_scoring(
+                    self.batched_dictionary[batch], use_gpu=self.use_gpu
+                )
+            )
+
         if BOLTZ_PREFIX in self.methods_to_run:
             docked_methods.append(boltz_guild_scoring(self.batched_dictionary[batch]))
+
+        if NESSO_PREFIX in self.methods_to_run:
+            docked_methods.append(nesso_guild_scoring(self.batched_dictionary[batch]))
 
         if not docked_methods:
             self._log_progress(
@@ -1612,8 +1902,9 @@ class BulkRun:
         Scoring function to uniformize multiple docking methods by leveraging the decoy dataset.
         Steps:
         1. Collect RAW scores from all batches (parallel)
-        2. Compute ranks PER PROTEIN across ALL data (not per batch)
-        3. Compute rank percentile scores from global ranks
+        2. Merge with existing database scores (if any)
+        3. Compute ranks PER PROTEIN across ALL data (not per batch)
+        4. Compute rank percentile scores from global ranks
 
         :param n_processes: Number of processes to use for multiprocessing.
         """
@@ -1673,10 +1964,10 @@ class BulkRun:
         # Collapse any duplicate COMBINATION_ID rows by *coalescing* columns
         # (first non-null per column) rather than keeping a single row. Within a
         # batch the per-method outer-merge already yields one row per
-        # combination, but concatenating across batches can produce rows for
-        # the same combination carrying a complementary set of method-score
-        # columns; coalescing merges them instead of letting one row win and
-        # dropping the other's scores.
+        # combination, but the DB-resume path (Step 2) concatenates the freshly
+        # scored rows with existing-from-database rows that may carry a
+        # complementary set of method-score columns; coalescing merges them
+        # instead of letting one row win and dropping the other's scores.
         all_raw_scores = all_raw_scores.groupby(COMBINATION_ID, as_index=False, sort=False).first()
 
         # Step 3: Compute ranks PER PROTEIN across ALL data
@@ -2016,3 +2307,206 @@ class BulkRun:
         )
 
         return self.interactions_df
+
+    def run_pose_validity_analysis(
+        self,
+        methods_to_analyze=None,
+        config=DEFAULT_POSEBUSTERS_CONFIG,
+        pose_scope=DEFAULT_POSE_SCOPE,
+        max_poses=POSEBUSTERS_MAX_POSES,
+        n_processes=None,
+    ):
+        """
+        Run PoseBusters over every method's docked poses and flag invalid ones.
+
+        Writes two project-level TSVs — ``posebusters_validity.tsv`` (one row per
+        validated pose, per-check booleans plus a verdict) and
+        ``posebusters_full_report.tsv`` (the numeric measurements behind those
+        booleans). Both are **always written**, header-only when no method
+        produced a complex PDB, so downstream ``pd.read_csv`` is unconditional.
+
+        Nothing is filtered: scores are never blanked and no combination is ever
+        dropped. The verdict additionally lands in ``guild_scores.txt`` as
+        ``<method>_pb_valid`` / ``<method>_pb_pose`` columns.
+
+        :param methods_to_analyze: Docking methods to validate. Defaults to
+            ``methods_to_run``; methods that emit no complex PDB are skipped.
+        :param config: PoseBusters config preset — see POSEBUSTERS_CONFIGS.
+        :param pose_scope: ``best`` | ``escalate`` | ``all``.
+        :param max_poses: Hard cap on poses validated per combination.
+        :param n_processes: Guild-level workers. Defaults to ``self.n_workers``
+            (the ``--n-workers`` / ``N_WORKERS`` setting), matching how the Vina
+            and gnina docking blocks size their pools.
+        :return: The pose-validity DataFrame (empty, never None, when there was
+            nothing to validate).
+        """
+        if methods_to_analyze is None:
+            methods_to_analyze = self.methods_to_run
+        if n_processes is None:
+            n_processes = self.n_workers
+
+        logger.info(
+            f"Starting PoseBusters pose-validity analysis "
+            f"(config={config}, scope={pose_scope}, workers={n_processes})"
+        )
+
+        all_validity = []
+        all_reports = []
+
+        for current_batch in self.batched_dictionary:
+            batch_dict = self.batched_dictionary[current_batch]
+            batch_folder = batch_dict[BATCH_FOLDER]
+            batch_progress_log = f"{batch_folder}/{OUTPUT_LOG_FILE}"
+
+            self._log_progress(batch_progress_log, message="Starting PoseBusters analysis")
+
+            collected = _collect_complex_metadata(batch_dict, methods_to_analyze)
+            if not collected:
+                logger.info(f"No complex PDB files to validate for {current_batch}")
+
+            for method, complex_metadata in collected.items():
+                logger.info(f"Validating {len(complex_metadata)} {method} poses in {current_batch}")
+                summary_df, report_df = validate_batch_poses(
+                    complex_metadata,
+                    batch_folder=batch_folder,
+                    config=config,
+                    pose_scope=pose_scope,
+                    max_poses=max_poses,
+                    n_processes=n_processes,
+                )
+                if not summary_df.empty:
+                    all_validity.append(summary_df)
+                    self._log_posebusters_failures(batch_progress_log, summary_df)
+                if not report_df.empty:
+                    all_reports.append(report_df)
+
+            self._log_progress(batch_progress_log, message="Completed PoseBusters analysis")
+
+        # Contract: external consumers should always be able to read these paths
+        # after a guild run, even when no method produced complex PDBs. Written
+        # unconditionally with the same schema on both the empty and populated
+        # paths, so downstream code is deterministic.
+        if all_validity:
+            self.posebusters_df = pd.concat(all_validity, axis=0).reset_index(drop=True)
+        else:
+            logger.warning(
+                "No poses to validate — writing header-only TSVs to "
+                f"{self.posebusters_path} and {self.posebusters_report_path} so the "
+                "contract 'file always exists' holds."
+            )
+            self.posebusters_df = pd.DataFrame(columns=POSEBUSTERS_COLUMNS)
+
+        if all_reports:
+            self.posebusters_report_df = pd.concat(all_reports, axis=0).reset_index(drop=True)
+        else:
+            self.posebusters_report_df = pd.DataFrame(columns=POSEBUSTERS_REPORT_ID_COLUMNS)
+
+        self.posebusters_df.to_csv(self.posebusters_path, sep="\t", index=False)
+        self.posebusters_report_df.to_csv(self.posebusters_report_path, sep="\t", index=False)
+        logger.info(f"Saved pose-validity analysis to {self.posebusters_path}")
+        logger.info(f"Saved pose-validity full report to {self.posebusters_report_path}")
+
+        if not self.posebusters_df.empty:
+            self._log_posebusters_summary()
+            self._merge_posebusters_into_scores()
+
+        return self.posebusters_df
+
+    def _log_posebusters_failures(self, batch_progress_log, summary_df):
+        """
+        Persist non-``ok`` PoseBusters outcomes to the batch's ``output.log``.
+
+        An unpersisted ``logger.warning`` is not enough: CLAUDE.md records a case
+        where rescoring failures left a score column ~99% empty with zero signal
+        in the synced artifacts. These lines make the same class of failure
+        visible in the run's own output.
+        """
+        failures = summary_df[summary_df[PB_STATUS] != PB_STATUS_OK]
+        for _, row in failures.iterrows():
+            self._log_progress(
+                batch_progress_log,
+                message=(
+                    f"FAILED posebusters {row[PB_COMBINATION_ID]} "
+                    f"({row[PB_DOCKING_METHOD]}, pose {row[PB_POSE]}) "
+                    f"— {row[PB_STATUS]}: {row.get(PB_ERROR)}"
+                ),
+            )
+
+    def _log_posebusters_summary(self):
+        """Log validity rates and the most common failing checks."""
+        frame = self.posebusters_df
+        per_combination = frame.groupby([PB_COMBINATION_ID, PB_DOCKING_METHOD])[PB_VALID].any()
+        n_valid = int(per_combination.sum())
+        n_total = len(per_combination)
+        logger.info(
+            f"PoseBusters: {n_valid}/{n_total} (combination, method) pairs have at least "
+            f"one valid pose across {len(frame)} validated poses"
+        )
+        logger.info(f"PoseBusters status counts: {frame[PB_STATUS].value_counts().to_dict()}")
+
+        failed_checks = (
+            frame[PB_FAILED_CHECKS].dropna().str.split(";").explode().replace("", pd.NA).dropna()
+        )
+        if not failed_checks.empty:
+            logger.info(
+                f"Most common failing checks: {failed_checks.value_counts().head(5).to_dict()}"
+            )
+
+    def _merge_posebusters_into_scores(self):
+        """
+        Add ``<method>_pb_valid`` / ``<method>_pb_pose`` to ``guild_scores.txt``.
+
+        Purely additive — existing columns and row count are untouched, so
+        consumers that already read this file are unaffected.
+
+        A combination with no PoseBusters row gets NA rather than False:
+        absence of evidence is not invalidity. That is distinct from a pose that
+        was *checked* and could not be evaluated, which fails closed to False in
+        the validity table itself.
+        """
+        scores_df = getattr(self, "rp_scores_df", None)
+        if scores_df is None or scores_df.empty:
+            # A --posebusters-only re-run skips scoring, so rp_scores_df was
+            # never built in this process. Fall back to the file on disk.
+            if not os.path.exists(self.rp_scores_path):
+                logger.warning(
+                    f"No scores table at {self.rp_scores_path} — skipping the "
+                    f"guild_scores.txt PoseBusters merge. The standalone "
+                    f"{POSEBUSTERS_FILE} is still written."
+                )
+                return
+            scores_df = pd.read_csv(self.rp_scores_path, sep="\t")
+
+        # One row per (combination, method): did any validated pose pass, and
+        # which was the first that did.
+        grouped = self.posebusters_df.groupby([PB_COMBINATION_ID, PB_DOCKING_METHOD])
+        valid_any = grouped[PB_VALID].any().unstack(PB_DOCKING_METHOD)
+        first_valid = (
+            self.posebusters_df[self.posebusters_df[PB_VALID]]
+            .groupby([PB_COMBINATION_ID, PB_DOCKING_METHOD])[PB_POSE]
+            .min()
+            .unstack(PB_DOCKING_METHOD)
+        )
+
+        merged = scores_df
+        n_rows_before = len(merged)
+        for method in valid_any.columns:
+            valid_column = POSEBUSTERS_VALID_DICTIONARY.get(method, f"{method}_pb_valid")
+            pose_column = POSEBUSTERS_POSE_DICTIONARY.get(method, f"{method}_pb_pose")
+            merged[valid_column] = merged[COMBINATION_ID].map(valid_any[method])
+            if method in first_valid.columns:
+                merged[pose_column] = merged[COMBINATION_ID].map(first_valid[method])
+            else:
+                merged[pose_column] = None
+
+        if len(merged) != n_rows_before:
+            # Guard the "flag, never drop" contract against a future refactor
+            # that reaches for a merge instead of a map.
+            raise RuntimeError(
+                f"PoseBusters merge changed the scores row count "
+                f"({n_rows_before} -> {len(merged)}); it must only add columns."
+            )
+
+        self.rp_scores_df = merged
+        merged.to_csv(self.rp_scores_path, sep="\t", index=False)
+        logger.info(f"Added PoseBusters flag columns to {self.rp_scores_path}")

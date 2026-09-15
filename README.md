@@ -26,6 +26,7 @@ Guild is an open-source Protein-Ligand Binding Tools orchestrator that covers th
   * [Starting from a user-supplied pose](#starting-from-a-user-supplied-pose)
   * [Flexible receptor docking](#flexible-receptor-docking)
   * [Covalent docking (gnina)](#covalent-docking-gnina)
+  * [Nesso (affinity only, no pose)](#nesso-affinity-only-no-pose)
   * [Post-analysis](#post-analysis)
 
 ## Docker
@@ -425,26 +426,29 @@ The docking methods available via Guild are, to date:
 * [Boltz2](https://www.biorxiv.org/content/10.1101/2025.06.14.659707v1)
 *Saro Passaro,  Gabriele Corso,  Jeremy Wohlwend,  Mateo Reveiz,  Stephan Thaler, Vignesh Ram Somnath, Noah Getz,  Tally Portnoi, Julien Roy,  Hannes Stark, David Kwabi-Addo,  Dominique Beaini,  Tommi Jaakkola, Regina Barzilay*, **Boltz-2: Towards Accurate and Efficient Binding Affinity Prediction**.
 biorxiv: <https://www.biorxiv.org/content/10.1101/2025.06.14.659707v1>
+* [Nesso-1](https://github.com/recursionpharma/nesso)
+*Valence Labs / Recursion*, **Nesso-1: a coarse-grained cofolding model for binding affinity prediction**. Apache-2.0: <https://github.com/recursionpharma/nesso>. Predicts affinity only — see [Nesso](#nesso-affinity-only-no-pose).
 
 If you use results from any of these tools, please make sure to cite the authors as indicated in the hyperlinks.
 
 ### Vina rescore (automatic with DiffDock and Boltz)
 
-When `diffdock` or `boltz` is included in the methods list, Guild **automatically adds** a
-matching Vina rescore step. The rescore applies Vina's physics-based scoring function to the
-predicted pose (score-only, no re-docking), giving a kcal/mol ΔG estimate that's comparable
-across methods.
+When `diffdock` or `boltz` is included in the methods list, Guild **automatically adds**
+matching Vina *and* gnina rescore steps. A rescore applies that engine's scoring function to
+the predicted pose (score-only, no re-docking), giving a kcal/mol ΔG estimate that's
+comparable across methods.
 
-The two rescore tracks are **independent** — each produces its own column, so a run that uses
-both DiffDock and Boltz gets two distinct rescore scores:
+The tracks are **independent** — each produces its own column, so a run using both DiffDock
+and Boltz gets four distinct rescore scores:
 
-| Upstream method | Auto-enabled rescore   | Score column                  |
-|-----------------|------------------------|-------------------------------|
-| `boltz`         | `vina_rescore_boltz`   | `vina_rescore_boltz_score`    |
-| `diffdock`      | `vina_rescore_diffdock`| `vina_rescore_diffdock_score` |
+| Upstream method | Auto-enabled rescores                            | Score columns                                                    |
+|-----------------|--------------------------------------------------|------------------------------------------------------------------|
+| `boltz`         | `vina_rescore_boltz`, `gnina_rescore_boltz`      | `vina_rescore_boltz_score`, `gnina_rescore_boltz_score`          |
+| `diffdock`      | `vina_rescore_diffdock`, `gnina_rescore_diffdock`| `vina_rescore_diffdock_score`, `gnina_rescore_diffdock_score`    |
 
-Both score columns are in kcal/mol (lower = stronger predicted binding). Each is independently
-ranked per protein and folded into the `global_rp_score`.
+All four are in kcal/mol (lower = stronger predicted binding), independently ranked per
+protein and folded into the `global_rp_score`. The gnina tracks also emit
+`gnina_rescore_*_cnn_score` as a confidence side channel, which is not ranked.
 
 > **Note:** `boltz_score` itself is the protein-ligand ipTM confidence (range [0, 1], higher =
 > more confident structure) — not a binding score. For a binding-strength signal from Boltz,
@@ -764,6 +768,24 @@ protein_config_id,protein_id,protein_chain,protein_path,smiles,ligand_id,ligand_
 6CTA-A,6CTA,A,/workspace/.../6cta.pdb,O=C(CCl)Nc1ccccc1,cov_1,ex,False,,,/workspace/.../box.txt,A:145:SG,[CH2]Cl
 ```
 
+### Nesso (affinity only, no pose)
+
+Nesso-1 takes only a protein **sequence** and a ligand **SMILES** — no structure, MSA,
+template or pocket — and predicts affinity directly. It writes **no 3D pose**, so it is the
+one method that produces no complex PDB and is therefore skipped by PLIP, ProLIF and
+PoseBusters.
+
+| Column                     | Meaning                                                  |
+|----------------------------|----------------------------------------------------------|
+| `nesso_score`              | log10(IC50 / µM); **lower = stronger** predicted binding |
+| `nesso_binder_probability` | binder/non-binder probability, [0, 1]                    |
+| `nesso_entropy_pl`         | interface entropy; usable as a per-prediction confidence  |
+
+Only `nesso_score` is ranked into `global_rp_score`; the other two ride along for analysis.
+Because Nesso needs `numpy>=2`, which conflicts with Guild's pin, it is installed into its
+own virtualenv in the image and invoked by subprocess — nothing imports it. Predictions are
+batched one directory per call, which is where its speed advantage comes from.
+
 ### Post-analysis
 
 Post-analysis allows guild to leverage the results from the multiple docking approaches.
@@ -773,6 +795,49 @@ Post-analysis allows guild to leverage the results from the multiple docking app
 PLIP (Protein-Ligand Interaction Profiler) allows evaluating structural interactions between proteins and ligands, including hydrogen bonds, hydrophobic contacts, salt bridges, π-stacking, and more. To cite PLIP use:
 * [PLIP](https://doi.org/10.1093/nar/gkv315)
 *Sebastian Salentin, Sven Schreiber, V. Joachim Haupt, Melissa F. Adasme, Michael Schroeder*, **PLIP: fully automated protein-ligand interaction profiler**. Nucleic Acids Res. 2015 Jul 1;43(W1):W443-7. doi: 10.1093/nar/gkv315. PMID: 25873628.
+
+#### PoseBusters
+
+PoseBusters checks whether a docked pose is physically plausible — bond lengths and angles,
+ring flatness, internal energy, steric clashes with the receptor. It is a **filter input, not
+a filter**: no score is blanked and no row is dropped, so you decide what to do with the
+verdict.
+
+| Column                 | Meaning                                                           |
+|------------------------|-------------------------------------------------------------------|
+| `pb_valid`             | pose passed every check that ran                                  |
+| `posebusters_status`   | `ok`, or why the pose could not be checked                        |
+| `<method>_pb_valid`    | in `guild_scores.txt`: any validated pose for that method passed  |
+| `<method>_pb_pose`     | 1-based rank of the first passing pose                            |
+
+`pb_valid` **fails closed** — it is never null, so `df[df.pb_valid]` cannot admit a pose that
+was never actually verified. Use `posebusters_status` to tell an invalid pose (`ok` with
+`pb_valid` false) from one that could not be checked at all.
+
+Two project-level files are always written, header-only if no method produced poses:
+
+| File | Contents |
+|------|----------|
+| `posebusters_validity.tsv` | one row per validated pose: each check boolean plus the verdict |
+| `posebusters_full_report.tsv` | the numeric measurements behind those booleans, for debugging and for setting your own thresholds |
+
+Vina and gnina poses are not energy-minimised, so `internal_energy` can fail broadly. If that
+dominates your failures, judge placement only with `pb_intermolecular_valid`, and use
+`pb_failed_checks` to see which checks are firing.
+
+By default Guild escalates through a combination's poses until one passes; `pose_scope` can
+be set to `best` (top pose only) or `all` (validate every pose).
+
+* [PoseBusters](https://doi.org/10.1039/D3SC04185A)
+*Martin Buttenschoen, Garrett M. Morris, Charlotte M. Deane*, **PoseBusters: AI-based docking
+methods fail to generate physically valid poses or generalise to novel sequences**. Chem. Sci.
+2024;15(9):3130-3139. doi: 10.1039/D3SC04185A.
+
+#### Per-pose score files
+
+`guild_scores.txt` keeps only the best pose per combination. When Vina or gnina runs, each
+batch also gets `vina_scores.txt` / `gnina_scores.txt` with **one row per pose**, so the full
+score distribution is available without re-reading every per-combination file.
 
 #### Guild score
 

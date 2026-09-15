@@ -8,7 +8,7 @@ import guild as _guild_pkg
 
 """
 P2Rank installation path — sibling of the guild/ package on disk (so
-guild-internal/p2rank_2.4.2 in dev, /app/p2rank_2.4.2 in the container).
+<repo>/p2rank_2.4.2 in dev, /app/p2rank_2.4.2 in the container).
 Resolving from the guild package location rather than WORKING_DIR_PATH is
 deliberate: run_guild.py rebinds WORKING_DIR_PATH to the caller's workspace
 for output paths, which would otherwise look for p2rank under the caller's

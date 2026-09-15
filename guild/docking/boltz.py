@@ -14,6 +14,7 @@ import yaml
 from tqdm import tqdm
 
 from guild.constants.boltz import (
+    BOLTZ_AFFINITY_PRED_VALUE_FIELD,
     BOLTZ_PAIR_CHAINS_IPTM,
 )
 from guild.constants.bulk import (
@@ -21,20 +22,27 @@ from guild.constants.bulk import (
     COMBINATION_ID,
     COMBINATIONS_TABLE_KEY,
     COMBINATIONS_TO_RUN_KEY,
+    OUTPUT_LOG_FILE,
 )
 from guild.constants.general import RANDOM_SEED
 from guild.constants.guild import (
+    BOLTZ_AFFINITY_SCORE,
     BOLTZ_FOLDER,
     BOLTZ_SCORE,
+    GNINA_RESCORE_BOLTZ_CNN_SCORE,
+    GNINA_RESCORE_BOLTZ_FOLDER,
+    GNINA_RESCORE_BOLTZ_SCORE,
     LIGAND_ID,
     PROTEIN_CONF_ID,
     VINA_RESCORE_BOLTZ_FOLDER,
     VINA_RESCORE_BOLTZ_SCORE,
 )
+from guild.docking.gnina import gnina_score_pose
 from guild.docking.vina import (
     _compute_box_from_pdb_atoms,
     _extract_ligand_records,
     _extract_protein_from_complex,
+    _validate_connected_ligand_pdbqt,
     vina_score_pose,
 )
 from guild.transformers.converters import (
@@ -116,9 +124,7 @@ def generate_boltz_yaml(
                 "msa": msa if msa else "empty",
             }
         }
-        for chain, sequence, msa in zip(
-            protein_chains, protein_sequences, msa_files, strict=True
-        )
+        for chain, sequence, msa in zip(protein_chains, protein_sequences, msa_files, strict=True)
     ]
 
     ligands_dictionary_list = []
@@ -339,6 +345,29 @@ def process_boltz_output(json_file):
     return data[BOLTZ_PAIR_CHAINS_IPTM]
 
 
+def process_boltz_affinity_output(json_file):
+    """
+    Read Boltz-2's own affinity head (log10(IC50/uM), lower = stronger).
+
+    generate_boltz_yaml/deploy_boltz always request the affinity head (via
+    the ``properties.affinity`` YAML block and ``--sampling_steps_affinity``/
+    ``--diffusion_samples_affinity``), so ``affinity_{run_id}_boltz.json`` is
+    already written next to the confidence JSON on every Boltz run — this
+    just reads it. guild's primary ``boltz_score`` deliberately does NOT use
+    this (it reads ipTM confidence instead); this value exists purely as a
+    free, same-quantity comparator for validating Nesso-1 against, since both
+    report log10(IC50/uM).
+
+    :param json_file: Path to ``affinity_{run_id}_boltz.json``.
+    :return: The ``affinity_pred_value`` field.
+    :raises FileNotFoundError: If the file does not exist.
+    :raises KeyError: If ``affinity_pred_value`` is missing.
+    """
+    with open(json_file, "r") as f:
+        data = json.load(f)
+    return float(data[BOLTZ_AFFINITY_PRED_VALUE_FIELD])
+
+
 def boltz_guild_scoring(batch_dictionary):
     """
     Perform the scoring of the docking results for Boltz.
@@ -373,17 +402,37 @@ def boltz_guild_scoring(batch_dictionary):
             df = pd.DataFrame(pair_chains_iptm)
             # 2-chain layout: chain 0 = protein, chain 1 = ligand → off-diagonal score
             score = float(df.iloc[1, 0])
-        except (FileNotFoundError, KeyError, IndexError, ValueError, TypeError, json.JSONDecodeError) as e:
+        except (
+            FileNotFoundError,
+            KeyError,
+            IndexError,
+            ValueError,
+            TypeError,
+            json.JSONDecodeError,
+        ) as e:
             missing_or_invalid += 1
-            logger.warning(
-                f"Skipping Boltz score for {run_id}: {e}"
-            )
+            logger.warning(f"Skipping Boltz score for {run_id}: {e}")
             continue
+
+        # Side-channel: Boltz-2's own affinity head, read from the same
+        # output tree — free, since generate_boltz_yaml/deploy_boltz already
+        # request it on every run. Missing/invalid does not drop the row;
+        # it only means no same-quantity comparator is available for this
+        # combination (e.g. an older run predating this column).
+        current_boltz_affinity_json_file = (
+            f"{boltz_folder}/predictions/{run_id}_boltz/affinity_{run_id}_boltz.json"
+        )
+        try:
+            affinity_score = process_boltz_affinity_output(current_boltz_affinity_json_file)
+        except (FileNotFoundError, KeyError, ValueError, TypeError, json.JSONDecodeError) as e:
+            affinity_score = np.nan
+            logger.debug(f"No Boltz affinity side-channel for {run_id}: {e}")
 
         boltz_scores_data.append(
             {
                 LIGAND_ID: current_ligand_id,
                 BOLTZ_SCORE: score,
+                BOLTZ_AFFINITY_SCORE: affinity_score,
                 PROTEIN_CONF_ID: current_protein_configuration_id,
                 COMBINATION_ID: f"{current_protein_configuration_id}_{current_ligand_id}",
             }
@@ -399,6 +448,7 @@ def boltz_guild_scoring(batch_dictionary):
         columns=[
             LIGAND_ID,
             BOLTZ_SCORE,
+            BOLTZ_AFFINITY_SCORE,
             PROTEIN_CONF_ID,
             COMBINATION_ID,
         ],
@@ -433,9 +483,7 @@ def _ensure_boltz_complex_pdb(boltz_folder: str, run_id: str) -> str:
         f"/predictions/{run_id}_boltz/{run_id}_boltz_model_0.cif"
     )
     if not os.path.exists(cif_file):
-        raise FileNotFoundError(
-            f"Neither Boltz complex PDB nor source CIF found for {run_id}"
-        )
+        raise FileNotFoundError(f"Neither Boltz complex PDB nor source CIF found for {run_id}")
 
     # Lazy import — guild.transformers.pdb imports from guild.docking.vina so
     # routing this through a top-level import would risk a circular load order.
@@ -473,8 +521,12 @@ def rescore_boltz_pose(
     1. Ensure the relabelled complex PDB exists (regenerate from CIF if needed).
     2. Extract the receptor (everything that is not the ligand resname) → PDBQT.
     3. Extract the ligand (resname ``LIG``) → PDBQT.
-    4. Compute the Vina box from the ligand's bounding box.
-    5. Call :func:`guild.docking.vina.vina_score_pose` (score-only).
+    4. Validate the ligand PDBQT is a single connected molecule — Boltz
+       occasionally predicts physically implausible ligand geometry, which
+       leaves OpenBabel's distance-based bond inference unable to connect
+       the ligand's own atoms (see :func:`guild.docking.vina._validate_connected_ligand_pdbqt`).
+    5. Compute the Vina box from the ligand's bounding box.
+    6. Call :func:`guild.docking.vina.vina_score_pose` (score-only).
 
     :param boltz_folder: Directory containing Boltz outputs for this batch
         (``{batch_folder}/boltz``).
@@ -509,6 +561,7 @@ def rescore_boltz_pose(
     _extract_ligand_records(complex_pdb, ligand_pdb, resname="LIG")
     ligand_pdb_to_pdbqt(pdb=ligand_pdb)
     ligand_pdbqt = ligand_pdb.replace(".pdb", ".pdbqt")
+    _validate_connected_ligand_pdbqt(ligand_pdbqt)
 
     center, size = _compute_box_from_pdb_atoms(ligand_pdb, padding=box_padding)
 
@@ -531,11 +584,27 @@ def rescore_boltz_pose(
     }
 
 
+def _append_progress_log(progress_log_path, message):
+    """
+    Append a timestamped line to ``progress_log_path`` (no-op if None).
+
+    Mirrors ``BulkRun._log_progress``'s line format so ``FAILED`` entries
+    from this module read consistently with the other docking stages' — kept
+    as a local free function (rather than importing from guild.bulk) since
+    guild.bulk already imports this module, and a reverse import would cycle.
+    """
+    if progress_log_path is None:
+        return
+    with open(progress_log_path, "a") as f:
+        f.write(f"{message} at {pd.Timestamp.now()}\n")
+
+
 def vina_rescore_boltz_batch(
     batch_folder: str,
     combinations: list,
     box_padding: float = 4.0,
     seed: int = RANDOM_SEED,
+    progress_log_path: str = None,
 ) -> pd.DataFrame:
     """
     Batch-rescore every Boltz complex in a batch.
@@ -544,6 +613,11 @@ def vina_rescore_boltz_batch(
     :param combinations: List of ``(protein_conf_id, ligand_id)`` tuples.
     :param box_padding: Padding around the ligand bounding box (Å).
     :param seed: Random seed for Vina.
+    :param progress_log_path: Optional path to the batch's persisted
+        ``output.log``. When given, per-combination failures and a final
+        failure-count summary are appended there (in addition to the
+        in-process ``logger.warning``) so the failure is visible in the
+        synced run artifacts instead of only an unpersisted log call.
     :return: DataFrame with ``combination``, ``protein_config_id``,
         ``ligand_id``, ``vina_rescore_boltz_score``.
     """
@@ -552,6 +626,7 @@ def vina_rescore_boltz_batch(
     os.makedirs(rescore_output_dir, exist_ok=True)
 
     results = []
+    failed = 0
     for protein_conf_id, ligand_id in combinations:
         combination_id = f"{protein_conf_id}_{ligand_id}"
         try:
@@ -564,8 +639,11 @@ def vina_rescore_boltz_batch(
                 seed=seed,
             )
         except Exception as e:
-            logger.warning(
-                f"Vina Boltz rescore failed for {combination_id}: {e}"
+            failed += 1
+            logger.warning(f"Vina Boltz rescore failed for {combination_id}: {e}")
+            _append_progress_log(
+                progress_log_path,
+                f"FAILED vina_rescore_boltz {combination_id} ({e})",
             )
             result = {
                 COMBINATION_ID: combination_id,
@@ -574,6 +652,12 @@ def vina_rescore_boltz_batch(
                 VINA_RESCORE_BOLTZ_SCORE: np.nan,
             }
         results.append(result)
+
+    if failed:
+        _append_progress_log(
+            progress_log_path,
+            f"vina_rescore_boltz: {failed}/{len(combinations)} combination(s) failed rescoring",
+        )
 
     return pd.DataFrame(results)
 
@@ -604,6 +688,216 @@ def vina_rescore_boltz_guild_scoring(batch_dictionary):
             columns=[COMBINATION_ID, PROTEIN_CONF_ID, LIGAND_ID, VINA_RESCORE_BOLTZ_SCORE]
         )
 
-    df = vina_rescore_boltz_batch(batch_folder=batch_folder, combinations=combinations)
+    progress_log_path = os.path.join(batch_folder, OUTPUT_LOG_FILE)
+    df = vina_rescore_boltz_batch(
+        batch_folder=batch_folder,
+        combinations=combinations,
+        progress_log_path=progress_log_path,
+    )
     keep = [COMBINATION_ID, PROTEIN_CONF_ID, LIGAND_ID, VINA_RESCORE_BOLTZ_SCORE]
+    return df[[c for c in keep if c in df.columns]]
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# gnina score-only re-scoring of Boltz-predicted complexes
+#
+# Same rationale and coordinate-frame handling as the Vina rescore track
+# above (both receptor and ligand extracted from Boltz's own complex PDB per
+# pose), but scored with gnina's CNN-backed function instead. The receptor is
+# passed to gnina as a plain PDB — gnina reads ``.pdb`` receptors directly,
+# so no protein_pdb_to_pdbqt / mk_prepare_receptor.py step is needed here.
+# The ligand still goes through ligand_pdb_to_pdbqt: Boltz's raw coordinates
+# carry no bond-order information, so OpenBabel bond inference (and the
+# single-connected-fragment validation) is unavoidable regardless of engine.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def rescore_boltz_pose_gnina(
+    boltz_folder: str,
+    protein_conf_id: str,
+    ligand_id: str,
+    output_dir: str = None,
+    box_padding: float = 4.0,
+    seed: int = RANDOM_SEED,
+    use_gpu: bool = False,
+    subprocess_log_path: str = None,
+) -> dict:
+    """
+    Re-score a single Boltz-predicted protein-ligand complex with gnina's
+    score-only mode (no re-docking).
+
+    :param boltz_folder: Directory containing Boltz outputs for this batch.
+    :param protein_conf_id: Protein configuration ID.
+    :param ligand_id: Ligand identifier.
+    :param output_dir: Where to write intermediate PDB/PDBQT files.
+        Defaults to ``boltz_folder``.
+    :param box_padding: Padding around the ligand bounding box (Å).
+    :param seed: Random seed for gnina.
+    :param use_gpu: When False (default), passes ``--no_gpu`` to gnina.
+    :param subprocess_log_path: Optional path for the gnina stdout/stderr transcript.
+    :return: Dict with ``combination``, ``protein_config_id``, ``ligand_id``,
+        ``gnina_rescore_boltz_score``, ``gnina_rescore_boltz_cnn_score``.
+    """
+    run_id = f"{protein_conf_id}_{ligand_id}"
+    complex_pdb = _ensure_boltz_complex_pdb(boltz_folder, run_id)
+
+    if output_dir is None:
+        output_dir = boltz_folder
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Receptor stays a plain PDB — no PDBQT conversion needed for gnina.
+    receptor_pdb = os.path.join(output_dir, f"{run_id}_gnina_receptor_rescore.pdb")
+    _extract_protein_from_complex(complex_pdb, receptor_pdb, ligand_resname="LIG")
+
+    # Ligand: bond order must still be inferred, so this goes through the
+    # same OpenBabel + connectivity-validation pipeline as the Vina track.
+    ligand_pdb = os.path.join(output_dir, f"{run_id}_gnina_ligand_rescore.pdb")
+    _extract_ligand_records(complex_pdb, ligand_pdb, resname="LIG")
+    ligand_pdb_to_pdbqt(pdb=ligand_pdb)
+    ligand_pdbqt = ligand_pdb.replace(".pdb", ".pdbqt")
+    _validate_connected_ligand_pdbqt(ligand_pdbqt)
+
+    center, size = _compute_box_from_pdb_atoms(ligand_pdb, padding=box_padding)
+
+    combination_id = f"{protein_conf_id}_{ligand_id}"
+    score, cnn_score = gnina_score_pose(
+        receptor=receptor_pdb,
+        ligand=ligand_pdbqt,
+        center=center,
+        size=size,
+        output_dir=output_dir,
+        run_id=run_id,
+        seed=seed,
+        use_gpu=use_gpu,
+        subprocess_log_path=subprocess_log_path,
+    )
+
+    logger.info(f"gnina rescore (Boltz pose): {combination_id} → {score:.3f} kcal/mol")
+
+    return {
+        COMBINATION_ID: combination_id,
+        PROTEIN_CONF_ID: protein_conf_id,
+        LIGAND_ID: ligand_id,
+        GNINA_RESCORE_BOLTZ_SCORE: score,
+        GNINA_RESCORE_BOLTZ_CNN_SCORE: cnn_score,
+    }
+
+
+def gnina_rescore_boltz_batch(
+    batch_folder: str,
+    combinations: list,
+    box_padding: float = 4.0,
+    seed: int = RANDOM_SEED,
+    use_gpu: bool = False,
+    progress_log_path: str = None,
+) -> pd.DataFrame:
+    """
+    Batch-rescore every Boltz complex in a batch with gnina.
+
+    :param batch_folder: Path to the batch folder.
+    :param combinations: List of ``(protein_conf_id, ligand_id)`` tuples.
+    :param box_padding: Padding around the ligand bounding box (Å).
+    :param seed: Random seed for gnina.
+    :param use_gpu: When False (default), passes ``--no_gpu`` to gnina.
+    :param progress_log_path: Optional path to the batch's persisted
+        ``output.log`` — mirrors ``vina_rescore_boltz_batch``'s failure
+        logging so gnina rescore failures are equally visible.
+    :return: DataFrame with ``combination``, ``protein_config_id``,
+        ``ligand_id``, ``gnina_rescore_boltz_score``, ``gnina_rescore_boltz_cnn_score``.
+    """
+    boltz_folder = os.path.join(batch_folder, BOLTZ_FOLDER)
+    rescore_output_dir = os.path.join(batch_folder, GNINA_RESCORE_BOLTZ_FOLDER)
+    os.makedirs(rescore_output_dir, exist_ok=True)
+
+    results = []
+    failed = 0
+    for protein_conf_id, ligand_id in combinations:
+        combination_id = f"{protein_conf_id}_{ligand_id}"
+        try:
+            subprocess_log_path = os.path.join(
+                rescore_output_dir, f"{combination_id}.subprocess.log"
+            )
+            result = rescore_boltz_pose_gnina(
+                boltz_folder=boltz_folder,
+                protein_conf_id=protein_conf_id,
+                ligand_id=ligand_id,
+                output_dir=rescore_output_dir,
+                box_padding=box_padding,
+                seed=seed,
+                use_gpu=use_gpu,
+                subprocess_log_path=subprocess_log_path,
+            )
+        except Exception as e:
+            failed += 1
+            logger.warning(f"gnina Boltz rescore failed for {combination_id}: {e}")
+            _append_progress_log(
+                progress_log_path,
+                f"FAILED gnina_rescore_boltz {combination_id} ({e})",
+            )
+            result = {
+                COMBINATION_ID: combination_id,
+                PROTEIN_CONF_ID: protein_conf_id,
+                LIGAND_ID: ligand_id,
+                GNINA_RESCORE_BOLTZ_SCORE: np.nan,
+                GNINA_RESCORE_BOLTZ_CNN_SCORE: np.nan,
+            }
+        results.append(result)
+
+    if failed:
+        _append_progress_log(
+            progress_log_path,
+            f"gnina_rescore_boltz: {failed}/{len(combinations)} combination(s) failed rescoring",
+        )
+
+    return pd.DataFrame(results)
+
+
+def gnina_rescore_boltz_guild_scoring(batch_dictionary, use_gpu: bool = False):
+    """
+    gnina re-scoring of Boltz-predicted complexes for a batch.
+
+    :param batch_dictionary: Batch information dict (the standard structure
+        every ``*_guild_scoring`` function receives).
+    :param use_gpu: When False (default), passes ``--no_gpu`` to gnina.
+    :return: DataFrame with ``COMBINATION_ID``, ``PROTEIN_CONF_ID``,
+        ``LIGAND_ID``, ``GNINA_RESCORE_BOLTZ_SCORE``, and the
+        ``GNINA_RESCORE_BOLTZ_CNN_SCORE`` side-channel. Returns an empty
+        frame (with those columns) if no Boltz outputs are found.
+    """
+    batch_folder = batch_dictionary[BATCH_FOLDER]
+    combinations = batch_dictionary[COMBINATIONS_TO_RUN_KEY]
+
+    boltz_root = os.path.join(batch_folder, BOLTZ_FOLDER)
+    boltz_present = os.path.isdir(boltz_root) and any(
+        name.startswith("boltz_results_") for name in os.listdir(boltz_root)
+    )
+    if not boltz_present:
+        logger.warning(
+            "gnina_rescore_boltz: no Boltz outputs found in %s — returning empty score table",
+            batch_folder,
+        )
+        return pd.DataFrame(
+            columns=[
+                COMBINATION_ID,
+                PROTEIN_CONF_ID,
+                LIGAND_ID,
+                GNINA_RESCORE_BOLTZ_SCORE,
+                GNINA_RESCORE_BOLTZ_CNN_SCORE,
+            ]
+        )
+
+    progress_log_path = os.path.join(batch_folder, OUTPUT_LOG_FILE)
+    df = gnina_rescore_boltz_batch(
+        batch_folder=batch_folder,
+        combinations=combinations,
+        use_gpu=use_gpu,
+        progress_log_path=progress_log_path,
+    )
+    keep = [
+        COMBINATION_ID,
+        PROTEIN_CONF_ID,
+        LIGAND_ID,
+        GNINA_RESCORE_BOLTZ_SCORE,
+        GNINA_RESCORE_BOLTZ_CNN_SCORE,
+    ]
     return df[[c for c in keep if c in df.columns]]

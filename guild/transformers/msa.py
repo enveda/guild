@@ -16,8 +16,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-LOCALCOLABFOLD_DIR_ENV_VAR = "GUILD_LOCALCOLABFOLD_DIR"
-COLABFOLD_RUN_SCRIPT = "run_colabfoldbatch_sample.sh"
+from guild.constants.msa import COLABFOLD_RUN_SCRIPT, LOCALCOLABFOLD_DIR_ENV_VAR
 
 logger = logging.getLogger(__name__)
 

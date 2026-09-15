@@ -124,6 +124,48 @@ RUN git clone --depth 1 https://github.com/YoshitakaMo/localcolabfold.git /opt/l
 ENV COLABFOLD_BIN="/opt/localcolabfold/.pixi/envs/default/bin"
 
 ####################################################################################################
+# Nesso-1 — installed into its OWN venv, entirely independent of the main
+# uv-managed .venv (built below in project-prod-deps).
+#
+# Why isolated: nesso requires numpy>=2 and transformers>=4.40, which
+# conflict outright with this repo's numpy<2 pin and fair-esm's pinned
+# transformers range — they cannot share one virtualenv. This stage is not
+# in project-prod-deps' or base-build's dependency graph, so it builds in
+# parallel with them and never touches the main venv.
+#
+# guild only ever shells out to /opt/nesso/bin/nesso (see NESSO_BIN in
+# guild/docking/nesso.py) — there is no Python-level `import nesso` anywhere
+# in this repo, so the two venvs never need to interoperate at import time.
+#
+# Torch is pre-installed from the CUDA 12.1 wheel index before nesso itself:
+# nesso's own dependency resolution only requires torch>=2.2 (loose) and
+# would otherwise happily settle for the CPU-only PyPI wheel. The pin here
+# matters because nesso's optional "kernels" extra (cuequivariance-ops-torch)
+# is documented as CUDA 12 only — verify this still matches the GPU/driver on
+# the target hosts before bumping either the torch or cuequivariance version.
+# This runs entirely inside its own venv's site-packages (manylinux wheels
+# ship their own libcudart/libcudnn via RPATH), so — unlike gnina — no
+# LD_LIBRARY_PATH juggling is needed for it to coexist with the main venv's
+# CUDA 13 torch.
+FROM python:3.10-slim-bookworm AS nesso-build
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      git \
+      ca-certificates \
+    ; \
+    rm -rf /var/lib/apt/lists/*
+
+ARG NESSO_TORCH_VERSION=2.5.1
+RUN python -m venv /opt/nesso && \
+    /opt/nesso/bin/pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    /opt/nesso/bin/pip install --no-cache-dir \
+        "torch==${NESSO_TORCH_VERSION}" \
+        --index-url https://download.pytorch.org/whl/cu121 && \
+    /opt/nesso/bin/pip install --no-cache-dir \
+        "nesso[kernels] @ git+https://github.com/recursionpharma/nesso.git"
+####################################################################################################
 FROM base-build AS project-prod-deps
 
 USER appuser
@@ -214,6 +256,15 @@ RUN chmod a+x /opt/gnina/bin/gnina
 COPY --from=base-build /opt/localcolabfold /opt/localcolabfold
 ENV COLABFOLD_BIN="/opt/localcolabfold/.pixi/envs/default/bin"
 
+# Nesso-1 — its own self-contained venv (see the nesso-build stage above for
+# why it can't share the main .venv). guild invokes it only by subprocess
+# (guild/docking/nesso.py::NESSO_BIN), so no PATH/PYTHONPATH entry is needed
+# — just world-readable+executable permissions, since the container runs as
+# an arbitrary host uid:gid (see Makefile DOCKER_COMMON's --user), not root
+# or appuser.
+COPY --from=nesso-build /opt/nesso /opt/nesso
+RUN chmod -R a+rX /opt/nesso
+
 USER appuser
 WORKDIR /app
 
@@ -222,6 +273,14 @@ ENV PATH="${VIRTUAL_ENV}/bin:/app:${COLABFOLD_BIN}:${PATH}"
 ENV PYTHONPATH="/app"
 # Runtime environment
 ENV HOME="/workspace"
+# Nesso downloads its checkpoint + ESM-2 weights from HuggingFace Hub on
+# first use (see nesso/hub/config.json upstream); pointing its cache at the
+# mounted workspace (like TRITON_CACHE_DIR below) means that download only
+# happens once across container restarts instead of once per run. Baking the
+# weights into the image at build time would remove even that one-time cost,
+# but requires knowing their exact size/auth requirements up front — revisit
+# if cold-start download time becomes a bottleneck.
+ENV NESSO_CACHE="/workspace/.nesso_cache"
 ENV MPLCONFIGDIR="/tmp/matplotlib"
 # Triton JIT cache — persisted to the mounted workspace so compiled kernels
 # survive container restarts (avoids recompiling cuequivariance/boltz kernels).

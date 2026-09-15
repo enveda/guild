@@ -14,6 +14,7 @@ from rdkit import Chem
 from rdkit.Chem import AllChem, rdMolAlign
 
 from guild.constants.ligands import OBABEL_CONVERSION_TIMEOUT
+from guild.constants.poses import POSE_FILE_EXTENSION
 from guild.constants.system import SHELL_SILENCER
 
 # warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -553,9 +554,6 @@ def pdb_to_sdf(input_pdb: str, output_sdf: str):
     writer.write(molecule)
 
 
-_POSE_EXTENSION = ".sdf"
-
-
 def stage_user_pose(
     pose_path: str,
     ligand_sdf: str,
@@ -586,10 +584,10 @@ def stage_user_pose(
         the per-combo PDB/PDBQT once docking has run.
     """
     ext = os.path.splitext(pose_path)[1].lower()
-    if ext != _POSE_EXTENSION:
+    if ext != POSE_FILE_EXTENSION:
         raise ValueError(
             f"Unsupported pose file extension {ext!r} for {pose_path}; "
-            f"only {_POSE_EXTENSION} is supported."
+            f"only {POSE_FILE_EXTENSION} is supported."
         )
     if not os.path.exists(pose_path):
         raise FileNotFoundError(f"Pose file not found: {pose_path}")

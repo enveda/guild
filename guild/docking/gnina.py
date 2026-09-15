@@ -21,6 +21,7 @@ from guild.constants.bulk import (
     BATCH_FOLDER,
     COMBINATION_ID,
     COMBINATIONS_TO_RUN_KEY,
+    GNINA_SCORES_FILE,
 )
 from guild.constants.general import RANDOM_SEED
 from guild.constants.gnina import (
@@ -33,21 +34,25 @@ from guild.constants.gnina import (
     GNINA_DEFAULT_NUMBER_OF_POSES,
     GNINA_LIB_PATH,
     GNINA_OB_DATA_DIR,
+    GNINA_SUBPROCESS_TIMEOUT,
 )
 from guild.constants.guild import (
     GNINA_CNN_SCORE,
     GNINA_FOLDER,
     GNINA_SCORE,
     LIGAND_ID,
+    POSE,
     PROTEIN_CONF_ID,
 )
 from guild.constants.poses import (
     DEFAULT_POSE_MODE,
+    POSE_MODE_DOCK,
     POSE_MODE_LOCAL,
     POSE_MODE_SCORE,
     POSE_MODES,
 )
 from guild.docking.vina import _validate_pdbqt
+from guild.tools.pose_scores import write_pose_scores_file
 from guild.tools.subprocess_log import write_subprocess_log
 
 logger = logging.getLogger(__name__)
@@ -55,7 +60,6 @@ logger = logging.getLogger(__name__)
 # Bound to avoid hangs from a runaway gnina worker. Matches DOCKING_TIMEOUT in
 # guild/constants/bulk.py (kept as a module-local constant to avoid pulling a
 # bulk-orchestration dep into the docking module).
-GNINA_SUBPROCESS_TIMEOUT = 600  # seconds
 
 # gnina prints a table to stdout that looks like:
 #
@@ -68,6 +72,19 @@ GNINA_SUBPROCESS_TIMEOUT = 600  # seconds
 #
 # Each data row starts with the integer mode number; the rest are floats.
 _GNINA_POSE_ROW = re.compile(r"^\s*(\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)")
+
+# --local_only / --score_only drop the global search entirely, so gnina never
+# prints the pose table above — instead it prints a single key-value block:
+#
+#     Affinity: -6.30246 (kcal/mol)
+#     CNNscore: 0.804454
+#     CNNaffinity: 6.53497
+#
+# The CNN lines are absent when --cnn_scoring none (e.g. covalent docking's
+# default). There is no "mode" number in this format.
+_GNINA_SCORE_ONLY_AFFINITY = re.compile(r"^\s*Affinity:\s*(-?\d+\.?\d*)")
+_GNINA_SCORE_ONLY_CNNSCORE = re.compile(r"^\s*CNNscore:\s*(-?\d+\.?\d*)")
+_GNINA_SCORE_ONLY_CNNAFFINITY = re.compile(r"^\s*CNNaffinity:\s*(-?\d+\.?\d*)")
 
 
 def _ensure_openbabel_plugin_shim() -> None:
@@ -104,6 +121,45 @@ def parse_gnina_stdout(stdout: str) -> list[tuple[int, float, float, float]]:
     if not rows:
         raise ValueError("Could not parse any pose rows from gnina stdout")
     return rows
+
+
+def parse_gnina_score_only_stdout(stdout: str) -> list[tuple[int, float, float, float]]:
+    """
+    Parse gnina's stdout for ``--score_only`` / ``--local_only`` mode.
+
+    Unlike the global-search docking mode, these modes print a single
+    ``Affinity:``/``CNNscore:``/``CNNaffinity:`` key-value block instead of
+    the pose table :func:`parse_gnina_stdout` expects — see the format note
+    above ``_GNINA_SCORE_ONLY_AFFINITY``. Returns a single synthetic
+    ``mode=1`` row so callers can treat the result the same shape as the
+    docking-mode table.
+
+    :param stdout: Captured stdout from a ``gnina`` subprocess call made with
+        ``--score_only`` or ``--local_only``.
+    :return: A one-element list ``[(1, affinity, cnn_score, cnn_affinity)]``.
+        ``cnn_score``/``cnn_affinity`` are ``nan`` when absent (e.g.
+        ``--cnn_scoring none``).
+    :raises ValueError: when no ``Affinity:`` line can be found.
+    """
+    affinity = None
+    cnn_score = float("nan")
+    cnn_affinity = float("nan")
+    for line in stdout.splitlines():
+        match = _GNINA_SCORE_ONLY_AFFINITY.match(line)
+        if match:
+            affinity = float(match.group(1))
+            continue
+        match = _GNINA_SCORE_ONLY_CNNSCORE.match(line)
+        if match:
+            cnn_score = float(match.group(1))
+            continue
+        match = _GNINA_SCORE_ONLY_CNNAFFINITY.match(line)
+        if match:
+            cnn_affinity = float(match.group(1))
+
+    if affinity is None:
+        raise ValueError("Could not parse an Affinity value from gnina score/local-only stdout")
+    return [(1, affinity, cnn_score, cnn_affinity)]
 
 
 def deploy_gnina(
@@ -314,7 +370,19 @@ def deploy_gnina(
             stderr=completed.stderr,
         )
 
-    poses = parse_gnina_stdout(completed.stdout)
+    if pose_mode == POSE_MODE_DOCK:
+        # Normal global search: a missing pose table IS a real failure, so
+        # let parse_gnina_stdout raise as it always has.
+        poses = parse_gnina_stdout(completed.stdout)
+    else:
+        # --local_only / --score_only: try the docking-mode table first (in
+        # case a future gnina version keeps emitting it here too), and only
+        # fall back to the single-block Affinity/CNNscore parser if that
+        # table genuinely isn't present.
+        try:
+            poses = parse_gnina_stdout(completed.stdout)
+        except ValueError:
+            poses = parse_gnina_score_only_stdout(completed.stdout)
 
     scores = [affinity for (_mode, affinity, _cnn, _cnn_aff) in poses]
     cnn_scores = [cnn for (_mode, _affinity, cnn, _cnn_aff) in poses]
@@ -335,6 +403,98 @@ def deploy_gnina(
     }
 
 
+# ── gnina score-only re-scoring of pre-docked poses ─────────────────────────
+# Mirrors guild.docking.vina.vina_score_pose / _score-only rescore primitives,
+# but via the gnina CLI (score-only mode) instead of the Vina python API.
+# Unlike Vina, gnina's receptor argument accepts a plain PDB directly (format
+# sniffed from the extension), so callers extracting a receptor from a
+# Boltz/DiffDock complex don't need an OpenBabel PDBQT conversion step for it.
+
+
+def gnina_score_pose(
+    receptor: str,
+    ligand: str,
+    center: tuple[float, float, float],
+    size: tuple[float, float, float],
+    output_dir: str,
+    run_id: str,
+    seed: int = RANDOM_SEED,
+    use_gpu: bool = False,
+    subprocess_log_path: str | None = None,
+) -> tuple[float, float]:
+    """
+    Score a single pre-docked ligand pose with gnina (score-only, no re-docking).
+
+    Calls :func:`deploy_gnina` with ``pose_mode="score"`` (``--score_only``),
+    which evaluates the supplied receptor/ligand coordinates as-is — the
+    ``center``/``size`` box only defines the CNN's grid around the pose (an
+    "autobox" derived from the pose itself, e.g. via
+    :func:`guild.docking.vina.compute_box_from_sdf` /
+    :func:`guild.docking.vina._compute_box_from_pdb_atoms`), it does not move
+    the ligand.
+
+    :param receptor: Path to the receptor file (``.pdb`` or ``.pdbqt``).
+    :param ligand: Path to the ligand file (``.sdf`` or ``.pdbqt``).
+    :param center: Box center (x, y, z).
+    :param size: Box size (x, y, z).
+    :param output_dir: Directory to write the (discarded) output PDBQT/score files.
+    :param run_id: Identifier used to name the intermediate output files.
+    :param seed: RNG seed.
+    :param use_gpu: When False (default — rescoring commonly runs alongside
+        CPU-only batch scoring), passes ``--no_gpu`` to gnina.
+    :param subprocess_log_path: Optional path for the gnina stdout/stderr transcript.
+    :return: ``(affinity, cnn_score)`` — affinity in kcal/mol (lower = better).
+    """
+    output_pdbqt = os.path.join(output_dir, f"{run_id}_gnina_score.pdbqt")
+    output_scores = os.path.join(output_dir, f"{run_id}_gnina_score.txt")
+
+    result = deploy_gnina(
+        receptor=receptor,
+        ligand=ligand,
+        center=center,
+        size=size,
+        output_pdbqt=output_pdbqt,
+        output_scores=output_scores,
+        seed=seed,
+        use_gpu=use_gpu,
+        pose_mode=POSE_MODE_SCORE,
+        subprocess_log_path=subprocess_log_path,
+    )
+    return float(result["scores"][0]), float(result["cnn_scores"][0])
+
+
+def _read_gnina_pose_scores(input_file: str) -> pd.DataFrame:
+    """
+    Read a gnina score file (written by :func:`deploy_gnina`) into a
+    DataFrame with one row per pose: columns ``[POSE, GNINA_SCORE, GNINA_CNN_SCORE]``.
+
+    :param input_file: Path to the file written by :func:`deploy_gnina`.
+    :return: Empty DataFrame (same columns) if the file has no rows.
+    """
+    df = pd.read_csv(input_file, sep=":", header=None)
+    columns = [POSE, GNINA_SCORE, GNINA_CNN_SCORE]
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    # The second column holds "affinity\tcnn_score"; split it back out.
+    affinity_cnn = df[1].astype(str).str.split("\t", n=1, expand=True)
+    affinities = affinity_cnn[0].astype(float)
+    # Older score files might be Vina-format (no CNN column) — guard for that
+    # so a partial migration doesn't break callers.
+    if affinity_cnn.shape[1] > 1:
+        cnn_scores = pd.to_numeric(affinity_cnn[1], errors="coerce")
+    else:
+        cnn_scores = pd.Series([np.nan] * len(affinities))
+
+    return pd.DataFrame(
+        {
+            POSE: df[0].astype(int),
+            GNINA_SCORE: affinities,
+            GNINA_CNN_SCORE: cnn_scores,
+        }
+    )[columns]
+
+
 def process_gnina_output(input_file: str) -> tuple[float, float]:
     """
     Read a gnina score file and return the best ``(affinity, cnn_score)``.
@@ -347,22 +507,12 @@ def process_gnina_output(input_file: str) -> tuple[float, float]:
     :return: ``(affinity, cnn_score)``. If the file is empty/unreadable,
         returns ``(nan, nan)`` — matching :func:`process_vina_output`.
     """
-    df = pd.read_csv(input_file, sep=":", header=None)
+    df = _read_gnina_pose_scores(input_file)
     if df.empty:
         return float("nan"), float("nan")
 
-    # The second column holds "affinity\tcnn_score"; split it back out.
-    affinity_cnn = df[1].astype(str).str.split("\t", n=1, expand=True)
-    affinities = affinity_cnn[0].astype(float)
-    # Older score files might be Vina-format (no CNN column) — guard for that
-    # so a partial migration doesn't break callers.
-    if affinity_cnn.shape[1] > 1:
-        cnn_scores = pd.to_numeric(affinity_cnn[1], errors="coerce")
-    else:
-        cnn_scores = pd.Series([np.nan] * len(affinities))
-
-    best_idx = affinities.idxmin()
-    return float(affinities.loc[best_idx]), float(cnn_scores.loc[best_idx])
+    best_idx = df[GNINA_SCORE].idxmin()
+    return float(df[GNINA_SCORE].loc[best_idx]), float(df[GNINA_CNN_SCORE].loc[best_idx])
 
 
 def gnina_guild_scoring(batch_dictionary) -> pd.DataFrame:
@@ -405,3 +555,15 @@ def gnina_guild_scoring(batch_dictionary) -> pd.DataFrame:
     return combinations_df[
         [COMBINATION_ID, GNINA_SCORE, GNINA_CNN_SCORE, PROTEIN_CONF_ID, LIGAND_ID]
     ]
+
+
+def write_gnina_pose_scores_file(batch_dictionary) -> pd.DataFrame:
+    """Aggregate every gnina pose score (+ CNN score) into ``{batch_folder}/gnina_scores.txt``."""
+    return write_pose_scores_file(
+        batch_dictionary,
+        method_folder=GNINA_FOLDER,
+        output_file=GNINA_SCORES_FILE,
+        score_columns=[GNINA_SCORE, GNINA_CNN_SCORE],
+        read_pose_scores=_read_gnina_pose_scores,
+        method_label="gnina",
+    )

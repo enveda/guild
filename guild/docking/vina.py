@@ -13,10 +13,12 @@ from guild.constants.bulk import (
     BATCH_FOLDER,
     COMBINATION_ID,
     COMBINATIONS_TO_RUN_KEY,
+    VINA_SCORES_FILE,
 )
 from guild.constants.general import RANDOM_SEED
 from guild.constants.guild import (
     LIGAND_ID,
+    POSE,
     PROTEIN_CONF_ID,
     VINA_FOLDER,
     VINA_SCORE,
@@ -29,6 +31,8 @@ from guild.tools.ligand_properties import (
     radius_of_gyration_from_smiles,
     vina_box_edge_from_radius_of_gyration,
 )
+from guild.tools.pose_molecules import is_atom_record, residue_name
+from guild.tools.pose_scores import write_pose_scores_file
 
 logger = logging.getLogger(__name__)
 
@@ -360,6 +364,33 @@ def vina_guild_scoring(batch_dictionary):
     return combinations_df[[COMBINATION_ID, VINA_SCORE, PROTEIN_CONF_ID, LIGAND_ID]]
 
 
+def _read_vina_pose_scores(input_file: str) -> pd.DataFrame:
+    """
+    Read a Vina score file (written by :func:`deploy_vina`) into a DataFrame
+    with one row per pose: columns ``[POSE, VINA_SCORE]``.
+
+    :param input_file: Path to the ``mode: affinity`` score file.
+    :raises: Whatever ``pandas.read_csv`` raises for a missing/empty file —
+        callers are expected to handle that per-combination.
+    """
+    df = pd.read_csv(input_file, sep=":", header=None, names=[POSE, VINA_SCORE])
+    df[POSE] = df[POSE].astype(int)
+    df[VINA_SCORE] = df[VINA_SCORE].astype(float)
+    return df
+
+
+def write_vina_pose_scores_file(batch_dictionary) -> pd.DataFrame:
+    """Aggregate every Vina pose score in the batch into ``{batch_folder}/vina_scores.txt``."""
+    return write_pose_scores_file(
+        batch_dictionary,
+        method_folder=VINA_FOLDER,
+        output_file=VINA_SCORES_FILE,
+        score_columns=[VINA_SCORE],
+        read_pose_scores=_read_vina_pose_scores,
+        method_label="Vina",
+    )
+
+
 # ── Vina score-only re-scoring of pre-docked poses ──────────────────────────
 # NOTE: Method-specific orchestration (rescore_boltz_pose, rescore_diffdock_pose,
 # vina_rescore_*_batch, vina_rescore_*_guild_scoring) lives in
@@ -367,7 +398,8 @@ def vina_guild_scoring(batch_dictionary):
 # layout of their respective methods. This module keeps only the Vina-grid
 # primitives that any pose source can reuse (compute_box_from_sdf,
 # _compute_box_from_pdb_atoms, _extract_ligand_records,
-# _extract_protein_from_complex, vina_score_pose).
+# _extract_protein_from_complex, _validate_connected_ligand_pdbqt,
+# vina_score_pose).
 
 
 def compute_box_from_sdf(sdf_path: str, padding: float = 4.0):
@@ -478,14 +510,9 @@ def _extract_ligand_records(input_pdb: str, output_pdb: str, resname: str = "LIG
     the chain ID is not a reliable marker because ``cif_to_pdb`` may rename it).
     """
     kept = 0
-    resname_padded = resname.ljust(3)[:3]
     with open(input_pdb) as fin, open(output_pdb, "w") as fout:
         for line in fin:
-            if (
-                line.startswith(("ATOM", "HETATM"))
-                and len(line) > 20
-                and line[17:20] == resname_padded
-            ):
+            if is_atom_record(line) and len(line) > 20 and residue_name(line) == resname:
                 fout.write(line)
                 kept += 1
         fout.write("END\n")
@@ -503,11 +530,10 @@ def _extract_protein_from_complex(complex_pdb: str, output_pdb: str, ligand_resn
     Boltz-output ligand are not in the same physical space.
     """
     kept = 0
-    resname_padded = ligand_resname.ljust(3)[:3]
     with open(complex_pdb) as fin, open(output_pdb, "w") as fout:
         for line in fin:
-            if line.startswith(("ATOM", "HETATM")) and len(line) > 20:
-                if line[17:20] == resname_padded:
+            if is_atom_record(line) and len(line) > 20:
+                if residue_name(line) == ligand_resname:
                     continue
                 fout.write(line)
                 kept += 1
@@ -519,3 +545,28 @@ def _extract_protein_from_complex(complex_pdb: str, output_pdb: str, ligand_resn
             f"No protein atoms left in {complex_pdb} after excluding resname '{ligand_resname}'"
         )
     return output_pdb
+
+
+def _validate_connected_ligand_pdbqt(pdbqt_path: str) -> None:
+    """
+    Raise if ``pdbqt_path`` is not a single connected ligand.
+
+    Callers that build the ligand PDBQT from an isolated-ligand PDB with no
+    ``CONECT`` records (e.g. Boltz rescoring's ``_extract_ligand_records``
+    output) rely on OpenBabel to infer bonds from 3D distance alone. When the
+    source pose is physically implausible (atoms placed too far apart to
+    bond — seen with some Boltz-predicted ligand geometries), OpenBabel can't
+    connect them and silently writes one single-atom ``ROOT``/``ENDROOT``
+    torsion-tree block per atom instead of one connected ligand. Vina would
+    then score each fragment independently with no intra-ligand bonds,
+    producing a meaningless energy without ever raising — so this must be
+    checked explicitly before scoring.
+    """
+    with open(pdbqt_path) as f:
+        n_roots = sum(1 for line in f if line.startswith("ROOT"))
+    if n_roots != 1:
+        raise ValueError(
+            f"Ligand PDBQT {pdbqt_path} is not a single connected molecule "
+            f"({n_roots} disconnected fragment(s), expected 1) — likely a "
+            "physically implausible predicted pose; refusing to rescore."
+        )
