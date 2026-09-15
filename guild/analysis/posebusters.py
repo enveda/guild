@@ -243,7 +243,7 @@ def _mols_from_sdf(sdf_path: str, smiles: str) -> List[Tuple[object, Optional[st
         # re-read unsanitized and rebuild through the SMILES template.
         if fallback_records is None:
             fallback = Chem.SDMolSupplier(sdf_path, removeHs=False, sanitize=False)
-            fallback_records = [m for m in fallback if m is not None]
+fallback_records = list(fallback)
 
         if index < len(fallback_records):
             try:
