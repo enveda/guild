@@ -450,12 +450,16 @@ All four are in kcal/mol (lower = stronger predicted binding), independently ran
 protein and folded into the `global_rp_score`. The gnina tracks also emit
 `gnina_rescore_*_cnn_score` as a confidence side channel, which is not ranked.
 
-> **Rank-percentile orientation.** Every `rp_*_score` and the `global_rp_score` run from 0 to
-> 1 with **1 = best** — the best-scoring ligand for a protein gets exactly `1.0`, the worst
-> gets `1 / n`. Raw `*_score` columns keep their own native directions (Vina and gnina lower =
-> better, KarmaDock and Boltz higher = better), which is exactly what the rank percentile
-> exists to normalise away. **Changed in 1.3.1:** earlier releases emitted the inverse
-> (0 = best); `rp_*` values carried over from ≤ 1.3.0 are inverted relative to this release.
+> **Rank-percentile orientation.** Every `rp_*_score` and the `global_rp_score` run from 0 to 1
+> with **0 = best** — the best-scoring ligand for a protein gets `1 / n`, the worst gets `1.0`.
+> Raw `*_score` columns keep their own native directions (Vina and gnina lower = better,
+> KarmaDock and Boltz higher = better), which is exactly what the rank percentile exists to
+> normalise away.
+
+> **Denominator.** `n` above is the number of molecules that produced a valid score for that
+> protein. `compute_rank_percentile_scores(..., denominator="attempted")` divides by every pair
+> attempted instead, counting the ones that failed to score. The published case-study results
+> were generated that way, so reproducing them requires it.
 
 > **Note:** `boltz_score` itself is the protein-ligand ipTM confidence (range [0, 1], higher =
 > more confident structure) — not a binding score. For a binding-strength signal from Boltz,

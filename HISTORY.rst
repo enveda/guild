@@ -2,15 +2,13 @@
 History
 =======
 
-1.3.1 (2026-09-15)
+1.4.0 (2026-09-15)
 ------------------
-**Breaking:** rank-percentile scores now run 1 = best (previously 0 = best).
-``rp_*_score`` and ``global_rp_score`` produced by earlier versions are inverted
-relative to this release. Raw ``*_score`` columns are unchanged, and the
-``rank_*`` columns still hold rank 1 = best binder.
-
-The orientation is now pinned by a regression test so it cannot silently flip
-again.
+* ``compute_rank_percentile_scores`` gained a ``denominator`` option
+  (``"valid"``, the default and previous behaviour, or ``"attempted"``). The
+  published case-study results were generated with ``"attempted"``.
+* The rank-percentile orientation (0 = best) is now documented in the README
+  and pinned by a regression test. Behaviour is unchanged.
 
 1.3.0 (2026-09-14)
 ------------------
