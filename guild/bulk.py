@@ -1316,12 +1316,23 @@ class BulkRun:
             return
 
         nesso_subprocess_log = f"{nesso_folder}/_batch.subprocess.log"
-        deploy_nesso(
+        result = deploy_nesso(
             nesso_input_dir,
             out_dir=nesso_folder,
             use_gpu=self.use_gpu,
             subprocess_log_path=nesso_subprocess_log,
         )
+
+        # deploy_nesso returns None for a missing binary or a timeout, and a
+        # non-zero returncode for a failed run. Reporting either as completed
+        # would hide the failure until scoring finds no affinity.json.
+        if result is None or result.returncode != 0:
+            detail = (
+                "binary missing or timed out" if result is None else f"exit {result.returncode}"
+            )
+            logger.error(f"Nesso failed for {current_batch} ({detail}); see {nesso_subprocess_log}")
+            self._log_progress(batch_progress_log, message=f"Nesso failed ({detail})")
+            return
 
         logger.info(f"Nesso docking completed for {current_batch} ({n_written} new complexes)")
         self._log_progress(batch_progress_log, message="Completed Nesso")
@@ -1804,6 +1815,15 @@ class BulkRun:
         self._log_progress(batch_progress_log, message="Starting scoring")
 
         logger.info(f"Collecting raw scores for batch {batch}")
+
+        # Ahead of the early return below: these read the per-combination score
+        # files off disk and iterate the full combinations table, so a fully
+        # resumed batch still gets its complete per-pose tables.
+        if VINA_PREFIX in self.methods_to_run:
+            write_vina_pose_scores_file(self.batched_dictionary[batch])
+        if GNINA_PREFIX in self.methods_to_run:
+            write_gnina_pose_scores_file(self.batched_dictionary[batch])
+
         if len(self.batched_dictionary[batch]["combinations_to_run"]) == 0:
             logger.info("No new combinations to score")
             self._log_progress(
@@ -1816,11 +1836,9 @@ class BulkRun:
 
         if VINA_PREFIX in self.methods_to_run:
             docked_methods.append(vina_guild_scoring(self.batched_dictionary[batch]))
-            write_vina_pose_scores_file(self.batched_dictionary[batch])
 
         if GNINA_PREFIX in self.methods_to_run:
             docked_methods.append(gnina_guild_scoring(self.batched_dictionary[batch]))
-            write_gnina_pose_scores_file(self.batched_dictionary[batch])
 
         if KARMADOCK_PREFIX in self.methods_to_run:
             docked_methods.append(karmadock_guild_scoring(self.batched_dictionary[batch]))

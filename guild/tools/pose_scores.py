@@ -1,8 +1,8 @@
 """Batch-level per-pose score tables.
 
-``guild_scores.txt`` keeps only the single best pose per combination. These
-files keep every pose the engine produced, so the full distribution does not
-require re-opening each per-combination score file.
+``guild_scores.txt`` keeps only the best pose per combination; these files keep
+every pose, so the full distribution needs no re-parsing of the per-combination
+score files.
 """
 
 import logging
@@ -27,18 +27,11 @@ def write_pose_scores_file(
 ) -> pd.DataFrame:
     """Aggregate every pose's scores across a batch into ``{batch_folder}/{output_file}``.
 
-    Iterates the batch's full combinations table rather than
-    ``COMBINATIONS_TO_RUN_KEY``, so the file stays complete across resumed
-    runs: the per-combination score files persist on disk regardless of which
-    combinations were newly run this call.
+    Iterates the full combinations table rather than COMBINATIONS_TO_RUN_KEY, so
+    the file stays complete across resumed runs.
 
-    :param method_folder: Per-method subfolder holding the score files.
-    :param score_columns: Score columns ``read_pose_scores`` yields, appended
-        after the identity columns.
-    :param read_pose_scores: Reads one score file into a frame of
-        ``[POSE, *score_columns]``; may raise, which is logged and skipped.
-    :param method_label: Engine name, for the skip log line.
-    :return: One row per pose, also written as CSV.
+    ``read_pose_scores`` returns ``[POSE, *score_columns]`` for one score file
+    and may raise, which is logged and skipped.
     """
     combinations = batch_dictionary[COMBINATIONS_TABLE_KEY][
         [PROTEIN_CONF_ID, LIGAND_ID]

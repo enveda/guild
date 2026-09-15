@@ -1,25 +1,18 @@
 """PoseBusters pose-validity analysis.
 
-Runs PoseBusters' ``dock`` check suite over guild's docked poses and reports
-which are physically implausible. This is a *filter input*, not a filter: no
-score is blanked and no row is dropped — every pose gets a verdict and
-downstream consumers decide what to do with it.
+Runs PoseBusters' ``dock`` suite over guild's docked poses. A filter
+*input*, not a filter: nothing is dropped or blanked, every pose just
+gets a verdict.
 
-Two invariants are load-bearing:
+Two invariants are load-bearing. ``mol_pred`` is an in-memory Mol whose
+bond orders come from SMILES, never a file path -- inferring them from
+geometry would make the intramolecular checks judge the coordinates under
+suspicion. And the receptor is extracted from the complex PDB, not the
+template, because Boltz re-centres its prediction so the frames differ.
 
-1. **``mol_pred`` is an in-memory Mol, never a file path.** Bond orders come
-   from the combination's SMILES (see
-   :func:`guild.tools.pose_molecules.mol_from_pdb_block`); inferring them from
-   geometry would make the intramolecular checks judge the very coordinates
-   under suspicion.
-2. **The receptor comes from the complex PDB, not the template.** Boltz
-   re-centres its predicted complex, so a template-frame receptor and a
-   Boltz-frame ligand are not in the same space. Extracting both sides from
-   one complex PDB makes the frames agree by construction, for every engine.
-
-``pb_valid`` fails **closed** — never ``None``, so ``df[df.pb_valid]`` cannot
-admit an unverified pose. ``posebusters_status`` distinguishes an invalid pose
-(``ok`` + ``pb_valid`` False) from one that could not be checked.
+``pb_valid`` fails closed, so ``df[df.pb_valid]`` cannot admit an
+unverified pose; ``posebusters_status`` separates "invalid" from "could
+not check".
 """
 
 import glob
@@ -87,12 +80,8 @@ def _read_complex(path: str) -> str:
 
 
 def _normalise_check_name(name: str) -> str:
-    """Normalise a PoseBusters output column to a guild column name.
-
-    PoseBusters emits embedded hyphens (``protein-ligand_maximum_distance``)
-    where guild's constants use underscores. Spaces are folded too, so an
-    upstream relabelling to human-readable headers still maps cleanly.
-    """
+    # PoseBusters emits hyphens where guild's constants use underscores;
+    # spaces are folded too, in case of an upstream relabelling.
     return name.strip().lower().replace("-", "_").replace(" ", "_")
 
 
@@ -107,14 +96,9 @@ def _pose_mols(
 ) -> List[Tuple[object, Optional[str], bool]]:
     """Collect this combination's poses as RDKit mols, best-first.
 
-    Only the top pose lives in ``<combination>_complex.pdb``, so going past it
-    means reading each engine's own output. Every pose of an engine shares the
-    coordinate frame of the receptor its complex PDB was built from, so one
-    extracted receptor serves them all.
-
-    Falls back to the complex PDB's own ligand when the native pose file is
-    absent, so a pruned project tree still yields the top pose. Boltz always
-    lands there: it predicts one complex, so its best pose is its only pose.
+    Only the top pose lives in the complex PDB, so going past it means
+    reading the engine's own output. Falls back to the complex PDB's ligand
+    when that is absent; Boltz always lands there, predicting one complex.
     """
     method_folder = f"{batch_folder}/{docking_method}"
     poses: List[Tuple[object, Optional[str], bool]] = []
@@ -180,8 +164,7 @@ def _base_record(
 def _failed_record(base: Dict, status: str, error: Optional[str]) -> Dict:
     """A row for a pose that could not be evaluated.
 
-    Check columns are left absent (NaN on DataFrame construction): "not
-    checked" must not read as "checked and passed".
+    Check columns are left absent: "not checked" must not read as "passed".
     """
     return {
         **base,
@@ -208,9 +191,8 @@ def _passed(value) -> bool:
 def _summarise_checks(base: Dict, results: Dict, status: str, error: Optional[str]) -> Dict:
     """Turn one normalised PoseBusters result row into a guild summary record.
 
-    Only checks present in the result are judged — ``dock_fast`` legitimately
-    omits ``internal_energy``. A check present but None (PoseBusters could not
-    evaluate it) does count as not-passed: nothing about it was verified.
+    Only checks present are judged -- ``dock_fast`` omits
+    ``internal_energy``. A check present but unevaluated counts as failed.
     """
     record = {**base, PB_STATUS: status, PB_ERROR: error}
 
@@ -237,10 +219,8 @@ def _summarise_checks(base: Dict, results: Dict, status: str, error: Optional[st
 def _warn_missing_checks(results: Dict, config: str) -> None:
     """Warn when a declared check is absent from PoseBusters' output.
 
-    Guards the dangerous direction: a renamed check silently drops out of the
-    verdict, making ``pb_valid`` *more* permissive. Newly added checks do not
-    warn — they are simply not used yet. ``internal_energy`` is expected to be
-    absent under ``dock_fast``.
+    Guards the dangerous direction: a renamed check drops out of the verdict
+    and makes ``pb_valid`` more permissive. Added checks are simply unused.
     """
     missing = [c for c in PB_CHECK_COLUMNS if c not in results]
     if config.endswith("_fast"):
@@ -272,12 +252,7 @@ def validate_pose(
     Never raises, and always returns at least one summary row: a combination
     that could not be evaluated must still appear, with a status saying why.
 
-    :param complex_pdb_path: Path to ``<combination>_complex.pdb``.
-    :param combination_id: ``f"{protein_conf_id}_{ligand_id}"``.
-    :param smiles: Ligand SMILES — the bond-order template.
-    :param batch_folder: Batch root, used to locate the engine's own pose files.
     :param pose_scope: ``best`` | ``escalate`` | ``all``.
-    :param max_poses: Hard cap on poses validated, for escalate and all.
     :param buster: Pre-built ``PoseBusters``, so a batch parses the config YAML
         once rather than per pose.
     :return: ``(summary_rows, full_report_rows)``.
@@ -364,8 +339,7 @@ def validate_pose(
                 )
 
             try:
-                # full_report=True returns the booleans AND the numeric
-                # measurements behind them in one pass.
+                # full_report also returns the measurements behind the booleans.
                 frame = buster.bust(
                     mol_pred=mol, mol_true=None, mol_cond=receptor_path, full_report=True
                 )
@@ -398,8 +372,7 @@ def validate_pose(
     return summary_rows, report_rows
 
 
-# Per-process PoseBusters cache for the multiprocessing path, keyed by config:
-# building one parses a YAML config.
+# Per-process cache keyed by config; building a PoseBusters parses YAML.
 _WORKER_BUSTERS: Dict[str, object] = {}
 
 
@@ -437,18 +410,16 @@ def validate_batch_poses(
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Validate every complex in one batch.
 
-    :param complex_metadata: ``(complex_pdb, combination_id, protein_conf_id,
-        smiles, docking_method)`` tuples — the same shape
-        :func:`guild.analysis.prolif.get_batch_prolif_interactions` takes, so
-        one discovery pass feeds PLIP, ProLIF and PoseBusters alike.
-    :param n_processes: Guild-level worker count. PoseBusters' own
-        ``max_workers`` is left at its in-process default: its pool raises
-        ``BrokenProcessPool`` when a worker dies, and one pool boundary we
-        control beats two we do not.
-    :return: ``(summary_df, report_df)``. The summary always has exactly
-        :data:`POSEBUSTERS_COLUMNS`; both are header-only when there is nothing
-        to validate. Every input combination is represented, so row identity
-        never has to be recovered positionally.
+    ``complex_metadata`` is the 5-tuple shape
+    :func:`guild.analysis.prolif.get_batch_prolif_interactions` also takes,
+    so one discovery pass feeds PLIP, ProLIF and PoseBusters alike.
+
+    PoseBusters' own ``max_workers`` stays at its in-process default: its
+    pool raises ``BrokenProcessPool`` when a worker dies, and one pool
+    boundary we control beats two we do not.
+
+    :return: ``(summary_df, report_df)``, header-only when there is nothing
+        to validate. Every input combination appears in the summary.
     """
     if not complex_metadata:
         return (
@@ -478,9 +449,7 @@ def validate_batch_poses(
     report_records: List[Dict] = []
 
     if n_processes and n_processes > 1 and len(tasks) > 1:
-        # Never start more workers than there is work: n_processes defaults to
-        # mp.cpu_count(), and 64 interpreters to validate 3 poses costs more
-        # than it saves.
+        # Never more workers than work: n_processes defaults to cpu_count().
         with mp.Pool(processes=min(n_processes, len(tasks))) as pool:
             for summary_rows, report_rows in pool.imap(_validate_pose_worker, tasks):
                 summary_records.extend(summary_rows)
@@ -507,9 +476,8 @@ def validate_batch_poses(
 def _frame_with_schema(records: List[Dict], columns: List[str], exact: bool) -> pd.DataFrame:
     """Build a DataFrame with ``columns`` guaranteed present and leading.
 
-    :param exact: When True the result holds exactly ``columns``. When False
-        extra keys are kept after them — the full report is open-ended so a
-        posebusters upgrade that adds a measurement widens the file.
+    :param exact: False keeps extra keys after them, so a posebusters
+        upgrade that adds a measurement widens the report.
     """
     if not records:
         return pd.DataFrame(columns=columns)
