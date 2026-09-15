@@ -1,8 +1,8 @@
 """
 Tests for guild.tools.scores — rank percentile scoring.
 
-Convention: 1 = best, 1/n_valid = worst.
-  rank 1 = best binder → rp_score = 1.0.
+Convention: 0 = best, 1 = worst.
+  rank 1 = best binder → rp_score = 1 / n_valid; the worst scores 1.0.
 """
 
 import numpy as np
@@ -39,7 +39,7 @@ class TestSingleMethodVina:
     """Test rank percentile with Vina (ascending = lower is better)."""
 
     def test_basic_ranking_order(self):
-        """Best Vina (lowest) gets rank 1 → rp_score = 1.0."""
+        """Best Vina (lowest) gets rank 1 → rp_score = 1/N (near 0)."""
         df = _make_df(
             protein_ids=["P1"] * 4,
             vina_scores=[-10.0, -8.0, -6.0, -4.0],  # -10 is best
@@ -52,12 +52,12 @@ class TestSingleMethodVina:
         # -10 → rank 1, -8 → rank 2, -6 → rank 3, -4 → rank 4
         assert result[rank_col].tolist() == [1.0, 2.0, 3.0, 4.0]
 
-        # rp_score = (N - rank + 1) / N → 1.00, 0.75, 0.50, 0.25
-        expected_rp = [4 / 4, 3 / 4, 2 / 4, 1 / 4]
+        # rp_score = rank / N → 0.25, 0.50, 0.75, 1.00
+        expected_rp = [1 / 4, 2 / 4, 3 / 4, 4 / 4]
         np.testing.assert_allclose(result[rp_col].values, expected_rp)
 
-    def test_best_molecule_has_highest_score(self):
-        """Convention: rp_score of 1.0 = best binder."""
+    def test_best_molecule_has_lowest_score(self):
+        """Convention: rp_score near 0 = best binder."""
         df = _make_df(
             protein_ids=["P1"] * 5,
             vina_scores=[-12.0, -9.0, -7.0, -5.0, -3.0],
@@ -68,12 +68,12 @@ class TestSingleMethodVina:
         best_idx = df["vina_score"].idxmin()  # -12.0
         worst_idx = df["vina_score"].idxmax()  # -3.0
 
-        assert result.loc[best_idx, rp_col] > result.loc[worst_idx, rp_col]
-        assert result.loc[best_idx, rp_col] == pytest.approx(1.0)
-        assert result.loc[worst_idx, rp_col] == pytest.approx(1 / 5)
+        assert result.loc[best_idx, rp_col] < result.loc[worst_idx, rp_col]
+        assert result.loc[best_idx, rp_col] == pytest.approx(1 / 5)
+        assert result.loc[worst_idx, rp_col] == pytest.approx(1.0)
 
     def test_two_molecules(self):
-        """Simplest non-trivial case: 2 molecules → scores 1.0 and 0.5."""
+        """Simplest non-trivial case: 2 molecules → scores 0.5 and 1.0."""
         df = _make_df(
             protein_ids=["P1", "P1"],
             vina_scores=[-5.0, -3.0],
@@ -81,7 +81,7 @@ class TestSingleMethodVina:
         result = compute_rank_percentile_scores(df, methods=["vina"])
 
         rp_col = RP_SCORES_DICTIONARY["vina"]
-        assert result[rp_col].tolist() == pytest.approx([1.0, 0.5])
+        assert result[rp_col].tolist() == pytest.approx([0.5, 1.0])
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +91,7 @@ class TestScoreDirectionKarmadock:
     """KarmaDock uses 'maximum' — higher raw score = better binder."""
 
     def test_higher_karmadock_gets_rank_1(self):
-        """Highest karmadock_score should get rank 1 → rp_score = 1.0."""
+        """Highest karmadock_score should get rank 1 → rp_score = 1/N."""
         df = _make_df(
             protein_ids=["P1"] * 3,
             vina_scores=[None, None, None],
@@ -104,7 +104,7 @@ class TestScoreDirectionKarmadock:
 
         # 8.0 → rank 1 (best), 5.0 → rank 2, 2.0 → rank 3 (worst)
         assert result[rank_col].tolist() == [3.0, 2.0, 1.0]
-        np.testing.assert_allclose(result[rp_col].values, [1 / 3, 2 / 3, 3 / 3])
+        np.testing.assert_allclose(result[rp_col].values, [3 / 3, 2 / 3, 1 / 3])
 
 
 # ---------------------------------------------------------------------------
@@ -124,15 +124,15 @@ class TestMultipleProteins:
         rp_col = RP_SCORES_DICTIONARY["vina"]
         rank_col = RANKS_DICTIONARY["vina"]
 
-        # P1: -10 → rank 1, -5 → rank 2 → rp_scores: 1.0, 0.5
+        # P1: -10 → rank 1, -5 → rank 2 → rp_scores: 0.5, 1.0
         p1 = result[result[PROTEIN_CONF_ID] == "P1"]
         assert p1[rank_col].tolist() == [1.0, 2.0]
-        assert p1[rp_col].tolist() == pytest.approx([1.0, 0.5])
+        assert p1[rp_col].tolist() == pytest.approx([0.5, 1.0])
 
-        # P2: -9 → rank 1, -6 → rank 2, -3 → rank 3 → rp_scores: 1.0, 2/3, 1/3
+        # P2: -9 → rank 1, -6 → rank 2, -3 → rank 3 → rp_scores: 1/3, 2/3, 1.0
         p2 = result[result[PROTEIN_CONF_ID] == "P2"].sort_values("vina_score")
         expected_ranks = [1.0, 2.0, 3.0]
-        expected_rp = [1.0, 2 / 3, 1 / 3]
+        expected_rp = [1 / 3, 2 / 3, 1.0]
         assert p2[rank_col].tolist() == expected_ranks
         np.testing.assert_allclose(p2[rp_col].values, expected_rp)
 
@@ -197,7 +197,7 @@ class TestTiedScores:
         expected_ranks = [1.0, 2.5, 2.5, 4.0]
         assert result[rank_col].tolist() == expected_ranks
 
-        expected_rp = [4 / 4, 2.5 / 4, 2.5 / 4, 1 / 4]
+        expected_rp = [1 / 4, 2.5 / 4, 2.5 / 4, 4 / 4]
         np.testing.assert_allclose(result[rp_col].values, expected_rp)
 
     def test_all_tied(self):
@@ -334,7 +334,7 @@ class TestEdgeCases:
         rank_col = RANKS_DICTIONARY["vina"]
 
         assert result[rank_col].iloc[0] == 1.0
-        assert result[rp_col].iloc[0] == pytest.approx(1.0)
+        assert result[rp_col].iloc[0] == pytest.approx(1.0)  # 1/1
 
     def test_does_not_mutate_input(self):
         """The original DataFrame should not be modified."""
@@ -361,12 +361,13 @@ class TestOrientationContract:
             ("karmadock", [3.0, 9.0, 5.0, 1.0, 7.0], False),
         ],
     )
-    def test_orientation_contract_best_is_one(self, method, raw_scores, lower_is_better):
-        """PINNED CONTRACT: the best-scoring ligand's rank percentile is 1.0.
+    def test_orientation_contract_zero_is_best(self, method, raw_scores, lower_is_better):
+        """PINNED CONTRACT: the best-scoring ligand's rank percentile is nearest 0.
 
-        Guild's published results and the manuscript both use 1 = best.
-        Inverting this silently flips every downstream ranking -- a
-        binder-vs-decoy ROC AUC of 0.61 becomes 0.39 -- so it is pinned here.
+        rp_score = rank / N with rank 1 = best, so the best ligand scores 1/N and the
+        worst scores 1.0. This matches the published Guild results; inverting it
+        silently flips every downstream ranking. Do not change it without updating
+        the manuscript and regenerating the published figures.
         """
         n = len(raw_scores)
         raw_score_column = f"{method}_score"
@@ -380,19 +381,19 @@ class TestOrientationContract:
         rp_col = RP_SCORES_DICTIONARY[method]
 
         ranks = result[RANKS_DICTIONARY[method]]
-        assert result.loc[ranks.idxmin(), rp_col] == pytest.approx(1.0)
-        assert result.loc[ranks.idxmax(), rp_col] == pytest.approx(1 / n)
+        assert result.loc[ranks.idxmin(), rp_col] == pytest.approx(1 / n)
+        assert result.loc[ranks.idxmax(), rp_col] == pytest.approx(1.0)
 
         # Bounded to (0, 1].
         assert (result[rp_col] > 0).all()
         assert (result[rp_col] <= 1.0).all()
 
-        # Non-increasing as the raw score gets worse.
+        # Non-decreasing as the raw score gets worse.
         best_first = result.sort_values(raw_score_column, ascending=lower_is_better)
-        assert (np.diff(best_first[rp_col].values) <= 0).all()
+        assert (np.diff(best_first[rp_col].values) >= 0).all()
 
     def test_global_score_shares_the_orientation(self):
-        """GLOBAL_RP_SCORE averages rp_* values, so 1 = best holds there too."""
+        """GLOBAL_RP_SCORE averages rp_* values, so 0 = best holds there too."""
         df = _make_df(
             protein_ids=["P1"] * 3,
             vina_scores=[-10.0, -8.0, -6.0],
@@ -401,5 +402,5 @@ class TestOrientationContract:
         result = compute_rank_percentile_scores(df, methods=["vina", "karmadock"])
 
         # Row 0 is best under both methods, row 2 worst under both.
-        assert result[GLOBAL_RP_SCORE].iloc[0] == pytest.approx(1.0)
-        assert result[GLOBAL_RP_SCORE].iloc[2] == pytest.approx(1 / 3)
+        assert result[GLOBAL_RP_SCORE].iloc[0] == pytest.approx(1 / 3)
+        assert result[GLOBAL_RP_SCORE].iloc[2] == pytest.approx(1.0)

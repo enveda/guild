@@ -4,14 +4,15 @@ Rank percentile scoring functions.
 Per protein, per method, each molecule's raw score becomes the fraction of
 molecules (same protein, itself included) it scores at least as well as:
 
-      rp_score = (n_valid - rank + 1) / n_valid
+      rp_score = rank / n_valid
 
-**Convention: 1 = best, 1/n_valid = worst**, bounded to ``(0, 1]``. Guild's
-published results and manuscript use this orientation; it is pinned by
-``test_orientation_contract_best_is_one``.
+**Convention: 0 = best, 1 = worst**, bounded to ``(0, 1]``: rank 1 = best
+binder scores ``1 / n_valid``, the worst scores ``1.0``. This is the
+orientation of the published Guild results, and it is pinned by
+``test_orientation_contract_zero_is_best``.
 
-Raw ``*_score`` columns keep their own native directions, and the rank
-columns keep rank 1 = best binder.
+Raw ``*_score`` columns keep their own native directions, which is exactly
+what the rank percentile exists to normalise away.
 """
 
 import numpy as np
@@ -37,7 +38,7 @@ def _score_one_protein(
     """
     Rank all molecules per protein and convert to a percentile score.
 
-    rank 1 = best binder → rp_score = 1.0.
+    rank 1 = best binder → rp_score = 1 / n_valid.
     Ties share their average rank.
 
     :param current_protein_group: DataFrame rows for one protein.
@@ -75,8 +76,7 @@ def _score_one_protein(
         )
 
         current_protein_group[rank_column] = ranks
-        # Rank 1 → 1.0, rank n_valid → 1/n_valid.
-        current_protein_group[rp_score_column] = (n_valid - ranks + 1) / n_valid
+        current_protein_group[rp_score_column] = ranks / n_valid
 
     return current_protein_group
 
@@ -92,10 +92,10 @@ def compute_rank_percentile_scores(
     """
     Compute rank percentile scores per protein for one or more docking methods.
 
-    Rank percentile ``(n_valid - rank + 1) / n_valid``, where rank 1 = best
-    binder and ``n_valid`` counts molecules with a valid raw score.
+    Rank percentile ``rank / n_valid``, where rank 1 = best binder and
+    ``n_valid`` counts molecules with a valid raw score.
 
-    Convention: **1 = best**, ``1 / n_valid`` = worst, bounded to ``(0, 1]``.
+    Convention: **0 = best**, ``1.0`` = worst, bounded to ``(0, 1]``.
 
     :param df: Input DataFrame with protein IDs and raw score columns.
     :param methods: Docking methods to score. Defaults to all available.
