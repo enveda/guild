@@ -1,19 +1,27 @@
 """
 Rank percentile scoring functions.
 
-Simple rank percentile per protein, per method:
-  For each molecule, compute what fraction of ALL molecules (same protein)
-  score at least as well as it does (itself included).
+Per protein, per method, each molecule's raw score becomes the fraction of
+molecules (same protein, itself included) it scores at least as well as:
 
-      rp_score = rank / N     (0 ≈ best, 1 ≈ worst)
+      rp_score = rank / denominator
 
-Convention: 0 = best, 1 = worst.
+**Convention: 0 = best, 1 = worst**, bounded to ``(0, 1]``: rank 1 = best
+binder scores ``1 / denominator``, the worst scores ``1.0``. This is the
+orientation of the published Guild results, and it is pinned by
+``test_orientation_contract_zero_is_best``.
+
+Raw ``*_score`` columns keep their own native directions, which is exactly
+what the rank percentile exists to normalise away.
 """
 
 import numpy as np
 import pandas as pd
 
 from guild.constants.bulk import (
+    DENOMINATOR_ATTEMPTED,
+    DENOMINATOR_MODES,
+    DENOMINATOR_VALID,
     GLOBAL_RP_SCORE,
     RANKS_DICTIONARY,
     RP_SCORES_DICTIONARY,
@@ -29,16 +37,19 @@ def _score_one_protein(
     current_protein_group: pd.DataFrame,
     methods: list[str],
     protein_col: str,
+    denominator: str = DENOMINATOR_VALID,
 ) -> pd.DataFrame:
     """
     Rank all molecules per protein and convert to a percentile score.
 
-    rank 1 = best binder → rp_score ≈ 1/N (near 0).
+    rank 1 = best binder → rp_score = 1 / denominator.
     Ties share their average rank.
 
     :param current_protein_group: DataFrame rows for one protein.
     :param methods: Docking methods to score.
     :param protein_col: Column name identifying the protein.
+    :param denominator: ``valid`` or ``attempted``; see
+        :func:`compute_rank_percentile_scores`.
     :returns: DataFrame with rank percentile score and rank columns added.
     """
     current_protein_group = current_protein_group.copy()
@@ -70,8 +81,12 @@ def _score_one_protein(
             na_option="keep",
         )
 
+        # A failed pair still counts under DENOMINATOR_ATTEMPTED, so the
+        # worst-ranked molecule falls short of 1.0 by the failure rate.
+        divisor = len(current_protein_group) if denominator == DENOMINATOR_ATTEMPTED else n_valid
+
         current_protein_group[rank_column] = ranks
-        current_protein_group[rp_score_column] = ranks / n_valid
+        current_protein_group[rp_score_column] = ranks / divisor
 
     return current_protein_group
 
@@ -83,19 +98,30 @@ def compute_rank_percentile_scores(
     df: pd.DataFrame,
     methods: list[str] | None = None,
     protein_col: str = PROTEIN_CONF_ID,
+    denominator: str = DENOMINATOR_VALID,
 ) -> pd.DataFrame:
     """
     Compute rank percentile scores per protein for one or more docking methods.
 
-    Simple rank percentile: rank / N, where rank 1 = best binder.
+    Rank percentile ``rank / denominator``, where rank 1 = best binder.
 
-    Convention: rank percentile score  0 ≈ best, 1 ≈ worst.
+    Convention: **0 = best**, ``1.0`` = worst, bounded to ``(0, 1]``.
 
     :param df: Input DataFrame with protein IDs and raw score columns.
     :param methods: Docking methods to score. Defaults to all available.
     :param protein_col: Protein identifier column.
+    :param denominator: ``valid`` divides by the molecules that scored,
+        ``attempted`` by every row in the protein group including the ones
+        whose raw score is null. The published case-study results were
+        generated with ``attempted``, where about 5.6% of pairs failed to
+        score and still counted, so reproducing the paper's numbers
+        requires it. Defaults to ``valid``.
+    :raises ValueError: If ``denominator`` is neither of those.
     :return: Copy of df with rank percentile and rank columns added.
     """
+    if denominator not in DENOMINATOR_MODES:
+        raise ValueError(f"denominator must be one of {DENOMINATOR_MODES}, got {denominator!r}")
+
     result = df.copy()
 
     if methods is None:
@@ -114,6 +140,7 @@ def compute_rank_percentile_scores(
             _score_one_protein,
             methods=methods,
             protein_col=protein_col,
+            denominator=denominator,
         )
         .reset_index(drop=True)
     )
