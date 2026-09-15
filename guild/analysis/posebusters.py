@@ -367,7 +367,7 @@ def _failed_record(base: Dict, status: str, error: Optional[str]) -> Dict:
 
 def _passed(value) -> bool:
     """A check counts as passed only when it is present and truthy."""
-    return value is not None and bool(value) is True
+    return value is not None and not pd.isna(value) and bool(value) is True
 
 
 def _summarise_checks(base: Dict, results: Dict, status: str, error: Optional[str]) -> Dict:
