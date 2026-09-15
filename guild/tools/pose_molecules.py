@@ -13,8 +13,7 @@ def is_atom_record(line: str) -> bool:
 
 
 def residue_name(line: str) -> str:
-    # Stripped, not compared against a padded literal: the field is
-    # right-justified for names shorter than three characters.
+    # Right-justified under three characters, so strip beats a pad-compare.
     return line[17:20].strip()
 
 
@@ -34,8 +33,7 @@ def split_complex_records(pdb_text: str, ligand_resname: str) -> tuple[list[str]
 
 
 def split_pdbqt_models(pdbqt_path: str) -> list[str]:
-    # Best-first, since Vina and gnina write poses score-sorted. Unlike
-    # transformers.pdb._convert_pdbqt_to_pdb, which keeps only MODEL 1.
+    # Best-first: Vina and gnina write poses score-sorted.
     blocks: list[str] = []
     current: list[str] = []
     with open(pdbqt_path, encoding="utf-8", errors="replace") as handle:
@@ -77,9 +75,9 @@ def mol_from_pdb_block(pdb_block: str, smiles: str) -> tuple[object | None, str 
     if template is None:
         reason = f"unusable SMILES template: {smiles!r}"
     elif template.GetNumHeavyAtoms() != raw.GetNumHeavyAtoms():
-        # AssignBondOrdersFromTemplate accepts a partial match silently, leaving
-        # the unmatched bonds geometry-inferred. Heavy atoms only: protonation
-        # differences are expected, a different skeleton is not.
+        # AssignBondOrdersFromTemplate accepts a partial match silently and
+        # leaves the rest geometry-inferred. Heavy atoms only, since
+        # protonation may differ.
         reason = (
             f"SMILES template has {template.GetNumHeavyAtoms()} heavy atoms but the "
             f"pose has {raw.GetNumHeavyAtoms()} — template does not describe this ligand"
@@ -120,8 +118,7 @@ def mols_from_sdf(sdf_path: str, smiles: str) -> list[tuple[object | None, str |
 
         if fallback_records is None:
             fallback = Chem.SDMolSupplier(sdf_path, removeHs=False, sanitize=False)
-            # list(), not a filtered comprehension: indices must stay aligned
-            # with the sanitized supplier's.
+            # Unfiltered, so indices match the sanitized supplier's.
             fallback_records = list(fallback)
 
         record = fallback_records[index] if index < len(fallback_records) else None

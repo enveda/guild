@@ -23,6 +23,11 @@ from guild.constants.guild import (  # noqa: F401 — re-exported for the schema
     SMILES,
     VINA_PREFIX,
 )
+from guild.constants.interactions import (
+    COMPLEX_PDB,
+    DETAIL_DOCKING_METHOD,
+    INTERACTION_COMBINATION_ID,
+)
 
 """
 Files
@@ -86,9 +91,9 @@ POSEBUSTERS_SUPPORTED_METHODS = [
 Identity columns
 """
 
-PB_COMBINATION_ID = "combination_id"
-PB_DOCKING_METHOD = "docking_method"
-PB_COMPLEX_PDB = "complex_pdb"
+PB_COMBINATION_ID = INTERACTION_COMBINATION_ID
+PB_DOCKING_METHOD = DETAIL_DOCKING_METHOD
+PB_COMPLEX_PDB = COMPLEX_PDB
 PB_POSE = POSE  # 1-based rank of the pose this row describes
 
 """

@@ -80,8 +80,7 @@ def _read_complex(path: str) -> str:
 
 
 def _normalise_check_name(name: str) -> str:
-    # PoseBusters emits hyphens where guild's constants use underscores;
-    # spaces are folded too, in case of an upstream relabelling.
+    # PoseBusters emits hyphens and spaces where guild uses underscores.
     return name.strip().lower().replace("-", "_").replace(" ", "_")
 
 
@@ -104,8 +103,7 @@ def _pose_mols(
     poses: List[Tuple[object, Optional[str], bool]] = []
 
     if docking_method in (VINA_PREFIX, GNINA_PREFIX):
-        # gnina in sdf input mode writes an SDF instead of a PDBQT; prefer it,
-        # since native bond orders need no template.
+        # An SDF from gnina's sdf input mode needs no SMILES template.
         sdf_path = f"{method_folder}/{combination_id}.sdf"
         pdbqt_path = f"{method_folder}/{combination_id}.pdbqt"
         if os.path.exists(sdf_path):
@@ -114,10 +112,8 @@ def _pose_mols(
             poses = [mol_from_pdb_block(b, smiles) for b in split_pdbqt_models(pdbqt_path)]
 
     elif docking_method == DIFFDOCK_PREFIX:
-        # Rank by the confidence in the filename, as generate_diffdock_complex_pdbs
-        # does, so pose 1 is the pose that reached the complex PDB. Parsing
-        # confidence also sidesteps the rank<N> lexicographic trap (rank10 <
-        # rank2).
+        # Confidence from the filename matches how the complex PDB picked its
+        # pose, and avoids the rank<N> lexicographic trap (rank10 < rank2).
         results_dir = f"{method_folder}/results/{combination_id}"
         scored = []
         for path in glob.glob(f"{results_dir}/*_confidence*.sdf"):
@@ -179,11 +175,10 @@ def _failed_record(base: Dict, status: str, error: Optional[str]) -> Dict:
 
 
 def _passed(value) -> bool:
-    """A check counts as passed only when it is present and truthy.
+    """A check passes only when present and truthy.
 
-    NaN is explicitly excluded: ``bool(float('nan'))`` is True, so a check
-    PoseBusters could not evaluate would otherwise count as a pass and make
-    ``pb_valid`` fail open.
+    NaN is excluded because ``bool(float('nan'))`` is True, which would let
+    an unevaluated check pass and make ``pb_valid`` fail open.
     """
     return value is not None and not pd.isna(value) and bool(value) is True
 
@@ -262,8 +257,8 @@ def validate_pose(
     try:
         from posebusters import PoseBusters
     except ImportError as error:
-        # Report the real exception: posebusters pulls in rdkit, so this often
-        # means a broken dependency rather than a missing posebusters.
+        # posebusters pulls in rdkit, so this is often a broken dependency
+        # rather than a missing posebusters.
         logger.warning(
             f"PoseBusters analysis unavailable — {type(error).__name__}: {error}. "
             f"If posebusters itself is missing, check it is in pyproject.toml, that "
@@ -393,8 +388,7 @@ def _validate_pose_worker(task: Dict) -> Tuple[List[Dict], List[Dict]]:
 
             _WORKER_BUSTERS[config] = PoseBusters(config=config)
         except Exception as error:
-            # validate_pose surfaces the reason per row; cache a stub so
-            # construction is not retried for every task.
+            # A stub keeps validate_pose reporting per row without retrying.
             _WORKER_BUSTERS[config] = _UnavailableBuster(error)
     return validate_pose(**task, buster=_WORKER_BUSTERS[config])
 

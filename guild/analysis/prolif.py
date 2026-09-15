@@ -102,10 +102,8 @@ def analyze_prolif_interactions(
         import prolif
         from prolif.molecule import Molecule
     except ImportError as error:
-        # Report the real exception. prolif pulls in MDAnalysis and RDKit, so an
-        # ImportError here often means an installed-but-broken dependency rather
-        # than a missing prolif, and reporting only the latter sends you looking
-        # in the wrong place.
+        # prolif pulls in MDAnalysis and RDKit, so this is often a broken
+        # dependency rather than a missing prolif.
         logger.warning(
             f"ProLIF analysis unavailable — {type(error).__name__}: {error}. "
             f"If prolif itself is missing, check 'prolif>=2.0.0,<3' is in "
@@ -125,8 +123,8 @@ def analyze_prolif_interactions(
 
         pdb_text = Path(complex_pdb_path).read_text(encoding="utf-8", errors="replace")
 
-        # Bond orders come from SMILES, not geometry - it preserves them and
-        # avoids the MDAnalysis vdW-radii crash on halogens.
+        # SMILES bond orders also avoid the MDAnalysis vdW-radii crash on
+        # halogens.
         lig_lines, prot_lines = split_complex_records(pdb_text, ligand_resname)
         if not lig_lines or not prot_lines:
             logger.warning(

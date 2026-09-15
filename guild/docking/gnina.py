@@ -34,6 +34,7 @@ from guild.constants.gnina import (
     GNINA_DEFAULT_NUMBER_OF_POSES,
     GNINA_LIB_PATH,
     GNINA_OB_DATA_DIR,
+    GNINA_SUBPROCESS_TIMEOUT,
 )
 from guild.constants.guild import (
     GNINA_CNN_SCORE,
@@ -59,7 +60,6 @@ logger = logging.getLogger(__name__)
 # Bound to avoid hangs from a runaway gnina worker. Matches DOCKING_TIMEOUT in
 # guild/constants/bulk.py (kept as a module-local constant to avoid pulling a
 # bulk-orchestration dep into the docking module).
-GNINA_SUBPROCESS_TIMEOUT = 600  # seconds
 
 # gnina prints a table to stdout that looks like:
 #

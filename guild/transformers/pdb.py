@@ -12,7 +12,9 @@ from Bio.PDB.PDBExceptions import PDBConstructionWarning
 from rdkit import Chem
 
 from guild.constants.ligands import LIGANDS_TO_IGNORE
+from guild.constants.pdb import COVALENT_BOND_DIST_MAX
 from guild.docking.vina import generate_vina_box
+from guild.tools.pose_molecules import is_atom_record
 from guild.tools.preparation import _normalize_chain_list
 
 # Suppress PDBConstructionWarning
@@ -21,7 +23,6 @@ warnings.filterwarnings("ignore", category=PDBConstructionWarning)
 logger = logging.getLogger(__name__)
 
 # Maximum distance (Å) to search for a warhead atom when adding a covalent CONECT.
-_COVALENT_BOND_DIST_MAX = 2.5
 
 
 def calculate_centroid(atom_list):
@@ -225,10 +226,6 @@ def filter_ligands(pdb_file):
 ### Merge protein and ligand into single file
 
 
-def _is_atom_line(line: str) -> bool:
-    return line.startswith("ATOM  ") or line.startswith("HETATM")
-
-
 def _is_ter_or_end(line: str) -> bool:
     s = line.strip()
     return s == "TER" or s == "END" or s == "ENDMDL"
@@ -237,7 +234,7 @@ def _is_ter_or_end(line: str) -> bool:
 def _max_atom_serial(pdb_lines: Iterable[str]) -> int:
     mx = 0
     for line in pdb_lines:
-        if _is_atom_line(line) and len(line) >= 11:
+        if is_atom_record(line) and len(line) >= 11:
             try:
                 serial = int(line[6:11])
                 mx = max(mx, serial)
@@ -367,7 +364,7 @@ def _convert_pdbqt_to_pdb(ligand_pdbqt: str, out_pdb: str) -> None:
         for line in fin:
             if line.startswith("ENDMDL"):
                 break
-            if _is_atom_line(line):
+            if is_atom_record(line):
                 # Keep up to tempFactor (col 66), then try to preserve element if present.
                 base = line[:66]
                 # If element exists in PDBQT line near the end, keep it in cols 77-78.
@@ -475,7 +472,7 @@ def _write_complex(
     with open(ligand_pdb, "r", encoding="utf-8", errors="replace") as f:
         ligand_lines = f.readlines()
 
-    ligand_atom_lines = [ln for ln in ligand_lines if _is_atom_line(ln)]
+    ligand_atom_lines = [ln for ln in ligand_lines if is_atom_record(ln)]
     ligand_conect_lines = [ln for ln in ligand_lines if ln.startswith("CONECT")]
 
     if not ligand_atom_lines:
@@ -923,10 +920,10 @@ def add_covalent_conect(complex_pdb: str, covalent_rec_atom: str, ligand_chain: 
             best_dist = dist
             best_serial = lig_serial
 
-    if best_serial is None or best_dist > _COVALENT_BOND_DIST_MAX:
+    if best_serial is None or best_dist > COVALENT_BOND_DIST_MAX:
         logger.warning(
             f"add_covalent_conect: no chain-{ligand_chain} HETATM within "
-            f"{_COVALENT_BOND_DIST_MAX} Å of "
+            f"{COVALENT_BOND_DIST_MAX} Å of "
             f"'{covalent_rec_atom}' in {complex_pdb} "
             f"(closest={best_dist:.2f} Å) — CONECT not written."
         )

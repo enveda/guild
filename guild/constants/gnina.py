@@ -39,3 +39,6 @@ GNINA_FLEX_DISTANCE = 4.0
 # --covalent_optimize_lig, recommended for sensible covalent geometry).
 GNINA_COVALENT_BOND_ORDER = 1
 GNINA_COVALENT_OPTIMIZE_LIG = True
+
+# Seconds before a gnina subprocess is abandoned.
+GNINA_SUBPROCESS_TIMEOUT = 600

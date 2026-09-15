@@ -245,11 +245,9 @@ def _row_flexres_gnina(row):
     return value or None
 
 
-# Docking methods that emit `<combination>_complex.pdb`, mapped to the batch
-# sub-folder holding it. karmadock and nesso are absent deliberately: karmadock
-# writes no complex PDB and nesso produces no 3D output at all. The
-# vina_rescore_* / gnina_rescore_* tracks are score-only and reuse another
-# method's pose, so they are absent too.
+# Methods that emit `<combination>_complex.pdb`, mapped to its batch
+# sub-folder. karmadock, nesso and the score-only rescore tracks write no
+# complex PDB of their own.
 _COMPLEX_PDB_FOLDER_BY_METHOD = {
     BOLTZ_PREFIX: BOLTZ_FOLDER,
     VINA_PREFIX: VINA_FOLDER,
@@ -1323,9 +1321,7 @@ class BulkRun:
             subprocess_log_path=nesso_subprocess_log,
         )
 
-        # deploy_nesso returns None for a missing binary or a timeout, and a
-        # non-zero returncode for a failed run. Reporting either as completed
-        # would hide the failure until scoring finds no affinity.json.
+        # None for a missing binary or timeout, non-zero for a failed run.
         if result is None or result.returncode != 0:
             detail = (
                 "binary missing or timed out" if result is None else f"exit {result.returncode}"
@@ -1816,9 +1812,8 @@ class BulkRun:
 
         logger.info(f"Collecting raw scores for batch {batch}")
 
-        # Ahead of the early return below: these read the per-combination score
-        # files off disk and iterate the full combinations table, so a fully
-        # resumed batch still gets its complete per-pose tables.
+        # Read off disk over the full combinations table, so a fully resumed
+        # batch still gets complete per-pose tables.
         if VINA_PREFIX in self.methods_to_run:
             write_vina_pose_scores_file(self.batched_dictionary[batch])
         if GNINA_PREFIX in self.methods_to_run:
