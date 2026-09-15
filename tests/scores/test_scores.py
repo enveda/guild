@@ -10,6 +10,8 @@ import pandas as pd
 import pytest
 
 from guild.constants.bulk import (
+    DENOMINATOR_ATTEMPTED,
+    DENOMINATOR_VALID,
     GLOBAL_RP_SCORE,
     RANKS_DICTIONARY,
     RP_SCORES_DICTIONARY,
@@ -404,3 +406,69 @@ class TestOrientationContract:
         # Row 0 is best under both methods, row 2 worst under both.
         assert result[GLOBAL_RP_SCORE].iloc[0] == pytest.approx(1 / 3)
         assert result[GLOBAL_RP_SCORE].iloc[2] == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# 10. Denominator: molecules that scored vs pairs attempted
+# ---------------------------------------------------------------------------
+class TestDenominator:
+    """The published case-study results divide by pairs attempted, not by
+    molecules that scored. A group with a failed pair separates the two."""
+
+    # 5 rows, 1 of them unscored.
+    RAW_SCORES = [-10.0, -8.0, np.nan, -6.0, -4.0]
+
+    def _rp(self, denominator):
+        df = _make_df(protein_ids=["P1"] * 5, vina_scores=self.RAW_SCORES)
+        result = compute_rank_percentile_scores(df, methods=["vina"], denominator=denominator)
+        return result[RP_SCORES_DICTIONARY["vina"]]
+
+    def test_valid_divides_by_the_molecules_that_scored(self):
+        """Default: 4 valid scores → ranks 1..4 over 4."""
+        rp = self._rp(DENOMINATOR_VALID)
+
+        assert np.isnan(rp.iloc[2])
+        np.testing.assert_allclose(rp.dropna().values, [1 / 4, 2 / 4, 3 / 4, 4 / 4])
+
+    def test_attempted_divides_by_every_pair_in_the_group(self):
+        """The unscored row still counts, so the worst never reaches 1.0."""
+        rp = self._rp(DENOMINATOR_ATTEMPTED)
+
+        assert np.isnan(rp.iloc[2])
+        np.testing.assert_allclose(rp.dropna().values, [1 / 5, 2 / 5, 3 / 5, 4 / 5])
+        assert rp.max() < 1.0
+
+    def test_the_two_modes_differ(self):
+        """Guards against the parameter being silently ignored."""
+        assert not np.allclose(
+            self._rp(DENOMINATOR_VALID).dropna().values,
+            self._rp(DENOMINATOR_ATTEMPTED).dropna().values,
+        )
+
+    def test_modes_agree_when_every_pair_scored(self):
+        """With no failures the denominators are the same number."""
+        df = _make_df(protein_ids=["P1"] * 4, vina_scores=[-10.0, -8.0, -6.0, -4.0])
+        valid = compute_rank_percentile_scores(df, methods=["vina"], denominator=DENOMINATOR_VALID)
+        attempted = compute_rank_percentile_scores(
+            df, methods=["vina"], denominator=DENOMINATOR_ATTEMPTED
+        )
+
+        rp_col = RP_SCORES_DICTIONARY["vina"]
+        np.testing.assert_allclose(valid[rp_col].values, attempted[rp_col].values)
+
+    def test_default_is_valid(self):
+        """Adding the option must not change what existing callers get."""
+        df = _make_df(protein_ids=["P1"] * 5, vina_scores=self.RAW_SCORES)
+        rp_col = RP_SCORES_DICTIONARY["vina"]
+
+        np.testing.assert_allclose(
+            compute_rank_percentile_scores(df, methods=["vina"])[rp_col].values,
+            self._rp(DENOMINATOR_VALID).values,
+        )
+
+    def test_unknown_denominator_raises(self):
+        """Fail loud rather than silently falling back to a default."""
+        df = _make_df(protein_ids=["P1"] * 3, vina_scores=[-10.0, -8.0, -6.0])
+
+        with pytest.raises(ValueError, match="denominator must be one of"):
+            compute_rank_percentile_scores(df, methods=["vina"], denominator="n_valid")

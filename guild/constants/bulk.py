@@ -120,6 +120,16 @@ RANK_VINA_RESCORE_DIFFDOCK_SCORE = f"rank_{VINA_RESCORE_DIFFDOCK_SCORE}"
 RANK_GNINA_RESCORE_BOLTZ_SCORE = f"rank_{GNINA_RESCORE_BOLTZ_SCORE}"
 RANK_GNINA_RESCORE_DIFFDOCK_SCORE = f"rank_{GNINA_RESCORE_DIFFDOCK_SCORE}"
 
+"""
+Rank percentile denominator modes
+"""
+# What rank / denominator divides by: molecules with a valid raw score, or
+# every pair attempted for the protein. The published case-study results used
+# ATTEMPTED, where ~5.6% of pairs failed to score and still counted.
+DENOMINATOR_VALID = "valid"
+DENOMINATOR_ATTEMPTED = "attempted"
+DENOMINATOR_MODES = (DENOMINATOR_VALID, DENOMINATOR_ATTEMPTED)
+
 SCORES_DIRECTION_DICTIONARY = {
     VINA_PREFIX: "minimum",
     KARMADOCK_PREFIX: "maximum",
