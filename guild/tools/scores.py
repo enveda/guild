@@ -1,13 +1,17 @@
 """
 Rank percentile scoring functions.
 
-Simple rank percentile per protein, per method:
-  For each molecule, compute what fraction of ALL molecules (same protein)
-  score at least as well as it does (itself included).
+Per protein, per method, each molecule's raw score becomes the fraction of
+molecules (same protein, itself included) it scores at least as well as:
 
-      rp_score = rank / N     (0 ≈ best, 1 ≈ worst)
+      rp_score = (n_valid - rank + 1) / n_valid
 
-Convention: 0 = best, 1 = worst.
+**Convention: 1 = best, 1/n_valid = worst**, bounded to ``(0, 1]``. Guild's
+published results and manuscript use this orientation; it is pinned by
+``test_orientation_contract_best_is_one``.
+
+Raw ``*_score`` columns keep their own native directions, and the rank
+columns keep rank 1 = best binder.
 """
 
 import numpy as np
@@ -33,7 +37,7 @@ def _score_one_protein(
     """
     Rank all molecules per protein and convert to a percentile score.
 
-    rank 1 = best binder → rp_score ≈ 1/N (near 0).
+    rank 1 = best binder → rp_score = 1.0.
     Ties share their average rank.
 
     :param current_protein_group: DataFrame rows for one protein.
@@ -71,7 +75,8 @@ def _score_one_protein(
         )
 
         current_protein_group[rank_column] = ranks
-        current_protein_group[rp_score_column] = ranks / n_valid
+        # Rank 1 → 1.0, rank n_valid → 1/n_valid.
+        current_protein_group[rp_score_column] = (n_valid - ranks + 1) / n_valid
 
     return current_protein_group
 
@@ -87,9 +92,10 @@ def compute_rank_percentile_scores(
     """
     Compute rank percentile scores per protein for one or more docking methods.
 
-    Simple rank percentile: rank / N, where rank 1 = best binder.
+    Rank percentile ``(n_valid - rank + 1) / n_valid``, where rank 1 = best
+    binder and ``n_valid`` counts molecules with a valid raw score.
 
-    Convention: rank percentile score  0 ≈ best, 1 ≈ worst.
+    Convention: **1 = best**, ``1 / n_valid`` = worst, bounded to ``(0, 1]``.
 
     :param df: Input DataFrame with protein IDs and raw score columns.
     :param methods: Docking methods to score. Defaults to all available.
