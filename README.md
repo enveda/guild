@@ -78,7 +78,7 @@ make run-vina \
 | `HEAD` | `0` | Take only the first N rows from the combinations table (0 = all) |
 | `DECOYS` | *(script default)* | Path to the decoys file; omit to use built-in default (`chembl_36_decoys_2.tsv`) |
 | `NO_DECOYS` | *(empty)* | Set to `1` to skip decoy expansion entirely (useful for single-protein runs where you only want to score the supplied ligands) |
-| `CLEAN` | *(empty)* | Set to `1` to delete the project output folder before running. Omit it to resume an interrupted run instead — combinations that already produced results are skipped rather than redone. |
+  | `CLEAN` | *(empty)* | Set to `1` to delete the project output folder before running. Omit it to resume an interrupted run instead. Existing outputs are reused where supported; DiffDock skips a fully complete batch but reruns the whole batch if any combination is missing. |
 | `KNOWN_BINDERS` | *(empty)* | Set to `1` to enable known-binders expansion |
 | `N_WORKERS` | `1` | Vina parallel-worker processes. Vina internally also threads — values >1 may oversubscribe on high-core hosts but are typically fine. |
 | `BOX` | *(empty)* | Global fallback Vina box file (`center_{x,y,z}` + `size_{x,y,z}`). Used for combinations whose CSV `box_location` cell is empty; per-row values always take precedence. See [Custom binding pocket](#custom-binding-pocket). |
