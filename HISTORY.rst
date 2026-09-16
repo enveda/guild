@@ -2,6 +2,17 @@
 History
 =======
 
+Unreleased
+----------
+* ``global_rp_score`` no longer averages ``diffdock_score`` and ``boltz_score``
+  in with the affinity tracks — they're pose confidences, not affinity
+  estimates, so (like ``gnina_cnn_score``) they keep their own ``rp_*`` column
+  but stop voting. The remaining tracks are grouped by which engine generated
+  the pose before averaging, so DiffDock's and Boltz's two auto-added rescores
+  count as one vote for that pose source instead of three. The previous flat
+  mean is still available via ``compute_rank_percentile_scores(...,
+  aggregation="flat")`` for reproducing older scores.
+
 1.4.0 (2026-09-15)
 ------------------
 * ``compute_rank_percentile_scores`` gained a ``denominator`` option

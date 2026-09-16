@@ -450,18 +450,28 @@ and Boltz gets four distinct rescore scores:
 | `diffdock`      | `vina_rescore_diffdock`, `gnina_rescore_diffdock`| `vina_rescore_diffdock_score`, `gnina_rescore_diffdock_score`    |
 
 All four are in kcal/mol (lower = stronger predicted binding), independently ranked per
-protein and folded into the `global_rp_score`. The gnina tracks also emit
-`gnina_rescore_*_cnn_score` as a confidence side channel, which is not ranked.
+protein. The gnina tracks also emit `gnina_rescore_*_cnn_score` as a confidence side channel,
+which is not ranked.
 
 > **Rank-percentile orientation.** Every `rp_*_score` and the `global_rp_score` is bounded to
 > `(0, 1]` with **0 = best**. A ligand that is uniquely best for a protein scores `1 / n` and the
 > uniquely worst `1.0`, but ties share their average rank, so tied extremes fall short of those
-> endpoints — if all `n` molecules tie, every one scores `(n + 1) / 2n`. `global_rp_score` is the
-> unweighted mean of the per-method percentiles, and methods can have different denominators for
-> the same protein, so it is not bounded by any single method's endpoints.
+> endpoints — if all `n` molecules tie, every one scores `(n + 1) / 2n`.
 > Raw `*_score` columns keep their own native directions (Vina and gnina lower = better,
 > KarmaDock and Boltz higher = better), which is exactly what the rank percentile exists to
 > normalise away.
+
+> **How `global_rp_score` combines methods.** `diffdock_score` and `boltz_score` are pose
+> confidences (a diffusion confidence and an ipTM), not affinity estimates, so — like
+> `gnina_cnn_score` — they get their own `rp_*` column but do not vote in `global_rp_score`.
+> The remaining tracks are grouped by which engine generated the pose before averaging: Vina,
+> gnina and KarmaDock each vote once, and DiffDock's/Boltz's two auto-added rescores
+> (`vina_rescore_*` and `gnina_rescore_*`) are averaged together first so that pose source also
+> votes once, rather than the naive flat mean handing DiffDock/Boltz three votes apiece for one
+> pose. `compute_rank_percentile_scores(..., aggregation="flat")` reproduces that older
+> unweighted mean, kept only so scores computed before this grouping existed stay reproducible.
+> Methods can have different denominators for the same protein, so `global_rp_score` is not
+> bounded by any single method's endpoints.
 
 > **Denominator.** `n` above is the number of molecules that produced a valid score for that
 > protein. `compute_rank_percentile_scores(..., denominator="attempted")` divides by every pair

@@ -22,10 +22,15 @@ import numpy as np
 import pandas as pd
 
 from guild.constants.bulk import (
+    AGGREGATION_FLAT,
+    AGGREGATION_MODES,
+    AGGREGATION_POSE_SOURCE,
+    CONFIDENCE_ONLY_METHODS,
     DENOMINATOR_ATTEMPTED,
     DENOMINATOR_MODES,
     DENOMINATOR_VALID,
     GLOBAL_RP_SCORE,
+    POSE_SOURCE_DICTIONARY,
     RANKS_DICTIONARY,
     RP_SCORES_DICTIONARY,
     SCORES_DIRECTION_DICTIONARY,
@@ -94,6 +99,43 @@ def _score_one_protein(
     return current_protein_group
 
 
+def _combine_percentiles(
+    result: pd.DataFrame,
+    voting_methods: list[str],
+    aggregation: str,
+) -> pd.Series:
+    """
+    Average the per-method rank percentiles into one global score.
+
+    Under ``pose_source``, tracks that judge the same engine's pose are averaged
+    together first, so the cross-method mean is over pose hypotheses rather than
+    over scoring passes. Missing scores are skipped rather than imputed at both
+    levels: a track with no score for a row drops out of its pose source's mean,
+    and a pose source with no scores at all drops out of the outer mean.
+
+    :param result: Frame carrying the per-method rank percentile columns.
+    :param voting_methods: Contributing methods, confidence-only ones already
+        removed.
+    :param aggregation: ``pose_source`` or ``flat``.
+    :returns: One global score per row, sharing the 0 = best orientation.
+    """
+    if aggregation == AGGREGATION_FLAT:
+        return result[[RP_SCORES_DICTIONARY[method] for method in voting_methods]].mean(axis=1)
+
+    columns_by_source: dict[str, list[str]] = {}
+    for method in voting_methods:
+        # A method with no explicit mapping is its own pose source, so a newly
+        # added engine behaves sensibly before anyone touches the dictionary.
+        source = POSE_SOURCE_DICTIONARY.get(method, method)
+        columns_by_source.setdefault(source, []).append(RP_SCORES_DICTIONARY[method])
+
+    per_source_means = pd.DataFrame(
+        {source: result[columns].mean(axis=1) for source, columns in columns_by_source.items()},
+        index=result.index,
+    )
+    return per_source_means.mean(axis=1)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -102,6 +144,7 @@ def compute_rank_percentile_scores(
     methods: list[str] | None = None,
     protein_col: str = PROTEIN_CONF_ID,
     denominator: str = DENOMINATOR_VALID,
+    aggregation: str = AGGREGATION_POSE_SOURCE,
 ) -> pd.DataFrame:
     """
     Compute rank percentile scores per protein for one or more docking methods.
@@ -111,9 +154,11 @@ def compute_rank_percentile_scores(
     Convention: **0 = best**, bounded to ``(0, 1]``. A uniquely best binder
     scores ``1 / denominator`` and the uniquely worst ``1.0``; ties share their
     average rank, so tied extremes fall short of those endpoints.
-    :data:`GLOBAL_RP_SCORE` is the unweighted mean of the per-method
-    percentiles, and methods can have different denominators for the same
-    protein, so it is not bounded by any single method's endpoints.
+    :data:`GLOBAL_RP_SCORE` excludes :data:`CONFIDENCE_ONLY_METHODS`
+    (``diffdock``, ``boltz`` — pose-confidence values, not affinity estimates)
+    and combines the rest per ``aggregation``; methods can have different
+    denominators for the same protein, so it is not bounded by any single
+    method's endpoints.
 
     :param df: Input DataFrame with protein IDs and raw score columns.
     :param methods: Docking methods to score. Defaults to all available.
@@ -124,11 +169,20 @@ def compute_rank_percentile_scores(
         generated with ``attempted``, where about 5.6% of pairs failed to
         score and still counted, so reproducing the paper's numbers
         requires it. Defaults to ``valid``.
-    :raises ValueError: If ``denominator`` is neither of those.
+    :param aggregation: ``pose_source`` averages the rescore tracks with their
+        upstream engine before averaging across engines, so DiffDock and Boltz
+        contribute one vote each instead of three (their own confidence plus
+        two auto-added rescores). ``flat`` is the original unweighted mean over
+        every voting track, kept to reproduce scores computed before this
+        grouping existed. Defaults to ``pose_source``.
+    :raises ValueError: If ``denominator`` or ``aggregation`` is not one of
+        those modes.
     :return: Copy of df with rank percentile and rank columns added.
     """
     if denominator not in DENOMINATOR_MODES:
         raise ValueError(f"denominator must be one of {DENOMINATOR_MODES}, got {denominator!r}")
+    if aggregation not in AGGREGATION_MODES:
+        raise ValueError(f"aggregation must be one of {AGGREGATION_MODES}, got {aggregation!r}")
 
     result = df.copy()
 
@@ -153,12 +207,13 @@ def compute_rank_percentile_scores(
         .reset_index(drop=True)
     )
 
-    rp_score_columns = [
-        RP_SCORES_DICTIONARY[method]
+    voting_methods = [
+        method
         for method in methods
-        if RP_SCORES_DICTIONARY[method] in result.columns
+        if method not in CONFIDENCE_ONLY_METHODS
+        and RP_SCORES_DICTIONARY[method] in result.columns
     ]
-    if rp_score_columns:
-        result[GLOBAL_RP_SCORE] = result[rp_score_columns].mean(axis=1)
+    if voting_methods:
+        result[GLOBAL_RP_SCORE] = _combine_percentiles(result, voting_methods, aggregation)
 
     return result

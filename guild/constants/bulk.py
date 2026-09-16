@@ -171,6 +171,42 @@ RP_SCORES_DICTIONARY = {
     GNINA_RESCORE_DIFFDOCK_PREFIX: GNINA_RESCORE_DIFFDOCK_RP_SCORE,
 }
 
+# Pose-confidence tracks. Their rank percentile is still computed and reported,
+# but they do not vote in GLOBAL_RP_SCORE: diffdock_score is a diffusion
+# confidence and boltz_score an ipTM, and both estimate whether the model's own
+# pose is correct rather than how tightly the ligand binds. Averaging them into
+# an affinity consensus mixes two different quantities. This is the status
+# GNINA_CNN_SCORE already has (see guild/constants/guild.py), applied
+# consistently — pose quality is a flag, the consensus is over scores.
+CONFIDENCE_ONLY_METHODS = frozenset({DIFFDOCK_PREFIX, BOLTZ_PREFIX})
+
+# Which engine's pose each scoring track judges. The rescore tracks are
+# score-only passes over a pose another engine generated, so they belong to that
+# engine's group rather than to Vina's or gnina's. GLOBAL_RP_SCORE averages
+# within a pose source before averaging across sources, so auto-adding two
+# rescore tracks apiece for DiffDock and Boltz does not hand those two three
+# votes each while Vina, gnina and KarmaDock get one.
+POSE_SOURCE_DICTIONARY = {
+    VINA_PREFIX: VINA_PREFIX,
+    KARMADOCK_PREFIX: KARMADOCK_PREFIX,
+    GNINA_PREFIX: GNINA_PREFIX,
+    NESSO_PREFIX: NESSO_PREFIX,
+    DIFFDOCK_PREFIX: DIFFDOCK_PREFIX,
+    BOLTZ_PREFIX: BOLTZ_PREFIX,
+    VINA_RESCORE_DIFFDOCK_PREFIX: DIFFDOCK_PREFIX,
+    GNINA_RESCORE_DIFFDOCK_PREFIX: DIFFDOCK_PREFIX,
+    VINA_RESCORE_BOLTZ_PREFIX: BOLTZ_PREFIX,
+    GNINA_RESCORE_BOLTZ_PREFIX: BOLTZ_PREFIX,
+}
+
+# How GLOBAL_RP_SCORE combines the per-method percentiles. POSE_SOURCE means
+# one pose hypothesis, one vote: mean within each pose source, then mean across
+# sources. FLAT is the original unweighted mean over every voting track, kept so
+# scores produced before the grouping existed stay reproducible.
+AGGREGATION_POSE_SOURCE = "pose_source"
+AGGREGATION_FLAT = "flat"
+AGGREGATION_MODES = (AGGREGATION_POSE_SOURCE, AGGREGATION_FLAT)
+
 SCORES_TO_USE_DICTIONARY = {
     VINA_PREFIX: [
         VINA_SCORE,
