@@ -6,10 +6,13 @@ molecules (same protein, itself included) it scores at least as well as:
 
       rp_score = rank / denominator
 
-**Convention: 0 = best, 1 = worst**, bounded to ``(0, 1]``: rank 1 = best
-binder scores ``1 / denominator``, the worst scores ``1.0``. This is the
-orientation of the published Guild results, and it is pinned by
-``test_orientation_contract_zero_is_best``.
+**Convention: 0 = best, 1 = worst**, bounded to ``(0, 1]``: a uniquely best
+binder scores ``1 / denominator`` and the uniquely worst ``1.0``. Ties share
+their average rank, so tied extremes fall short of those endpoints -- an
+all-tied group of ``n`` scores ``(n + 1) / 2n`` throughout. This is the
+orientation of the published Guild results, pinned by
+``test_orientation_contract_zero_is_best`` and
+``test_orientation_contract_ties_share_average_rank``.
 
 Raw ``*_score`` columns keep their own native directions, which is exactly
 what the rank percentile exists to normalise away.
@@ -105,7 +108,12 @@ def compute_rank_percentile_scores(
 
     Rank percentile ``rank / denominator``, where rank 1 = best binder.
 
-    Convention: **0 = best**, ``1.0`` = worst, bounded to ``(0, 1]``.
+    Convention: **0 = best**, bounded to ``(0, 1]``. A uniquely best binder
+    scores ``1 / denominator`` and the uniquely worst ``1.0``; ties share their
+    average rank, so tied extremes fall short of those endpoints.
+    :data:`GLOBAL_RP_SCORE` is the unweighted mean of the per-method
+    percentiles, and methods can have different denominators for the same
+    protein, so it is not bounded by any single method's endpoints.
 
     :param df: Input DataFrame with protein IDs and raw score columns.
     :param methods: Docking methods to score. Defaults to all available.

@@ -203,7 +203,11 @@ class TestTiedScores:
         np.testing.assert_allclose(result[rp_col].values, expected_rp)
 
     def test_all_tied(self):
-        """All identical scores → all share the same average rank."""
+        """All identical scores → all share rank (n + 1) / 2, so rp = (n + 1) / 2n.
+
+        Pins the tie half of the orientation contract; see
+        :meth:`TestOrientationContract.test_orientation_contract_ties_share_average_rank`.
+        """
         df = _make_df(
             protein_ids=["P1"] * 3,
             vina_scores=[-5.0, -5.0, -5.0],
@@ -393,6 +397,43 @@ class TestOrientationContract:
         # Non-decreasing as the raw score gets worse.
         best_first = result.sort_values(raw_score_column, ascending=lower_is_better)
         assert (np.diff(best_first[rp_col].values) >= 0).all()
+
+    def test_orientation_contract_ties_share_average_rank(self):
+        """PINNED CONTRACT: tied extremes do not reach the endpoints.
+
+        Ranks use method="average", so tied best values share a rank and score
+        above 1 / denominator. Documented alongside the endpoint contract so the
+        two cannot drift apart.
+        """
+        # Two molecules tied at the best score share ranks 1 and 2 -> 1.5.
+        tied_best = _make_df(
+            protein_ids=["P1"] * 4,
+            vina_scores=[-10.0, -10.0, -7.0, -4.0],
+        )
+        rp_col = RP_SCORES_DICTIONARY["vina"]
+        rp = compute_rank_percentile_scores(tied_best, methods=["vina"])[rp_col]
+
+        assert rp.iloc[0] == pytest.approx(1.5 / 4)
+        assert rp.iloc[1] == pytest.approx(1.5 / 4)
+        assert rp.min() > 1 / 4
+
+        # Tied worst likewise falls short of 1.0.
+        tied_worst = _make_df(
+            protein_ids=["P1"] * 4,
+            vina_scores=[-10.0, -7.0, -4.0, -4.0],
+        )
+        rp = compute_rank_percentile_scores(tied_worst, methods=["vina"])[rp_col]
+
+        assert rp.iloc[2] == pytest.approx(3.5 / 4)
+        assert rp.iloc[3] == pytest.approx(3.5 / 4)
+        assert rp.max() < 1.0
+
+        # All tied: every molecule gets (n + 1) / 2n, neither endpoint.
+        n = 3
+        all_tied = _make_df(protein_ids=["P1"] * n, vina_scores=[-5.0] * n)
+        rp = compute_rank_percentile_scores(all_tied, methods=["vina"])[rp_col]
+
+        np.testing.assert_allclose(rp.values, [(n + 1) / (2 * n)] * n)
 
     def test_global_score_shares_the_orientation(self):
         """GLOBAL_RP_SCORE averages rp_* values, so 0 = best holds there too."""

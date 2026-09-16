@@ -450,8 +450,12 @@ All four are in kcal/mol (lower = stronger predicted binding), independently ran
 protein and folded into the `global_rp_score`. The gnina tracks also emit
 `gnina_rescore_*_cnn_score` as a confidence side channel, which is not ranked.
 
-> **Rank-percentile orientation.** Every `rp_*_score` and the `global_rp_score` run from 0 to 1
-> with **0 = best** — the best-scoring ligand for a protein gets `1 / n`, the worst gets `1.0`.
+> **Rank-percentile orientation.** Every `rp_*_score` and the `global_rp_score` is bounded to
+> `(0, 1]` with **0 = best**. A ligand that is uniquely best for a protein scores `1 / n` and the
+> uniquely worst `1.0`, but ties share their average rank, so tied extremes fall short of those
+> endpoints — if all `n` molecules tie, every one scores `(n + 1) / 2n`. `global_rp_score` is the
+> unweighted mean of the per-method percentiles, and methods can have different denominators for
+> the same protein, so it is not bounded by any single method's endpoints.
 > Raw `*_score` columns keep their own native directions (Vina and gnina lower = better,
 > KarmaDock and Boltz higher = better), which is exactly what the rank percentile exists to
 > normalise away.
