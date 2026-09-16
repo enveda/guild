@@ -1,8 +1,8 @@
 """
 Tests for guild.tools.scores — rank percentile scoring.
 
-Convention: 0 ≈ best, 1 ≈ worst.
-  rank 1 = best binder → rp_score = 1/N (near 0).
+Convention: 0 = best, 1 = worst.
+  rank 1 = best binder → rp_score = 1 / n_valid; the worst scores 1.0.
 """
 
 import numpy as np
@@ -10,6 +10,8 @@ import pandas as pd
 import pytest
 
 from guild.constants.bulk import (
+    DENOMINATOR_ATTEMPTED,
+    DENOMINATOR_VALID,
     GLOBAL_RP_SCORE,
     RANKS_DICTIONARY,
     RP_SCORES_DICTIONARY,
@@ -201,7 +203,11 @@ class TestTiedScores:
         np.testing.assert_allclose(result[rp_col].values, expected_rp)
 
     def test_all_tied(self):
-        """All identical scores → all share the same average rank."""
+        """All identical scores → all share rank (n + 1) / 2, so rp = (n + 1) / 2n.
+
+        Pins the tie half of the orientation contract; see
+        :meth:`TestOrientationContract.test_orientation_contract_ties_share_average_rank`.
+        """
         df = _make_df(
             protein_ids=["P1"] * 3,
             vina_scores=[-5.0, -5.0, -5.0],
@@ -346,3 +352,164 @@ class TestEdgeCases:
         _ = compute_rank_percentile_scores(df, methods=["vina"])
 
         assert set(df.columns) == original_cols
+
+
+# ---------------------------------------------------------------------------
+# 9. Pinned public contract: orientation
+# ---------------------------------------------------------------------------
+class TestOrientationContract:
+    """The one property every downstream consumer of rp_* depends on."""
+
+    @pytest.mark.parametrize(
+        ("method", "raw_scores", "lower_is_better"),
+        [
+            ("vina", [-4.0, -12.0, -7.0, -9.0, -6.0], True),
+            ("karmadock", [3.0, 9.0, 5.0, 1.0, 7.0], False),
+        ],
+    )
+    def test_orientation_contract_zero_is_best(self, method, raw_scores, lower_is_better):
+        """PINNED CONTRACT: the best-scoring ligand's rank percentile is nearest 0.
+
+        rp_score = rank / N with rank 1 = best, so the best ligand scores 1/N and the
+        worst scores 1.0. This matches the published Guild results; inverting it
+        silently flips every downstream ranking. Do not change it without updating
+        the manuscript and regenerating the published figures.
+        """
+        n = len(raw_scores)
+        raw_score_column = f"{method}_score"
+        df = pd.DataFrame(
+            {
+                PROTEIN_CONF_ID: ["P1"] * n,
+                raw_score_column: raw_scores,
+            }
+        )
+        result = compute_rank_percentile_scores(df, methods=[method])
+        rp_col = RP_SCORES_DICTIONARY[method]
+
+        ranks = result[RANKS_DICTIONARY[method]]
+        assert result.loc[ranks.idxmin(), rp_col] == pytest.approx(1 / n)
+        assert result.loc[ranks.idxmax(), rp_col] == pytest.approx(1.0)
+
+        # Bounded to (0, 1].
+        assert (result[rp_col] > 0).all()
+        assert (result[rp_col] <= 1.0).all()
+
+        # Non-decreasing as the raw score gets worse.
+        best_first = result.sort_values(raw_score_column, ascending=lower_is_better)
+        assert (np.diff(best_first[rp_col].values) >= 0).all()
+
+    def test_orientation_contract_ties_share_average_rank(self):
+        """PINNED CONTRACT: tied extremes do not reach the endpoints.
+
+        Ranks use method="average", so tied best values share a rank and score
+        above 1 / denominator. Documented alongside the endpoint contract so the
+        two cannot drift apart.
+        """
+        # Two molecules tied at the best score share ranks 1 and 2 -> 1.5.
+        tied_best = _make_df(
+            protein_ids=["P1"] * 4,
+            vina_scores=[-10.0, -10.0, -7.0, -4.0],
+        )
+        rp_col = RP_SCORES_DICTIONARY["vina"]
+        rp = compute_rank_percentile_scores(tied_best, methods=["vina"])[rp_col]
+
+        assert rp.iloc[0] == pytest.approx(1.5 / 4)
+        assert rp.iloc[1] == pytest.approx(1.5 / 4)
+        assert rp.min() > 1 / 4
+
+        # Tied worst likewise falls short of 1.0.
+        tied_worst = _make_df(
+            protein_ids=["P1"] * 4,
+            vina_scores=[-10.0, -7.0, -4.0, -4.0],
+        )
+        rp = compute_rank_percentile_scores(tied_worst, methods=["vina"])[rp_col]
+
+        assert rp.iloc[2] == pytest.approx(3.5 / 4)
+        assert rp.iloc[3] == pytest.approx(3.5 / 4)
+        assert rp.max() < 1.0
+
+        # All tied: every molecule gets (n + 1) / 2n, neither endpoint.
+        n = 3
+        all_tied = _make_df(protein_ids=["P1"] * n, vina_scores=[-5.0] * n)
+        rp = compute_rank_percentile_scores(all_tied, methods=["vina"])[rp_col]
+
+        np.testing.assert_allclose(rp.values, [(n + 1) / (2 * n)] * n)
+
+    def test_global_score_shares_the_orientation(self):
+        """GLOBAL_RP_SCORE averages rp_* values, so 0 = best holds there too."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],
+            karmadock_scores=[9.0, 5.0, 1.0],
+        )
+        result = compute_rank_percentile_scores(df, methods=["vina", "karmadock"])
+
+        # Row 0 is best under both methods, row 2 worst under both.
+        assert result[GLOBAL_RP_SCORE].iloc[0] == pytest.approx(1 / 3)
+        assert result[GLOBAL_RP_SCORE].iloc[2] == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# 10. Denominator: molecules that scored vs pairs attempted
+# ---------------------------------------------------------------------------
+class TestDenominator:
+    """The published case-study results divide by pairs attempted, not by
+    molecules that scored. A group with a failed pair separates the two."""
+
+    # 5 rows, 1 of them unscored.
+    RAW_SCORES = [-10.0, -8.0, np.nan, -6.0, -4.0]
+
+    def _rp(self, denominator):
+        df = _make_df(protein_ids=["P1"] * 5, vina_scores=self.RAW_SCORES)
+        result = compute_rank_percentile_scores(df, methods=["vina"], denominator=denominator)
+        return result[RP_SCORES_DICTIONARY["vina"]]
+
+    def test_valid_divides_by_the_molecules_that_scored(self):
+        """Default: 4 valid scores → ranks 1..4 over 4."""
+        rp = self._rp(DENOMINATOR_VALID)
+
+        assert np.isnan(rp.iloc[2])
+        np.testing.assert_allclose(rp.dropna().values, [1 / 4, 2 / 4, 3 / 4, 4 / 4])
+
+    def test_attempted_divides_by_every_pair_in_the_group(self):
+        """The unscored row still counts, so the worst never reaches 1.0."""
+        rp = self._rp(DENOMINATOR_ATTEMPTED)
+
+        assert np.isnan(rp.iloc[2])
+        np.testing.assert_allclose(rp.dropna().values, [1 / 5, 2 / 5, 3 / 5, 4 / 5])
+        assert rp.max() < 1.0
+
+    def test_the_two_modes_differ(self):
+        """Guards against the parameter being silently ignored."""
+        assert not np.allclose(
+            self._rp(DENOMINATOR_VALID).dropna().values,
+            self._rp(DENOMINATOR_ATTEMPTED).dropna().values,
+        )
+
+    def test_modes_agree_when_every_pair_scored(self):
+        """With no failures the denominators are the same number."""
+        df = _make_df(protein_ids=["P1"] * 4, vina_scores=[-10.0, -8.0, -6.0, -4.0])
+        valid = compute_rank_percentile_scores(df, methods=["vina"], denominator=DENOMINATOR_VALID)
+        attempted = compute_rank_percentile_scores(
+            df, methods=["vina"], denominator=DENOMINATOR_ATTEMPTED
+        )
+
+        rp_col = RP_SCORES_DICTIONARY["vina"]
+        np.testing.assert_allclose(valid[rp_col].values, attempted[rp_col].values)
+
+    def test_default_is_valid(self):
+        """Adding the option must not change what existing callers get."""
+        df = _make_df(protein_ids=["P1"] * 5, vina_scores=self.RAW_SCORES)
+        rp_col = RP_SCORES_DICTIONARY["vina"]
+
+        np.testing.assert_allclose(
+            compute_rank_percentile_scores(df, methods=["vina"])[rp_col].values,
+            self._rp(DENOMINATOR_VALID).values,
+        )
+
+    def test_unknown_denominator_raises(self):
+        """Fail loud rather than silently falling back to a default."""
+        df = _make_df(protein_ids=["P1"] * 3, vina_scores=[-10.0, -8.0, -6.0])
+
+        with pytest.raises(ValueError, match="denominator must be one of"):
+            compute_rank_percentile_scores(df, methods=["vina"], denominator="n_valid")
