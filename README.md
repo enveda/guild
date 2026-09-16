@@ -216,10 +216,11 @@ Pre-requisites:
 * [Openbabel]
 
 DiffDock does not ship pre-trained weights in its own checkout — the first inference run
-downloads its score/confidence model checkpoints from the DiffDock GitHub Releases into a
-`workdir/` folder next to the clone (or `$DIFFDOCK_MODEL_CACHE` if set), the same on-first-use
-pattern Nesso-1 uses for its HuggingFace weights. Unlike Nesso-1's `NESSO_CACHE`, this path
-isn't persisted by default, so a fresh container or checkout re-downloads it.
+downloads its score/confidence model checkpoints from the DiffDock GitHub Releases. A
+writable clone stores them in its local `workdir/`; a read-only clone uses
+`$DIFFDOCK_MODEL_CACHE` or the default `/tmp/diffdock_models/workdir`. Unlike
+Nesso-1's `NESSO_CACHE`, the default container location isn't persisted, so a fresh
+container or checkout re-downloads them.
 
 ```shell
 git clone https://github.com/openbabel/openbabel.git
