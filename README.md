@@ -78,7 +78,7 @@ make run-vina \
 | `HEAD` | `0` | Take only the first N rows from the combinations table (0 = all) |
 | `DECOYS` | *(script default)* | Path to the decoys file; omit to use built-in default (`chembl_36_decoys_2.tsv`) |
 | `NO_DECOYS` | *(empty)* | Set to `1` to skip decoy expansion entirely (useful for single-protein runs where you only want to score the supplied ligands) |
-| `CLEAN` | *(empty)* | Set to `1` to delete the project output folder before running |
+| `CLEAN` | *(empty)* | Set to `1` to delete the project output folder before running. Omit it to resume an interrupted run instead — combinations that already produced results are skipped rather than redone. |
 | `KNOWN_BINDERS` | *(empty)* | Set to `1` to enable known-binders expansion |
 | `N_WORKERS` | `1` | Vina parallel-worker processes. Vina internally also threads — values >1 may oversubscribe on high-core hosts but are typically fine. |
 | `BOX` | *(empty)* | Global fallback Vina box file (`center_{x,y,z}` + `size_{x,y,z}`). Used for combinations whose CSV `box_location` cell is empty; per-row values always take precedence. See [Custom binding pocket](#custom-binding-pocket). |
@@ -126,6 +126,11 @@ python scripts/run_guild.py \
 ### Requirements
 
 * NVIDIA GPU + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/) (for GPU methods)
+* If DiffDock crashes with an NVRTC/CUDA initialization error when run via `run-guild`, this
+  was a known issue fixed prior to `1.1.0` by adding the nvidia CUDA library paths (`cu13`,
+  `cuda_nvrtc`, `cudnn`, `cublas`) to `LD_LIBRARY_PATH` on that target. If you invoke DiffDock
+  outside the provided `make run-*` targets, confirm your own environment's `LD_LIBRARY_PATH`
+  includes those same paths.
 
 ### Consuming PLIP interactions output
 
@@ -209,6 +214,12 @@ Pre-requisites:
 * [Karmadock](https://github.com/schrojunzhang/KarmaDock)
 * [Diffdock](https://github.com/gcorso/DiffDock.git)
 * [Openbabel]
+
+DiffDock does not ship pre-trained weights in its own checkout — the first inference run
+downloads its score/confidence model checkpoints from the DiffDock GitHub Releases into a
+`workdir/` folder next to the clone (or `$DIFFDOCK_MODEL_CACHE` if set), the same on-first-use
+pattern Nesso-1 uses for its HuggingFace weights. Unlike Nesso-1's `NESSO_CACHE`, this path
+isn't persisted by default, so a fresh container or checkout re-downloads it.
 
 ```shell
 git clone https://github.com/openbabel/openbabel.git
