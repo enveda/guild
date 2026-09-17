@@ -4,6 +4,20 @@ History
 
 Unreleased
 ----------
+* Added ``notebooks/analysis/build_rank_percentile_schematic.py``, which generates the
+  Supplementary Text 3 rank-percentile schematic from the real 3-target rerun instead of
+  the hand-built, uncaptioned original (``guild_rank_percentile_figure.png`` /
+  ``Revision 1.docx``'s ``image4.png``) -- nothing in the repository produced that image,
+  so it could drift from the scoring code silently, and it already had. Two concrete
+  errors are fixed by construction: it showed four pose sources (Vina, DiffDock,
+  KarmaDock, Boltz-2), GNINA was missing; and its DiffDock panel was labelled "confidence
+  (higher = better)", exactly the input R2-3 objects to and what the rescore tracks and
+  ``20b3c50`` stopped letting vote. The regenerated schematic shows all five pose sources,
+  labels DiffDock's and Boltz-2's panels with the Vina-rescore ΔG that actually enters the
+  score (native confidences are still noted as reported, but not ranked or voted, mirroring
+  ``gnina_cnn_score``), shows Boltz-2 as one Step-4 vote (the mean of its two shown tracks,
+  including ``boltz_affinity_score`` per ``0d36671``) rather than one panel per track, and
+  states the cross-source combination is a median (``0e7c959``), not a mean.
 * R2-7: added ``guild.tools.decoy_matching``, the property-matched decoy panel and
   descriptor-only-baseline control the reply to R2-7 promises for Figure 3, as ordinary
   tested library code rather than a final render. ``match_decoys_to_binders`` keeps a
