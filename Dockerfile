@@ -203,6 +203,7 @@ WORKDIR /app
 
 COPY --chown=appuser:appuser guild /app/guild
 COPY --chown=appuser:appuser tests /app/tests
+COPY --chown=appuser:appuser scripts/run_guild.py /app/scripts/run_guild.py
 
 ENV VIRTUAL_ENV="/app/.venv"
 ENV PATH="${VIRTUAL_ENV}/bin:/app:${PATH}"

@@ -8,6 +8,7 @@
 !guild
 !tests
 !scripts/apply_karmadock_patches.py
+!scripts/run_guild.py
 
 # Ignore things that might be inside the folders above
 **/*~

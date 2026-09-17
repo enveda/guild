@@ -4,6 +4,13 @@ History
 
 Unreleased
 ----------
+* Fixed the ``test`` CI job, which failed to even collect: the ``test``
+  Docker stage copied in ``guild/`` and ``tests/`` but never ``scripts/``,
+  and ``.dockerignore`` allowlisted only ``scripts/apply_karmadock_patches.py``,
+  so ``tests/scripts/test_run_guild.py``'s ``import run_guild`` had nothing to
+  import inside the container even though it works locally. Added
+  ``scripts/run_guild.py`` to both. Pre-existing since that test file was
+  added; unrelated to the other changes in this branch.
 * ``compute_rank_percentile_scores`` no longer drops ``protein_config_id``
   (or scrambles row order against any other column) on pandas 3 — it grouped
   with ``groupby(protein_col, group_keys=False).apply(...)``, relying on the
