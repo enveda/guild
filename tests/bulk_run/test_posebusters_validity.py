@@ -900,6 +900,10 @@ class TestRunPoseValidityAnalysis:
 
     def test_rows_written_and_attribute_set(self, test_input_table, cleanup):
         bulk = self._bulk(test_input_table)
+        # Scoring runs before pose validity in the real pipeline, so
+        # rp_scores_df is already in memory by the time this is called —
+        # expect_existing_scores defaults to True and would otherwise raise.
+        bulk.rp_scores_df = pd.DataFrame({BULK_COMBINATION_ID: [COMBO_ID], "vina_score": [-9.0]})
         fake_summary = pd.DataFrame(
             [
                 {
@@ -929,6 +933,7 @@ class TestRunPoseValidityAnalysis:
         written = pd.read_csv(bulk.posebusters_path, sep="\t")
         assert len(written) == 1
         assert written.iloc[0][PB_COMBINATION_ID] == COMBO_ID
+        assert bool(bulk.rp_scores_df.loc[0, "vina_pb_valid"]) is True
 
     def test_progress_logged_to_the_batch_log(self, test_input_table, cleanup):
         bulk = self._bulk(test_input_table)
@@ -957,6 +962,62 @@ class TestRunPoseValidityAnalysis:
         kwargs = validate.call_args.kwargs
         assert kwargs["config"] == "dock_fast"
         assert kwargs["pose_scope"] == POSE_SCOPE_ALL
+
+    def test_expect_existing_scores_true_raises_on_a_missing_table(
+        self, test_input_table, cleanup
+    ):
+        bulk = self._bulk(test_input_table)
+        fake_summary = pd.DataFrame(
+            [
+                {
+                    **dict.fromkeys(POSEBUSTERS_COLUMNS),
+                    PB_COMBINATION_ID: COMBO_ID,
+                    PB_DOCKING_METHOD: VINA_PREFIX,
+                    PB_POSE: 1,
+                    PB_VALID: True,
+                    PB_STATUS: PB_STATUS_OK,
+                    PB_FAILED_CHECKS: "",
+                }
+            ]
+        )[POSEBUSTERS_COLUMNS]
+
+        with (
+            patch("guild.bulk._collect_complex_metadata") as collect,
+            patch("guild.bulk.validate_batch_poses") as validate,
+            pytest.raises(RuntimeError, match="No scores table"),
+        ):
+            collect.return_value = {VINA_PREFIX: [METADATA]}
+            validate.return_value = (fake_summary, pd.DataFrame([{"x": 1}]))
+            bulk.run_pose_validity_analysis()  # expect_existing_scores defaults True
+
+    def test_expect_existing_scores_false_tolerates_a_missing_table(
+        self, test_input_table, cleanup
+    ):
+        """The --posebusters-only path: no scoring happened, and that's fine."""
+        bulk = self._bulk(test_input_table)
+        fake_summary = pd.DataFrame(
+            [
+                {
+                    **dict.fromkeys(POSEBUSTERS_COLUMNS),
+                    PB_COMBINATION_ID: COMBO_ID,
+                    PB_DOCKING_METHOD: VINA_PREFIX,
+                    PB_POSE: 1,
+                    PB_VALID: True,
+                    PB_STATUS: PB_STATUS_OK,
+                    PB_FAILED_CHECKS: "",
+                }
+            ]
+        )[POSEBUSTERS_COLUMNS]
+
+        with (
+            patch("guild.bulk._collect_complex_metadata") as collect,
+            patch("guild.bulk.validate_batch_poses") as validate,
+        ):
+            collect.return_value = {VINA_PREFIX: [METADATA]}
+            validate.return_value = (fake_summary, pd.DataFrame([{"x": 1}]))
+            result = bulk.run_pose_validity_analysis(expect_existing_scores=False)
+
+        assert len(result) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1108,6 +1169,40 @@ class TestScoresMerge:
         if Path(bulk.rp_scores_path).exists():
             Path(bulk.rp_scores_path).unlink()
         bulk._merge_posebusters_into_scores()  # must not raise
+
+    def test_required_missing_scores_table_raises(self, test_input_table, cleanup):
+        """
+        A normal (non --posebusters-only) run expects scoring to have already
+        happened. A missing table there means the two steps resolved
+        different project folders (or scoring never ran) — exactly the bug
+        that once let a validated 1,930-pose run reach a reviewer response
+        with zero pb_ columns in guild_scores.txt and only a warning nobody
+        saw. This has to be loud, not a silent no-op.
+        """
+        bulk = self._bulk_with_scores(test_input_table, pd.DataFrame())
+        bulk.posebusters_df = self._summary(
+            [{PB_COMBINATION_ID: "c1", PB_DOCKING_METHOD: VINA_PREFIX, PB_POSE: 1, PB_VALID: True}]
+        )
+        if Path(bulk.rp_scores_path).exists():
+            Path(bulk.rp_scores_path).unlink()
+        with pytest.raises(RuntimeError, match="No scores table"):
+            bulk._merge_posebusters_into_scores(required=True)
+
+    def test_nonempty_validity_adding_zero_columns_raises(self, test_input_table, cleanup):
+        """
+        A non-empty posebusters_df that produces zero merged columns is never
+        legitimate — groupby silently drops rows whose key is NaN in either
+        grouping column, so a data-quality bug upstream (a null
+        combination_id or docking_method) must not degrade to "merge did
+        nothing" the way the missing-scores-table case does.
+        """
+        scores = pd.DataFrame({BULK_COMBINATION_ID: ["c1"], "vina_score": [-9.0]})
+        bulk = self._bulk_with_scores(test_input_table, scores)
+        bulk.posebusters_df = self._summary(
+            [{PB_COMBINATION_ID: None, PB_DOCKING_METHOD: VINA_PREFIX, PB_POSE: 1, PB_VALID: True}]
+        )
+        with pytest.raises(RuntimeError, match="zero columns"):
+            bulk._merge_posebusters_into_scores()
 
     def test_scores_read_from_disk_when_scoring_was_skipped(self, test_input_table, cleanup):
         bulk = self._bulk_with_scores(test_input_table, pd.DataFrame())

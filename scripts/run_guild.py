@@ -497,7 +497,13 @@ def main() -> None:
     # step (and --plip-only alone skips it).
     if run_posebusters:
         t0 = time.time()
-        bulk.run_pose_validity_analysis(config=args.posebusters_config)
+        # --posebusters-only is the one case where a scores table might
+        # legitimately not exist yet (scoring skipped entirely); every other
+        # invocation ran scoring first, so a missing table there is a bug.
+        bulk.run_pose_validity_analysis(
+            config=args.posebusters_config,
+            expect_existing_scores=not args.posebusters_only,
+        )
         print(f"PoseBusters time: {time.time() - t0:.1f}s")
 
     # ── Print final scores summary ──────────────────────────────────────

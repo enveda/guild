@@ -2315,6 +2315,7 @@ class BulkRun:
         pose_scope=DEFAULT_POSE_SCOPE,
         max_poses=POSEBUSTERS_MAX_POSES,
         n_processes=None,
+        expect_existing_scores=True,
     ):
         """
         Run PoseBusters over every method's docked poses and flag invalid ones.
@@ -2337,6 +2338,14 @@ class BulkRun:
         :param n_processes: Guild-level workers. Defaults to ``self.n_workers``
             (the ``--n-workers`` / ``N_WORKERS`` setting), matching how the Vina
             and gnina docking blocks size their pools.
+        :param expect_existing_scores: When True (the default), a missing
+            ``guild_scores.txt`` at merge time raises instead of merely
+            warning — this step normally runs after scoring, in the same or a
+            later invocation over the same project, so its absence means the
+            two steps resolved different project folders or scoring never
+            ran. Pass False for a genuine ``--posebusters-only`` run over a
+            tree where scoring hasn't happened yet, which is the one case
+            where the absence is expected rather than a bug.
         :return: The pose-validity DataFrame (empty, never None, when there was
             nothing to validate).
         """
@@ -2408,7 +2417,7 @@ class BulkRun:
 
         if not self.posebusters_df.empty:
             self._log_posebusters_summary()
-            self._merge_posebusters_into_scores()
+            self._merge_posebusters_into_scores(required=expect_existing_scores)
 
         return self.posebusters_df
 
@@ -2452,7 +2461,7 @@ class BulkRun:
                 f"Most common failing checks: {failed_checks.value_counts().head(5).to_dict()}"
             )
 
-    def _merge_posebusters_into_scores(self):
+    def _merge_posebusters_into_scores(self, required: bool = False):
         """
         Add ``<method>_pb_valid`` / ``<method>_pb_pose`` to ``guild_scores.txt``.
 
@@ -2463,22 +2472,43 @@ class BulkRun:
         absence of evidence is not invalidity. That is distinct from a pose that
         was *checked* and could not be evaluated, which fails closed to False in
         the validity table itself.
+
+        :param required: When True, a missing scores table is a hard error
+            instead of a warning-and-skip. A run that scored first and then
+            validated poses in the same pipeline invocation should always find
+            a scores table; if it doesn't, the two steps resolved different
+            project folders (or scoring never actually ran) and the merge
+            would otherwise silently no-op, which is exactly how this bug
+            reached a reviewer response undetected once before: a fragile
+            hand-rolled re-invocation of ``BulkRun`` wrote a correct, non-empty
+            ``posebusters_validity.tsv`` while ``guild_scores.txt`` quietly
+            kept zero ``pb_`` columns. A genuine ``--posebusters-only`` re-run
+            over a tree that never had scoring done is the one case where the
+            absence is expected, so callers on that path should pass
+            ``required=False`` (the default).
         """
         scores_df = getattr(self, "rp_scores_df", None)
         if scores_df is None or scores_df.empty:
             # A --posebusters-only re-run skips scoring, so rp_scores_df was
             # never built in this process. Fall back to the file on disk.
             if not os.path.exists(self.rp_scores_path):
-                logger.warning(
+                message = (
                     f"No scores table at {self.rp_scores_path} — skipping the "
                     f"guild_scores.txt PoseBusters merge. The standalone "
                     f"{POSEBUSTERS_FILE} is still written."
                 )
+                if required:
+                    raise RuntimeError(message)
+                logger.warning(message)
                 return
             scores_df = pd.read_csv(self.rp_scores_path, sep="\t")
 
         # One row per (combination, method): did any validated pose pass, and
-        # which was the first that did.
+        # which was the first that did. groupby drops rows whose key is NaN in
+        # EITHER column by default, so a combination/method identity that
+        # failed to populate degrades to "silently excluded from valid_any"
+        # rather than an error — which is exactly why the invariant below
+        # exists.
         grouped = self.posebusters_df.groupby([PB_COMBINATION_ID, PB_DOCKING_METHOD])
         valid_any = grouped[PB_VALID].any().unstack(PB_DOCKING_METHOD)
         first_valid = (
@@ -2490,6 +2520,7 @@ class BulkRun:
 
         merged = scores_df
         n_rows_before = len(merged)
+        columns_added = []
         for method in valid_any.columns:
             valid_column = POSEBUSTERS_VALID_DICTIONARY.get(method, f"{method}_pb_valid")
             pose_column = POSEBUSTERS_POSE_DICTIONARY.get(method, f"{method}_pb_pose")
@@ -2498,6 +2529,20 @@ class BulkRun:
                 merged[pose_column] = merged[COMBINATION_ID].map(first_valid[method])
             else:
                 merged[pose_column] = None
+            columns_added.extend((valid_column, pose_column))
+
+        if not self.posebusters_df.empty and not columns_added:
+            # Every PoseBusters row failed to group by (combination_id,
+            # docking_method) — most likely one of those two columns is null
+            # throughout. A non-empty validity table that adds zero columns is
+            # never a legitimate outcome, so this must raise rather than
+            # return having quietly done nothing.
+            raise RuntimeError(
+                f"{len(self.posebusters_df)} PoseBusters rows were validated "
+                "but the merge added zero columns to guild_scores.txt — check "
+                f"for null {PB_COMBINATION_ID}/{PB_DOCKING_METHOD} values in "
+                f"{self.posebusters_path}."
+            )
 
         if len(merged) != n_rows_before:
             # Guard the "flag, never drop" contract against a future refactor

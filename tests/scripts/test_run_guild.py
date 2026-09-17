@@ -165,7 +165,9 @@ class TestMainWiresPosebusters:
 
     def test_posebusters_runs_by_default(self, monkeypatch, tmp_path):
         bulk = self._run_main(monkeypatch, tmp_path, [])
-        bulk.run_pose_validity_analysis.assert_called_once_with(config="dock")
+        bulk.run_pose_validity_analysis.assert_called_once_with(
+            config="dock", expect_existing_scores=True
+        )
         bulk.run_docking.assert_called_once()
         bulk.run_guild_scoring.assert_called_once()
         bulk.run_interactions_analysis.assert_called_once()
@@ -175,15 +177,23 @@ class TestMainWiresPosebusters:
         bulk.run_pose_validity_analysis.assert_not_called()
 
     def test_posebusters_only_skips_docking_and_scoring_and_plip(self, monkeypatch, tmp_path):
+        """
+        --posebusters-only is the one case where a missing scores table is
+        expected rather than a bug, so expect_existing_scores must flip False.
+        """
         bulk = self._run_main(monkeypatch, tmp_path, ["--posebusters-only"])
         bulk.run_docking.assert_not_called()
         bulk.run_guild_scoring.assert_not_called()
         bulk.run_interactions_analysis.assert_not_called()
-        bulk.run_pose_validity_analysis.assert_called_once_with(config="dock")
+        bulk.run_pose_validity_analysis.assert_called_once_with(
+            config="dock", expect_existing_scores=False
+        )
 
     def test_posebusters_config_is_forwarded(self, monkeypatch, tmp_path):
         bulk = self._run_main(monkeypatch, tmp_path, ["--posebusters-config", "dock_fast"])
-        bulk.run_pose_validity_analysis.assert_called_once_with(config="dock_fast")
+        bulk.run_pose_validity_analysis.assert_called_once_with(
+            config="dock_fast", expect_existing_scores=True
+        )
 
     def test_plip_only_does_not_run_posebusters(self, monkeypatch, tmp_path):
         bulk = self._run_main(monkeypatch, tmp_path, ["--plip-only"])

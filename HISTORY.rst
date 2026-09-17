@@ -4,6 +4,16 @@ History
 
 Unreleased
 ----------
+* ``_merge_posebusters_into_scores`` now raises instead of only logging a
+  warning when ``guild_scores.txt`` is missing at merge time, unless the
+  caller explicitly expected that (``run_pose_validity_analysis(...,
+  expect_existing_scores=False)``, which ``--posebusters-only`` now passes).
+  It also raises if PoseBusters validated poses but the merge added zero
+  columns — previously possible, silently, whenever a combination_id or
+  docking_method value came through null. Both close the same gap: a real
+  run once produced a correct, non-empty ``posebusters_validity.tsv`` while
+  ``guild_scores.txt`` quietly kept zero ``pb_`` columns, with nothing louder
+  than a warning to notice by.
 * PoseBusters pose-validity analysis is now wired into ``scripts/run_guild.py``
   and the Makefile (``--posebusters`` / ``--no-posebusters`` /
   ``--posebusters-only`` / ``--posebusters-config``, ``NO_POSEBUSTERS`` /
