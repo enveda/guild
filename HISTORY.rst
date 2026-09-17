@@ -4,6 +4,15 @@ History
 
 Unreleased
 ----------
+* Added ``notebooks/analysis/reviewer_response/`` — the scripts and
+  provenance notes behind every number quoted in the reviewer response that
+  isn't read directly off a guild output table (runtime, aggregation-rule
+  comparison, normalisation comparison, decoy size-matched control), plus
+  the recovery script for a merge that didn't run (see the PoseBusters merge
+  fix below). ``pandas``/``numpy`` only, no guild import needed.
+* Fixed a stale docstring in ``score_distribution.ipynb`` — the markdown
+  header cited ``figure_2_dockwizard_scores.txt`` while the code cell
+  correctly loads ``figure_2_guild_scores.txt``.
 * ``guild.tools.scores.is_physical_score(value, method)`` flags Vina-family raw
   scores (``vina_score``, ``gnina_score``, and the four rescore tracks)
   outside a plausible −20 to 0 kcal/mol range — measured on the large Vina

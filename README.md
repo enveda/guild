@@ -464,6 +464,14 @@ which is not ranked.
 > Raw `*_score` columns keep their own native directions (Vina and gnina lower = better,
 > KarmaDock and Boltz higher = better), which is exactly what the rank percentile exists to
 > normalise away.
+>
+> **Older result files may predate this convention.** See
+> [guild/support/results/README.md](guild/support/results/README.md) for the
+> `dockwizard_*`/`drrp_*`/`guild_*` → `rp_*` column rename and the inverted orientation this
+> repo's own legacy fixture carries. The same drift affects result files produced before the
+> rename, including on Azure (e.g. `vinarun/dockwizard_scores.txt`,
+> `knownbindersvinarun/drrp_scores.txt`) — check the column names before assuming current
+> orientation and naming apply.
 
 > **How `global_rp_score` combines methods.** `diffdock_score` and `boltz_score` are pose
 > confidences (a diffusion confidence and an ipTM), not affinity estimates, so — like
