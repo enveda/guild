@@ -1,4 +1,4 @@
-.PHONY : docker-local docker-test dev test run-boltz run-vina run-diffdock run-gnina run-plip run-guild project-init project-setup
+.PHONY : docker-local docker-test dev test run-boltz run-vina run-diffdock run-gnina run-plip run-posebusters run-guild project-init project-setup
 
 # Run the tests locally
 test:
@@ -91,6 +91,17 @@ _FLEXIBLE_DOCKING_FLAG = $(if $(FLEXIBLE_DOCKING),--flexible-docking,)
 FLEXRES_GNINA ?=
 _FLEXRES_GNINA_FLAG = $(if $(FLEXRES_GNINA),--flexres-gnina $(FLEXRES_GNINA),)
 
+# PoseBusters pose-validity analysis. On by default (empty = enabled, mirrors
+# PLIP). Set NO_POSEBUSTERS=1 to skip it.
+NO_POSEBUSTERS ?=
+_NO_POSEBUSTERS_FLAG = $(if $(NO_POSEBUSTERS),--no-posebusters,)
+
+# PoseBusters config preset. Empty (default) → omit the flag ('dock' default
+# applies). Set POSEBUSTERS_CONFIG=dock_fast to skip the internal_energy
+# check on large/flexible ligand sets.
+POSEBUSTERS_CONFIG ?=
+_POSEBUSTERS_CONFIG_FLAG = $(if $(POSEBUSTERS_CONFIG),--posebusters-config $(POSEBUSTERS_CONFIG),)
+
 # Internal docker run flags reused across targets.
 # Mounts a generated /etc/passwd so pwd.getpwuid() works for the host UID
 # (required by PyTorch / boltz inside the container).
@@ -119,7 +130,7 @@ _NO_DECOYS_FLAG      = $(if $(NO_DECOYS),--no-decoys,)
 _BOX_FLAG            = $(if $(BOX),--box $(BOX),)
 _N_WORKERS_FLAG      = $(if $(N_WORKERS),--n-workers $(N_WORKERS),)
 _VINA_EXHAUSTIVENESS_FLAG = $(if $(VINA_EXHAUSTIVENESS),--vina-exhaustiveness $(VINA_EXHAUSTIVENESS),)
-_OPTIONAL_FLAGS = $(_CLEAN_FLAG) $(_KNOWN_BINDERS_FLAG) $(_HEAD_FLAG) $(_DECOYS_FLAG) $(_NO_DECOYS_FLAG) $(_BOX_FLAG) $(_N_WORKERS_FLAG) $(_NO_GPU_FLAG) $(_GNINA_INPUT_MODE_FLAG) $(_FLEXIBLE_DOCKING_FLAG) $(_FLEXRES_GNINA_FLAG) $(_VINA_EXHAUSTIVENESS_FLAG) $(_POSES_DIR_FLAG) $(_POSE_MODE_FLAG)
+_OPTIONAL_FLAGS = $(_CLEAN_FLAG) $(_KNOWN_BINDERS_FLAG) $(_HEAD_FLAG) $(_DECOYS_FLAG) $(_NO_DECOYS_FLAG) $(_BOX_FLAG) $(_N_WORKERS_FLAG) $(_NO_GPU_FLAG) $(_GNINA_INPUT_MODE_FLAG) $(_FLEXIBLE_DOCKING_FLAG) $(_FLEXRES_GNINA_FLAG) $(_VINA_EXHAUSTIVENESS_FLAG) $(_POSES_DIR_FLAG) $(_POSE_MODE_FLAG) $(_NO_POSEBUSTERS_FLAG) $(_POSEBUSTERS_CONFIG_FLAG)
 
 # Generate an /etc/passwd that includes the container's original entries plus
 # the host user.  This fixes pwd.getpwuid() failures for LDAP/SSSD users
@@ -205,6 +216,22 @@ run-plip: _prepare-passwd
 			--methods $(METHODS) \
 			--batch-size $(BATCH_SIZE) \
 			--plip-only \
+			$(_OPTIONAL_FLAGS)
+
+# Re-run only the PoseBusters pose-validity step over an existing
+# data/<project>/ tree. CPU-safe and skips docking + scoring entirely — useful
+# for re-validating poses when only the PoseBusters code or config changed.
+# Requires the same COMBINATIONS / PROJECT used by the original run.
+run-posebusters: _prepare-passwd
+	docker run \
+		$(DOCKER_COMMON) \
+		guild:latest \
+		python $(MASTER_SCRIPT) \
+			--project $(PROJECT) \
+			--combinations $(COMBINATIONS) \
+			--methods $(METHODS) \
+			--batch-size $(BATCH_SIZE) \
+			--posebusters-only \
 			$(_OPTIONAL_FLAGS)
 
 # Generic target — pass METHODS="boltz vina karmadock diffdock gnina" as needed.

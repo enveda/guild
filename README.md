@@ -89,6 +89,8 @@ make run-vina \
 | `FLEXIBLE_DOCKING` | *(empty)* | Set to `1` to let side chains of residues inside the docking box move during the search (Vina and gnina only). See [Flexible receptor docking](#flexible-receptor-docking). |
 | `FLEXRES_GNINA` | *(empty)* | gnina-only explicit flexible-residue spec, e.g. `"A:88,91"`. Takes priority over `FLEXIBLE_DOCKING`'s automatic selection for gnina. |
 | `VINA_EXHAUSTIVENESS` | *(empty)* | Vina search exhaustiveness. Higher improves pose quality at the cost of runtime. Defaults to `16` when omitted. |
+| `NO_POSEBUSTERS` | *(empty)* | Set to `1` to skip the PoseBusters pose-validity step. On by default (mirrors PLIP): ~400ms/pose, and adds `<method>_pb_valid`/`<method>_pb_pose` to `guild_scores.txt`. See [PoseBusters](#posebusters). |
+| `POSEBUSTERS_CONFIG` | *(empty → `dock`)* | `dock` \| `dock_fast`. `dock_fast` skips the `internal_energy` conformer-ensemble check — a lever worth trying on large/very flexible ligand sets. |
 | `MIN_MOL_WT` | `250` | Minimum molecular weight filter for known-binder expansion |
 | `MAX_MOL_WT` | `450` | Maximum molecular weight filter for known-binder expansion |
 | `CHEMBL_VERSION` | `chembl_36` | ChEMBL version string used for known-binder lookup |
@@ -103,6 +105,7 @@ make run-vina \
 | `run-diffdock` | No | Shortcut for diffdock docking |
 | `run-gnina` | Yes* | Shortcut for gnina docking (*GPU used for CNN rescoring; pass `USE_GPU=` for CPU-only) |
 | `run-plip` | No | Re-run only the PLIP interactions step over an existing `data/<project>/` tree |
+| `run-posebusters` | No | Re-run only the PoseBusters pose-validity step over an existing `data/<project>/` tree |
 
 ### Direct script invocation
 
@@ -855,6 +858,15 @@ dominates your failures, judge placement only with `pb_intermolecular_valid`, an
 
 By default Guild escalates through a combination's poses until one passes; `pose_scope` can
 be set to `best` (top pose only) or `all` (validate every pose).
+
+PoseBusters runs by default after docking + scoring, same as PLIP. Pass `--no-posebusters`
+to `run_guild.py` (`NO_POSEBUSTERS=1` via `make`) to skip it, or `--posebusters-config
+dock_fast` (`POSEBUSTERS_CONFIG=dock_fast`) to drop the `internal_energy` check. To **re-run
+only PoseBusters** over an existing project (no re-docking), use:
+
+```shell
+make run-posebusters PROJECT=myproject COMBINATIONS=/workspace/path/to/combos.csv METHODS="vina diffdock"
+```
 
 * [PoseBusters](https://doi.org/10.1039/D3SC04185A)
 *Martin Buttenschoen, Garrett M. Morris, Charlotte M. Deane*, **PoseBusters: AI-based docking

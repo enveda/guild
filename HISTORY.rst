@@ -4,6 +4,14 @@ History
 
 Unreleased
 ----------
+* PoseBusters pose-validity analysis is now wired into ``scripts/run_guild.py``
+  and the Makefile (``--posebusters`` / ``--no-posebusters`` /
+  ``--posebusters-only`` / ``--posebusters-config``, ``NO_POSEBUSTERS`` /
+  ``POSEBUSTERS_CONFIG`` / ``make run-posebusters``). It runs by default,
+  mirroring PLIP; previously ``run_pose_validity_analysis`` was reachable only
+  from the test suite, and every real invocation went through a hand-rolled
+  script that re-instantiated ``BulkRun`` and risked silently validating the
+  wrong batch layout.
 * ``global_rp_score`` no longer averages ``diffdock_score`` and ``boltz_score``
   in with the affinity tracks — they're pose confidences, not affinity
   estimates, so (like ``gnina_cnn_score``) they keep their own ``rp_*`` column

@@ -39,6 +39,8 @@ os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", "/tmp/torchinductor")
 import numpy as np
 import pandas as pd
 
+from guild.constants.posebusters import DEFAULT_POSEBUSTERS_CONFIG, POSEBUSTERS_CONFIGS
+
 # ---------------------------------------------------------------------------
 # Parse arguments
 # ---------------------------------------------------------------------------
@@ -190,6 +192,53 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--posebusters",
+        action="store_true",
+        default=False,
+        help=(
+            "Explicitly enable the PoseBusters pose-validity analysis step. "
+            "It already runs by default after docking + scoring (mirroring "
+            "--no-plip/PLIP), so this flag only matters as documentation in "
+            "a script — pass --no-posebusters to actually disable it."
+        ),
+    )
+    parser.add_argument(
+        "--no-posebusters",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip the PoseBusters pose-validity analysis step. By default, "
+            "after docking + scoring complete, guild validates every "
+            "supported method's poses (~400ms/pose on a 23-heavy-atom "
+            "ligand) and writes data/<project>/posebusters_validity.tsv "
+            "plus posebusters_full_report.tsv (always — header-only when "
+            "nothing was produced), and adds <method>_pb_valid / "
+            "<method>_pb_pose columns to guild_scores.txt."
+        ),
+    )
+    parser.add_argument(
+        "--posebusters-only",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip docking + scoring and run only the PoseBusters step over "
+            "an existing data/<project>/ tree. Reads guild_scores.txt from "
+            "disk to merge the pb_valid/pb_pose columns back in. Useful for "
+            "re-running pose validity when only the PoseBusters code or "
+            "config changed."
+        ),
+    )
+    parser.add_argument(
+        "--posebusters-config",
+        choices=list(POSEBUSTERS_CONFIGS),
+        default=DEFAULT_POSEBUSTERS_CONFIG,
+        help=(
+            "PoseBusters config preset. 'dock' (default) is the full check "
+            "set; 'dock_fast' drops the internal_energy conformer-ensemble "
+            "check, which can help on large or very flexible ligands."
+        ),
+    )
+    parser.add_argument(
         "--gnina-input-mode",
         choices=["pdbqt", "sdf"],
         default="pdbqt",
@@ -256,6 +305,28 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     return parser.parse_args()
+
+
+def resolve_pipeline_steps(args: argparse.Namespace) -> tuple[bool, bool, bool]:
+    """
+    Decide which pipeline steps run for this invocation.
+
+    Each "-only" flag means exactly that: skip docking + scoring and run only
+    its own analysis step. Passing more than one "-only" flag together
+    re-runs each of those steps over an existing data/<project>/ tree without
+    re-docking; passing neither runs the full pipeline, with each step's own
+    on-by-default/--no-* flag deciding whether it runs.
+
+    :param args: Parsed CLI namespace (or anything with the same attributes —
+        a plain object works fine for testing this in isolation).
+    :returns: ``(skip_docking_and_scoring, run_plip, run_posebusters)``.
+    """
+    skip_docking_and_scoring = args.plip_only or args.posebusters_only
+    run_plip = args.plip_only or (not skip_docking_and_scoring and not args.no_plip)
+    run_posebusters = args.posebusters_only or (
+        not skip_docking_and_scoring and not args.no_posebusters
+    )
+    return skip_docking_and_scoring, run_plip, run_posebusters
 
 
 # ---------------------------------------------------------------------------
@@ -396,7 +467,9 @@ def main() -> None:
         flexres_gnina=args.flexres_gnina,
     )
 
-    if not args.plip_only:
+    skip_docking_and_scoring, run_plip, run_posebusters = resolve_pipeline_steps(args)
+
+    if not skip_docking_and_scoring:
         t0 = time.time()
         bulk.run_docking()
         print(f"Docking time: {time.time() - t0:.1f}s")
@@ -405,17 +478,27 @@ def main() -> None:
         bulk.run_guild_scoring()
         print(f"Scoring time: {time.time() - t0:.1f}s")
     else:
-        print("Skipping docking + scoring (--plip-only).")
+        print("Skipping docking + scoring (--plip-only/--posebusters-only).")
 
     # PLIP interaction analysis: always run by default. The contract is that
     # data/<project>/plip_interactions.tsv exists after every run (header-only
     # if no method produced complex PDBs), so external notebooks can read it
     # without installing plip locally. --no-plip skips this step; --plip-only
-    # runs ONLY this step.
-    if args.plip_only or not args.no_plip:
+    # runs ONLY this step (and --posebusters-only alone skips it).
+    if run_plip:
         t0 = time.time()
         bulk.run_interactions_analysis()
         print(f"PLIP time:    {time.time() - t0:.1f}s")
+
+    # PoseBusters pose-validity analysis: on by default, same contract as
+    # PLIP above (data/<project>/posebusters_validity.tsv and
+    # posebusters_full_report.tsv always exist, header-only when nothing was
+    # produced). --no-posebusters skips it; --posebusters-only runs ONLY this
+    # step (and --plip-only alone skips it).
+    if run_posebusters:
+        t0 = time.time()
+        bulk.run_pose_validity_analysis(config=args.posebusters_config)
+        print(f"PoseBusters time: {time.time() - t0:.1f}s")
 
     # ── Print final scores summary ──────────────────────────────────────
     if (
