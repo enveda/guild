@@ -43,62 +43,52 @@ from guild.constants.guild import PROTEIN_CONF_ID
 # ---------------------------------------------------------------------------
 # Per-protein scoring
 # ---------------------------------------------------------------------------
-def _score_one_protein(
-    current_protein_group: pd.DataFrame,
-    methods: list[str],
+def _rank_and_score_one_method(
+    result: pd.DataFrame,
+    method: str,
     protein_col: str,
-    denominator: str = DENOMINATOR_VALID,
-) -> pd.DataFrame:
+    denominator: str,
+) -> tuple[pd.Series, pd.Series]:
     """
-    Rank all molecules per protein and convert to a percentile score.
+    Rank one method's raw scores per protein and convert to a percentile score.
 
-    rank 1 = best binder → rp_score = 1 / denominator.
-    Ties share their average rank.
+    rank 1 = best binder → rp_score = 1 / denominator. Ties share their
+    average rank. Implemented as groupby transforms over the whole frame,
+    rather than a per-group ``.apply()``, so every row keeps its original
+    position and every column (including ``protein_col`` itself) survives by
+    construction -- ``DataFrameGroupBy.apply`` relies on the grouping column
+    being passed through to the callable and back out, which stopped being
+    the default on pandas 2.2+ and is gone on 3.x.
 
-    :param current_protein_group: DataFrame rows for one protein.
-    :param methods: Docking methods to score.
+    :param result: Frame carrying ``protein_col`` and the raw score column.
+    :param method: Docking method to score.
     :param protein_col: Column name identifying the protein.
     :param denominator: ``valid`` or ``attempted``; see
         :func:`compute_rank_percentile_scores`.
-    :returns: DataFrame with rank percentile score and rank columns added.
+    :returns: ``(rank, rp_score)``, each a Series aligned to ``result``'s index.
     """
-    current_protein_group = current_protein_group.copy()
+    raw_score_column = f"{method}_score"
+    lower_is_better = SCORES_DIRECTION_DICTIONARY[method] == "minimum"
 
-    for method in methods:
-        raw_score_column = f"{method}_score"
-        rank_column = RANKS_DICTIONARY[method]
-        rp_score_column = RP_SCORES_DICTIONARY[method]
-        lower_is_better = SCORES_DIRECTION_DICTIONARY[method] == "minimum"
+    grouped_raw_scores = result.groupby(protein_col)[raw_score_column]
 
-        if (
-            raw_score_column not in current_protein_group.columns
-            or current_protein_group[raw_score_column].isna().all()
-        ):
-            current_protein_group[rank_column] = np.nan
-            current_protein_group[rp_score_column] = np.nan
-            continue
+    # Rank: 1 = best binder. A protein group with no valid score for this
+    # method ranks as all-NaN (na_option="keep" on an all-NaN input), the
+    # same outcome as the old per-group early exit.
+    ranks = grouped_raw_scores.rank(method="average", ascending=lower_is_better, na_option="keep")
 
-        n_valid = int(current_protein_group[raw_score_column].notna().sum())
-        if n_valid == 0:
-            current_protein_group[rank_column] = np.nan
-            current_protein_group[rp_score_column] = np.nan
-            continue
+    if denominator == DENOMINATOR_ATTEMPTED:
+        # A failed pair still counts, so the worst-ranked molecule falls
+        # short of 1.0 by the failure rate.
+        divisor = grouped_raw_scores.transform("size")
+    else:
+        divisor = result[raw_score_column].notna().groupby(result[protein_col]).transform("sum")
 
-        # Rank: 1 = best binder.
-        ranks = current_protein_group[raw_score_column].rank(
-            method="average",
-            ascending=lower_is_better,
-            na_option="keep",
-        )
+    # A wholly-unscored group has ranks already all-NaN, so guarding the
+    # divisor here only avoids a spurious 0/0 warning, not a value change.
+    rp_score = ranks / divisor.replace(0, np.nan)
 
-        # A failed pair still counts under DENOMINATOR_ATTEMPTED, so the
-        # worst-ranked molecule falls short of 1.0 by the failure rate.
-        divisor = len(current_protein_group) if denominator == DENOMINATOR_ATTEMPTED else n_valid
-
-        current_protein_group[rank_column] = ranks
-        current_protein_group[rp_score_column] = ranks / divisor
-
-    return current_protein_group
+    return ranks, rp_score
 
 
 def _combine_percentiles(
@@ -216,16 +206,19 @@ def compute_rank_percentile_scores(
     if not methods:
         return result
 
-    result = (
-        result.groupby(protein_col, group_keys=False)
-        .apply(
-            _score_one_protein,
-            methods=methods,
-            protein_col=protein_col,
-            denominator=denominator,
-        )
-        .reset_index(drop=True)
-    )
+    for method in methods:
+        raw_score_column = f"{method}_score"
+        rank_column = RANKS_DICTIONARY[method]
+        rp_score_column = RP_SCORES_DICTIONARY[method]
+
+        if raw_score_column not in result.columns:
+            result[rank_column] = np.nan
+            result[rp_score_column] = np.nan
+            continue
+
+        rank, rp_score = _rank_and_score_one_method(result, method, protein_col, denominator)
+        result[rank_column] = rank
+        result[rp_score_column] = rp_score
 
     voting_methods = [
         method

@@ -958,3 +958,63 @@ class TestIsPhysicalScore:
         """No score is a distinct, already-tracked failure mode, not a physicality one."""
         assert is_physical_score(np.nan, "vina") is True
         assert is_physical_score(None, "vina") is True
+
+
+# ---------------------------------------------------------------------------
+# 15. Regression: the grouping column (and row order) must survive
+# ---------------------------------------------------------------------------
+class TestGroupingColumnSurvives:
+    """compute_rank_percentile_scores used to group with
+    ``groupby(protein_col, group_keys=False).apply(...)``, relying on the
+    grouping column being passed through to the callable and back out. That
+    stopped being the default on pandas 2.2+ and is gone on pandas 3.x, so
+    protein_col silently disappeared from the output. Fixed by computing
+    everything as groupby transforms over the whole frame instead of a
+    per-group ``.apply()``, which keeps every column and every row's
+    original position by construction.
+
+    The input here interleaves the two proteins in the opposite order to
+    their alphabetical sort (P2's row comes first), so any fix that
+    re-attaches columns by *position* rather than by index/label would pass
+    a naive column-presence check while silently scrambling ligand_id and
+    the scores against the wrong rows -- these tests would catch that.
+    """
+
+    def _interleaved_df(self):
+        return pd.DataFrame(
+            {
+                PROTEIN_CONF_ID: ["P2", "P1", "P2", "P1"],
+                "ligand_id": ["lig_p2_a", "lig_p1_a", "lig_p2_b", "lig_p1_b"],
+                "vina_score": [-9.0, -10.0, -7.0, -8.0],
+            }
+        )
+
+    def test_protein_col_survives(self):
+        df = self._interleaved_df()
+        result = compute_rank_percentile_scores(df, methods=["vina"])
+        assert PROTEIN_CONF_ID in result.columns
+
+    def test_row_count_is_unchanged(self):
+        df = self._interleaved_df()
+        result = compute_rank_percentile_scores(df, methods=["vina"])
+        assert len(result) == len(df)
+
+    def test_unrelated_column_and_protein_col_stay_aligned_to_their_own_row(self):
+        """Not just present -- still attached to the right row, in the
+        original row order, not the group-sorted order."""
+        df = self._interleaved_df()
+        result = compute_rank_percentile_scores(df, methods=["vina"])
+
+        assert result["ligand_id"].tolist() == df["ligand_id"].tolist()
+        assert result[PROTEIN_CONF_ID].tolist() == df[PROTEIN_CONF_ID].tolist()
+
+    def test_computed_scores_stay_aligned_to_their_own_row(self):
+        """Belt and braces: the computed rp_score itself must land on the
+        row it was computed for, not get shuffled by a positional re-attach."""
+        df = self._interleaved_df()
+        result = compute_rank_percentile_scores(df, methods=["vina"])
+
+        rp_col = RP_SCORES_DICTIONARY["vina"]
+        # Row order in: P2(-9, best of its pair), P1(-10, best), P2(-7, worst), P1(-8, worst).
+        expected_rp = [0.5, 0.5, 1.0, 1.0]
+        np.testing.assert_allclose(result[rp_col].values, expected_rp)

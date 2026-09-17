@@ -4,6 +4,18 @@ History
 
 Unreleased
 ----------
+* ``compute_rank_percentile_scores`` no longer drops ``protein_config_id``
+  (or scrambles row order against any other column) on pandas 3 — it grouped
+  with ``groupby(protein_col, group_keys=False).apply(...)``, relying on the
+  grouping column being passed through to the callable and back out, which
+  stopped being the default on pandas 2.2+ and is gone on 3.x. Not reachable
+  today (``pyproject.toml`` pins ``pandas<3``), but every downstream
+  consumer of ``guild_scores.txt`` groups by that column, so it was a
+  landmine for whenever that pin lifts. Rewritten as groupby transforms over
+  the whole frame instead of a per-group ``.apply()``, which keeps every
+  column and every row's original position by construction and needs no
+  ``.reset_index()``. Numbers are unchanged — verified against the existing
+  orientation and denominator tests, and manually against pandas 3.0.5.
 * ``boltz_affinity_score`` (Boltz-2's own affinity head, log10(IC50/uM), read
   from the same output tree ``boltz_guild_scoring`` already parses) is now
   ranked and votes in ``global_rp_score``, via the new
