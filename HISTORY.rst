@@ -4,6 +4,23 @@ History
 
 Unreleased
 ----------
+* ``score_distribution.ipynb`` (Figure 2) and ``score_comparison.ipynb`` (Figure 3) now
+  read their input tables from a ``--data``-style directory
+  (``GUILD_FIGURES_DATA_DIR`` env var, default ``data``) instead of a hardcoded relative
+  path, mirroring ``reviewer_response/reproduce_response_analyses.py``. Neither
+  notebook's input was reachable before this: both paths are covered by the blanket
+  ``*.txt`` rule in ``.gitignore`` and were never committed, so no figure could be
+  regenerated from a clean checkout. Figure 2 now points at the 3-target rerun
+  (replacing a many-target case-study file that no longer exists anywhere reachable,
+  including the Zenodo deposit -- see Task 1 below); Figure 3's two inputs are unchanged
+  and load today. Added ``notebooks/analysis/README.md`` documenting, per figure, which
+  file is needed, which columns it must carry, and its provenance, plus a
+  ``legacy_columns.LEGACY_RENAME`` module shared by both notebooks (previously
+  duplicated in ``score_comparison.ipynb`` and absent from ``score_distribution.ipynb``
+  entirely) that now also covers ``global_dockwizard_score``, the one column-naming
+  generation it was missing. Orientation was checked directly against all three
+  generations and is unaffected -- 0 = best throughout; nothing here changes any stored
+  score.
 * Fixed the ``test`` CI job, which failed to even collect: the ``test``
   Docker stage copied in ``guild/`` and ``tests/`` but never ``scripts/``,
   and ``.dockerignore`` allowlisted only ``scripts/apply_karmadock_patches.py``,
