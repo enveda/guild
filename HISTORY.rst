@@ -4,6 +4,16 @@ History
 
 Unreleased
 ----------
+* PoseBusters and PLIP/ProLIF now log which requested methods produce no
+  complex PDB by design (karmadock, nesso) instead of letting them simply
+  not appear in ``posebusters_validity.tsv`` / ``plip_interactions.tsv`` —
+  a rows-only table reads that silence as "checked, nothing to report"
+  rather than "structurally not applicable". KarmaDock's own docking script
+  writes a scores CSV only (see ``karmadock_guild_scoring``); nothing in
+  this repo defines a predicted-pose file for it, so generating a KarmaDock
+  complex PDB would mean guessing that external tool's output convention
+  rather than reading it off a verified path — left for a follow-up once
+  that's confirmed.
 * ``_merge_posebusters_into_scores`` now raises instead of only logging a
   warning when ``guild_scores.txt`` is missing at merge time, unless the
   caller explicitly expected that (``run_pose_validity_analysis(...,

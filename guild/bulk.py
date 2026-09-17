@@ -247,13 +247,42 @@ def _row_flexres_gnina(row):
 
 # Methods that emit `<combination>_complex.pdb`, mapped to its batch
 # sub-folder. karmadock, nesso and the score-only rescore tracks write no
-# complex PDB of their own.
+# complex PDB of their own — which means PoseBusters, PLIP/ProLIF and any
+# native-ligand RMSD analysis all silently cover only the methods listed
+# here. A table that lists methods as rows (posebusters_validity.tsv,
+# plip_interactions.tsv) has no row at all for an unlisted method, which
+# reads exactly like "checked, nothing to report" rather than "not
+# applicable" unless something states the reason up front — see
+# ``_complex_pdb_coverage`` below, which both of those analyses log against
+# their own ``methods_to_analyze`` for this reason. KarmaDock's own docking
+# script writes a scores CSV only (see ``karmadock_guild_scoring`` /
+# ``process_karmadock_files`` in guild/docking/karmadock.py); nothing in this
+# repo defines a predicted-pose file it could combine into a complex PDB, so
+# extending this dict for KarmaDock would mean guessing that external tool's
+# output convention rather than reading it off a verified path.
 _COMPLEX_PDB_FOLDER_BY_METHOD = {
     BOLTZ_PREFIX: BOLTZ_FOLDER,
     VINA_PREFIX: VINA_FOLDER,
     DIFFDOCK_PREFIX: DIFFDOCK_FOLDER,
     GNINA_PREFIX: GNINA_FOLDER,
 }
+
+
+def _complex_pdb_coverage(methods_to_analyze):
+    """
+    Partition requested methods by whether they can structurally produce a
+    complex PDB, so a caller can log the difference instead of letting an
+    unsupported method disappear from a rows-only output table.
+
+    :param methods_to_analyze: Method prefixes requested for a
+        complex-PDB-based analysis (PoseBusters, PLIP/ProLIF).
+    :return: ``(supported, unsupported)`` — two sorted lists of method
+        prefixes from ``methods_to_analyze``. ``unsupported`` methods (e.g.
+        karmadock, nesso) are excluded by design, not by failure.
+    """
+    supported = sorted(m for m in methods_to_analyze if m in _COMPLEX_PDB_FOLDER_BY_METHOD)
+    unsupported = sorted(m for m in methods_to_analyze if m not in _COMPLEX_PDB_FOLDER_BY_METHOD)
+    return supported, unsupported
 
 
 def _collect_complex_metadata(batch_dict, methods_to_analyze):
@@ -2051,6 +2080,14 @@ class BulkRun:
         if methods_to_analyze is None:
             methods_to_analyze = self.methods_to_run
 
+        _, unsupported = _complex_pdb_coverage(methods_to_analyze)
+        if unsupported:
+            logger.info(
+                f"PLIP/ProLIF coverage: {sorted(unsupported)} produce no complex "
+                f"PDB by design and are excluded from interaction analysis — "
+                f"structurally not applicable, not \"analyzed and found nothing\"."
+            )
+
         logger.info("Starting interactions analysis")
 
         all_interactions = []
@@ -2353,6 +2390,14 @@ class BulkRun:
             methods_to_analyze = self.methods_to_run
         if n_processes is None:
             n_processes = self.n_workers
+
+        supported, unsupported = _complex_pdb_coverage(methods_to_analyze)
+        if unsupported:
+            logger.info(
+                f"PoseBusters coverage: {unsupported} produce no complex PDB by "
+                f"design and are excluded from pose validity — structurally not "
+                f"applicable, not \"checked and passed\". Validating: {supported}."
+            )
 
         logger.info(
             f"Starting PoseBusters pose-validity analysis "

@@ -32,7 +32,12 @@ from guild.analysis.posebusters import (
     validate_batch_poses,
     validate_pose,
 )
-from guild.bulk import _COMPLEX_PDB_FOLDER_BY_METHOD, BulkRun, _collect_complex_metadata
+from guild.bulk import (
+    _COMPLEX_PDB_FOLDER_BY_METHOD,
+    BulkRun,
+    _collect_complex_metadata,
+    _complex_pdb_coverage,
+)
 from guild.constants.bulk import (
     BATCH_FOLDER,
     COMBINATIONS_TABLE_KEY,
@@ -863,6 +868,36 @@ class TestCollectComplexMetadata:
 
 
 # ---------------------------------------------------------------------------
+# Coverage — methods that cannot structurally produce a complex PDB
+# ---------------------------------------------------------------------------
+class TestComplexPdbCoverage:
+    """
+    karmadock writes no predicted-pose file this repo can read (its own
+    ``ligand_docking.py`` writes a scores CSV only — see
+    ``karmadock_guild_scoring``), so it is invisible to PoseBusters, PLIP and
+    ProLIF alike. A rows-only output table then has no row for it at all,
+    which reads exactly like "checked, nothing to report" instead of "not
+    applicable" unless something says so up front. These tests pin that the
+    partition is correct and that both analyses actually log it.
+    """
+
+    def test_karmadock_and_nesso_are_unsupported(self):
+        supported, unsupported = _complex_pdb_coverage(
+            [VINA_PREFIX, GNINA_PREFIX, KARMADOCK_PREFIX, NESSO_PREFIX]
+        )
+        assert supported == sorted([VINA_PREFIX, GNINA_PREFIX])
+        assert unsupported == sorted([KARMADOCK_PREFIX, NESSO_PREFIX])
+
+    def test_all_complex_pdb_emitters_are_supported(self):
+        supported, unsupported = _complex_pdb_coverage(list(_COMPLEX_PDB_FOLDER_BY_METHOD))
+        assert set(supported) == set(_COMPLEX_PDB_FOLDER_BY_METHOD)
+        assert unsupported == []
+
+    def test_empty_input_yields_two_empty_lists(self):
+        assert _complex_pdb_coverage([]) == ([], [])
+
+
+# ---------------------------------------------------------------------------
 # BulkRun orchestration
 # ---------------------------------------------------------------------------
 class TestRunPoseValidityAnalysis:
@@ -876,6 +911,25 @@ class TestRunPoseValidityAnalysis:
             use_gpu=False,
             n_workers=1,
         )
+
+    def test_karmadock_coverage_is_logged_not_silent(self, test_input_table, cleanup, caplog):
+        """
+        Requesting karmadock alongside vina must say so up front, rather than
+        letting karmadock simply not appear anywhere in the output.
+        """
+        bulk = BulkRun(
+            input_table=test_input_table,
+            project_name="test-posebusters",
+            methods_to_run=[VINA_PREFIX, KARMADOCK_PREFIX],
+            use_decoys=False,
+            use_known_binders=False,
+            use_gpu=False,
+            n_workers=1,
+        )
+        with caplog.at_level("INFO", logger="guild.bulk"):
+            bulk.run_pose_validity_analysis()
+        assert "PoseBusters coverage" in caplog.text
+        assert KARMADOCK_PREFIX in caplog.text
 
     def test_header_only_tsvs_written_when_nothing_was_produced(self, test_input_table, cleanup):
         """

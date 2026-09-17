@@ -856,6 +856,12 @@ Vina and gnina poses are not energy-minimised, so `internal_energy` can fail bro
 dominates your failures, judge placement only with `pb_intermolecular_valid`, and use
 `pb_failed_checks` to see which checks are firing.
 
+KarmaDock and Nesso write no complex PDB and are therefore invisible to PoseBusters *and* PLIP/
+ProLIF alike — not "checked and passed", structurally not applicable. Requesting either alongside
+a supported method logs a `PoseBusters coverage` / `PLIP/ProLIF coverage` line naming them, since a
+rows-only output table has no row for them either way and silence there is easy to misread as a
+clean bill of health.
+
 By default Guild escalates through a combination's poses until one passes; `pose_scope` can
 be set to `best` (top pose only) or `all` (validate every pose).
 
