@@ -1,14 +1,5 @@
-"""
-Non-physical raw score visibility.
-
-A positive Vina-family energy (or one with an absurd magnitude) is never
-nulled or clamped by default -- the published case-study numbers were
-generated with those values left in the table, so changing them
-retroactively would change results nobody asked to re-derive. These tests
-cover the two things run_guild_scoring does instead: log the count
-(_log_score_physicality_summary) and, only when explicitly asked
-(exclude_non_physical=True), null them out (_null_non_physical_scores).
-"""
+"""Non-physical raw scores are never nulled by default (published case-study
+numbers depend on it); these tests cover logging them and the opt-in null."""
 
 import shutil
 from pathlib import Path
@@ -109,11 +100,7 @@ class TestNullNonPhysicalScores:
         assert raw_scores["vina_score"].iloc[0] == 5.0
 
     def test_disabled_by_default(self):
-        """
-        run_guild_scoring must not null anything unless exclude_non_physical
-        is explicitly passed — the default preserves published case-study
-        numbers exactly as scored.
-        """
+        """Nulling requires explicitly passing exclude_non_physical."""
         import inspect
 
         signature = inspect.signature(BulkRun.run_guild_scoring)

@@ -89,14 +89,8 @@ class TestFingerprints:
 # Matching
 # ---------------------------------------------------------------------------
 class TestMatchDecoysToBinders:
-    """
-    One target, one binder (ibuprofen), three decoy candidates exercising the
-    three ways a decoy can be handled:
-
-    - property-matched AND structurally distinct -> kept
-    - property-matched BUT a close structural analogue -> rejected
-    - not property-matched at all -> rejected regardless of structure
-    """
+    """One binder (ibuprofen), three decoys: property-matched + distinct (kept),
+    property-matched but a close analogue (rejected), and not matched (rejected)."""
 
     def _frames(self):
         binders = pd.DataFrame(

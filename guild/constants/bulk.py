@@ -152,12 +152,9 @@ SCORES_DIRECTION_DICTIONARY = {
     BOLTZ_AFFINITY_PREFIX: "minimum",
 }
 
-# Methods whose raw score is a Vina-family (AutoDock Vina / gnina, native or
-# rescored) binding free-energy estimate in kcal/mol. Nesso's raw score is
-# also "minimum"-direction (lower = stronger) but a different physical
-# quantity entirely (log10(IC50/uM), not a docking energy), so it is
-# deliberately not included here — the plausible range below would not mean
-# anything for it.
+# Vina-family (Vina/gnina, native or rescored): binding free energy in
+# kcal/mol. Nesso is also "minimum"-direction but log10(IC50/uM), a different
+# quantity, so it's deliberately excluded here.
 VINA_FAMILY_SCORE_METHODS = frozenset(
     {
         VINA_PREFIX,
@@ -169,14 +166,11 @@ VINA_FAMILY_SCORE_METHODS = frozenset(
     }
 )
 
-# Plausible range for a Vina-family score, in kcal/mol. Measured against the
-# large Vina case study (403k pairs): 93.9% of scored values fall inside this
-# range; 6.06% are non-negative (non-physical for a binding free energy) and
-# 0.79% exceed 1,000,000 in magnitude (observed maximum: 43,851,078) — almost
-# certainly a numerical or parsing failure rather than a real weak binder.
-# This is a plausibility check, not a hard physical bound: a value outside it
-# is suspicious, not necessarily wrong, and is never clamped or nulled by
-# default (see is_physical_score in guild/tools/scores.py).
+# Plausible kcal/mol range for a Vina-family score, from a 403k-pair Vina
+# case study: 93.9% of values fall inside it (6.06% were non-negative, 0.79%
+# exceeded 1e6 in magnitude — near-certainly numerical/parsing failures). A
+# flag, not a hard bound — never clamped or nulled by default (see
+# is_physical_score in guild/tools/scores.py).
 VINA_FAMILY_PLAUSIBLE_SCORE_RANGE = (-20.0, 0.0)
 
 RANKS_DICTIONARY = {
@@ -207,21 +201,15 @@ RP_SCORES_DICTIONARY = {
     BOLTZ_AFFINITY_PREFIX: BOLTZ_AFFINITY_RP_SCORE,
 }
 
-# Pose-confidence tracks. Their rank percentile is still computed and reported,
-# but they do not vote in GLOBAL_RP_SCORE: diffdock_score is a diffusion
-# confidence and boltz_score an ipTM, and both estimate whether the model's own
-# pose is correct rather than how tightly the ligand binds. Averaging them into
-# an affinity consensus mixes two different quantities. This is the status
-# GNINA_CNN_SCORE already has (see guild/constants/guild.py), applied
-# consistently — pose quality is a flag, the consensus is over scores.
+# Pose-confidence tracks: rank percentile is still computed, but they don't
+# vote in GLOBAL_RP_SCORE (diffdock/boltz measure pose correctness, not
+# binding affinity) — same status GNINA_CNN_SCORE already has.
 CONFIDENCE_ONLY_METHODS = frozenset({DIFFDOCK_PREFIX, BOLTZ_PREFIX})
 
-# Which engine's pose each scoring track judges. The rescore tracks are
-# score-only passes over a pose another engine generated, so they belong to that
-# engine's group rather than to Vina's or gnina's. GLOBAL_RP_SCORE averages
-# within a pose source before averaging across sources, so auto-adding two
-# rescore tracks apiece for DiffDock and Boltz does not hand those two three
-# votes each while Vina, gnina and KarmaDock get one.
+# Which engine's pose each scoring track judges — a rescore track belongs to
+# the engine whose pose it scores, not to Vina/gnina. GLOBAL_RP_SCORE averages
+# within a source before combining sources, so DiffDock/Boltz don't get 3
+# votes each from their auto-added rescores.
 POSE_SOURCE_DICTIONARY = {
     VINA_PREFIX: VINA_PREFIX,
     KARMADOCK_PREFIX: KARMADOCK_PREFIX,
@@ -233,25 +221,17 @@ POSE_SOURCE_DICTIONARY = {
     GNINA_RESCORE_DIFFDOCK_PREFIX: DIFFDOCK_PREFIX,
     VINA_RESCORE_BOLTZ_PREFIX: BOLTZ_PREFIX,
     GNINA_RESCORE_BOLTZ_PREFIX: BOLTZ_PREFIX,
-    # Boltz-2's own affinity head is co-predicted with the same complex the
-    # two rescores above judge, so it joins Boltz's vote as a third estimate
-    # rather than counting as a sixth independent one.
+    # Co-predicted with the same complex the two rescores judge — joins
+    # Boltz's vote as a third estimate, not a sixth independent one.
     BOLTZ_AFFINITY_PREFIX: BOLTZ_PREFIX,
 }
 
-# How GLOBAL_RP_SCORE combines the per-method percentiles. Every mode averages
-# rescore tracks within a pose source first (mean — DiffDock and Boltz each
-# have only two rescores, where mean and median are identical anyway), then
-# combines across sources. POSE_SOURCE_MEDIAN takes the median across sources
-# and is the default: on the three-target benchmark it scored 0.824 AUC
-# against 0.781 for the flat/unweighted mean, because a single aberrant vote
-# (DiffDock scored 0.281 standalone there) drags a mean down without needing
-# to be the majority — the median has no fitted parameters, unlike
-# performance-weighting, and makes no engine-specific judgement, unlike
-# dropping a track outright. POSE_SOURCE is the plain mean across sources,
-# kept for anyone who wants it explicitly. FLAT is the original unweighted
-# mean over every voting track with no pose-source grouping at all, kept so
-# scores produced before that grouping existed stay reproducible.
+# How GLOBAL_RP_SCORE combines per-method percentiles: average rescores into
+# their pose source, then combine sources. POSE_SOURCE_MEDIAN (default) takes
+# the median across sources — 0.824 vs 0.781 AUC for the flat mean on a
+# 3-target benchmark, less swayed by one aberrant vote. POSE_SOURCE is the
+# plain mean; FLAT is the pre-grouping mean over every track, kept for
+# reproducibility.
 AGGREGATION_POSE_SOURCE = "pose_source"
 AGGREGATION_POSE_SOURCE_MEDIAN = "pose_source_median"
 AGGREGATION_FLAT = "flat"

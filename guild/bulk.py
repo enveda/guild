@@ -249,19 +249,8 @@ def _row_flexres_gnina(row):
 
 # Methods that emit `<combination>_complex.pdb`, mapped to its batch
 # sub-folder. karmadock, nesso and the score-only rescore tracks write no
-# complex PDB of their own — which means PoseBusters, PLIP/ProLIF and any
-# native-ligand RMSD analysis all silently cover only the methods listed
-# here. A table that lists methods as rows (posebusters_validity.tsv,
-# plip_interactions.tsv) has no row at all for an unlisted method, which
-# reads exactly like "checked, nothing to report" rather than "not
-# applicable" unless something states the reason up front — see
-# ``_complex_pdb_coverage`` below, which both of those analyses log against
-# their own ``methods_to_analyze`` for this reason. KarmaDock's own docking
-# script writes a scores CSV only (see ``karmadock_guild_scoring`` /
-# ``process_karmadock_files`` in guild/docking/karmadock.py); nothing in this
-# repo defines a predicted-pose file it could combine into a complex PDB, so
-# extending this dict for KarmaDock would mean guessing that external tool's
-# output convention rather than reading it off a verified path.
+# complex PDB of their own, so PoseBusters/PLIP silently skip them — see
+# ``_complex_pdb_coverage`` below, which logs that distinction explicitly.
 _COMPLEX_PDB_FOLDER_BY_METHOD = {
     BOLTZ_PREFIX: BOLTZ_FOLDER,
     VINA_PREFIX: VINA_FOLDER,
@@ -272,15 +261,8 @@ _COMPLEX_PDB_FOLDER_BY_METHOD = {
 
 def _complex_pdb_coverage(methods_to_analyze):
     """
-    Partition requested methods by whether they can structurally produce a
-    complex PDB, so a caller can log the difference instead of letting an
-    unsupported method disappear from a rows-only output table.
-
-    :param methods_to_analyze: Method prefixes requested for a
-        complex-PDB-based analysis (PoseBusters, PLIP/ProLIF).
-    :return: ``(supported, unsupported)`` — two sorted lists of method
-        prefixes from ``methods_to_analyze``. ``unsupported`` methods (e.g.
-        karmadock, nesso) are excluded by design, not by failure.
+    Split methods into (supported, unsupported) by whether each can produce a
+    complex PDB. Unsupported means excluded by design, not by failure.
     """
     supported = sorted(m for m in methods_to_analyze if m in _COMPLEX_PDB_FOLDER_BY_METHOD)
     unsupported = sorted(m for m in methods_to_analyze if m not in _COMPLEX_PDB_FOLDER_BY_METHOD)
@@ -494,12 +476,8 @@ class BulkRun:
             and GNINA_RESCORE_BOLTZ_PREFIX not in self.methods_to_run
         ):
             self.methods_to_run = list(self.methods_to_run) + [GNINA_RESCORE_BOLTZ_PREFIX]
-        # boltz_affinity is not a docking method — the value is already parsed
-        # by boltz_guild_scoring alongside boltz_score, so this needs no
-        # docking step of its own (method_runners in run_docking has no entry
-        # for it, so it is a no-op there, same as the rescore tracks above).
-        # It only needs to be listed so compute_rank_percentile_scores ranks
-        # and votes it in — see BOLTZ_AFFINITY_PREFIX in guild/constants/bulk.py.
+        # boltz_affinity isn't a docking method (no docking step of its own,
+        # like the rescore tracks above) — listed only so scoring ranks/votes it.
         if (
             BOLTZ_PREFIX in self.methods_to_run
             and BOLTZ_AFFINITY_PREFIX not in self.methods_to_run
@@ -1941,15 +1919,9 @@ class BulkRun:
 
     def _log_score_physicality_summary(self, raw_scores_df):
         """
-        Log how many raw scores per method fall outside a plausible range.
-
-        A non-physical value (e.g. a positive Vina-family energy, or one with
-        an absurd magnitude — see ``is_physical_score``) is never nulled or
-        clamped here: the case-study numbers were published against these
-        tables as they stand, and silently changing stored values would
-        change them retroactively. This only makes the phenomenon visible in
-        the logs, the same way a failed docking attempt already is, so the
-        next person filtering a score column does not have to rediscover it.
+        Log per-method counts of non-physical raw scores (see
+        ``is_physical_score``). Never nulls or clamps — values stay as scored
+        so published numbers remain reproducible; this only logs them.
         """
         for method in self.methods_to_run:
             raw_score_column = f"{method}_score"
@@ -1972,12 +1944,9 @@ class BulkRun:
 
     def _null_non_physical_scores(self, raw_scores_df):
         """
-        Return a copy of ``raw_scores_df`` with non-physical raw scores nulled.
-
-        Opt-in only, via ``run_guild_scoring(exclude_non_physical=True)`` — a
-        nulled value then ranks exactly like a failed docking attempt (see
-        ``denominator="attempted"`` in ``compute_rank_percentile_scores``)
-        rather than voting in the consensus at face value.
+        Return a copy with non-physical raw scores nulled (opt-in, via
+        ``run_guild_scoring(exclude_non_physical=True)``) so they rank like a
+        failed docking attempt instead of voting at face value.
         """
         raw_scores_df = raw_scores_df.copy()
         for method in self.methods_to_run:
@@ -2000,13 +1969,9 @@ class BulkRun:
         4. Compute rank percentile scores from global ranks
 
         :param n_processes: Number of processes to use for multiprocessing.
-        :param exclude_non_physical: When True, null out raw scores that fail
-            ``is_physical_score`` before ranking (treating them the same as a
-            failed docking attempt) instead of only logging their count.
-            Default False — the published case-study numbers were generated
-            with non-physical values left in the table, so nulling them by
-            default would change those results retroactively for anyone
-            reproducing them. Opt in for a NEW run only.
+        :param exclude_non_physical: Null out raw scores failing
+            ``is_physical_score`` before ranking, instead of only logging
+            them. Default False to keep published numbers reproducible.
         """
 
         if n_processes is None:
@@ -2450,14 +2415,9 @@ class BulkRun:
         :param n_processes: Guild-level workers. Defaults to ``self.n_workers``
             (the ``--n-workers`` / ``N_WORKERS`` setting), matching how the Vina
             and gnina docking blocks size their pools.
-        :param expect_existing_scores: When True (the default), a missing
-            ``guild_scores.txt`` at merge time raises instead of merely
-            warning — this step normally runs after scoring, in the same or a
-            later invocation over the same project, so its absence means the
-            two steps resolved different project folders or scoring never
-            ran. Pass False for a genuine ``--posebusters-only`` run over a
-            tree where scoring hasn't happened yet, which is the one case
-            where the absence is expected rather than a bug.
+        :param expect_existing_scores: When True (default), a missing
+            ``guild_scores.txt`` at merge time raises instead of warning —
+            pass False for a ``--posebusters-only`` run before scoring exists.
         :return: The pose-validity DataFrame (empty, never None, when there was
             nothing to validate).
         """
@@ -2593,19 +2553,12 @@ class BulkRun:
         was *checked* and could not be evaluated, which fails closed to False in
         the validity table itself.
 
-        :param required: When True, a missing scores table is a hard error
-            instead of a warning-and-skip. A run that scored first and then
-            validated poses in the same pipeline invocation should always find
-            a scores table; if it doesn't, the two steps resolved different
-            project folders (or scoring never actually ran) and the merge
-            would otherwise silently no-op, which is exactly how this bug
-            reached a reviewer response undetected once before: a fragile
-            hand-rolled re-invocation of ``BulkRun`` wrote a correct, non-empty
-            ``posebusters_validity.tsv`` while ``guild_scores.txt`` quietly
-            kept zero ``pb_`` columns. A genuine ``--posebusters-only`` re-run
-            over a tree that never had scoring done is the one case where the
-            absence is expected, so callers on that path should pass
-            ``required=False`` (the default).
+        :param required: When True, a missing scores table raises instead of
+            warning-and-skipping — scoring and validation normally run
+            together, so its absence means mismatched project folders or a
+            skipped scoring step (this is how the bug once reached a reviewer
+            response undetected). False only for a genuine
+            ``--posebusters-only`` run before scoring exists.
         """
         scores_df = getattr(self, "rp_scores_df", None)
         if scores_df is None or scores_df.empty:
@@ -2624,11 +2577,9 @@ class BulkRun:
             scores_df = pd.read_csv(self.rp_scores_path, sep="\t")
 
         # One row per (combination, method): did any validated pose pass, and
-        # which was the first that did. groupby drops rows whose key is NaN in
-        # EITHER column by default, so a combination/method identity that
-        # failed to populate degrades to "silently excluded from valid_any"
-        # rather than an error — which is exactly why the invariant below
-        # exists.
+        # which was the first that did. groupby silently drops rows with a
+        # NaN key, so a bad combination/method value disappears rather than
+        # erroring — hence the invariant check below.
         grouped = self.posebusters_df.groupby([PB_COMBINATION_ID, PB_DOCKING_METHOD])
         valid_any = grouped[PB_VALID].any().unstack(PB_DOCKING_METHOD)
         first_valid = (
@@ -2652,11 +2603,9 @@ class BulkRun:
             columns_added.extend((valid_column, pose_column))
 
         if not self.posebusters_df.empty and not columns_added:
-            # Every PoseBusters row failed to group by (combination_id,
-            # docking_method) — most likely one of those two columns is null
-            # throughout. A non-empty validity table that adds zero columns is
-            # never a legitimate outcome, so this must raise rather than
-            # return having quietly done nothing.
+            # Non-empty validity table but zero columns added means every row
+            # failed to group (likely a null id/method column) — raise rather
+            # than quietly no-op.
             raise RuntimeError(
                 f"{len(self.posebusters_df)} PoseBusters rows were validated "
                 "but the merge added zero columns to guild_scores.txt — check "

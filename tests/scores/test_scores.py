@@ -28,12 +28,7 @@ from guild.tools.scores import compute_rank_percentile_scores, is_physical_score
 # Helpers
 # ---------------------------------------------------------------------------
 def _make_df(protein_ids, vina_scores, karmadock_scores=None, **extra_scores):
-    """Build a minimal DataFrame for testing.
-
-    ``extra_scores`` accepts any other ``<method>_scores=[...]`` keyword, so
-    tests exercising DiffDock/Boltz confidences and their rescore tracks don't
-    need a bespoke frame builder.
-    """
+    """Build a minimal DataFrame; extra_scores accepts any <method>_scores=[...] kwarg."""
     data = {
         PROTEIN_CONF_ID: protein_ids,
         "vina_score": vina_scores,
@@ -568,9 +563,7 @@ class TestGlobalScoreAggregation:
         assert GLOBAL_RP_SCORE not in result.columns
 
     def test_diffdock_rescores_count_once_not_flat(self):
-        """DiffDock's two auto-added rescores average together first, so the
-        pose source counts once against vina, rather than the flat mean of three
-        columns handing DiffDock two of three votes."""
+        """DiffDock's two rescores average to one pose-source vote, not two."""
         df = _make_df(
             protein_ids=["P1"] * 3,
             vina_scores=[-10.0, -8.0, -6.0],
@@ -633,8 +626,7 @@ class TestGlobalScoreAggregation:
         np.testing.assert_allclose(
             default[GLOBAL_RP_SCORE].values, explicit_median[GLOBAL_RP_SCORE].values
         )
-        # With 3 independent sources disagreeing, median and mean actually differ,
-        # so this also confirms the default really is the median, not the mean.
+        # Confirms default is the median: with 3 sources disagreeing, mean would differ.
         assert not np.allclose(
             default[GLOBAL_RP_SCORE].values, explicit_mean[GLOBAL_RP_SCORE].values
         )
@@ -647,8 +639,7 @@ class TestGlobalScoreAggregation:
             compute_rank_percentile_scores(df, methods=["vina"], aggregation="weighted")
 
     def test_one_rescore_nan_still_votes_via_its_sibling(self):
-        """A NaN in one rescore track for a row leaves that pose source voting
-        through the other rescore, rather than dropping the whole source."""
+        """A NaN in one rescore track still lets the pose source vote via its sibling."""
         df = _make_df(
             protein_ids=["P1"] * 3,
             vina_scores=[-10.0, -8.0, -6.0],
@@ -671,8 +662,7 @@ class TestGlobalScoreAggregation:
         assert result[GLOBAL_RP_SCORE].iloc[0] == pytest.approx(expected_row0)
 
     def test_pose_source_with_every_track_nan_drops_out_of_outer_mean(self):
-        """If a whole pose source is missing for a row, the outer mean is taken
-        only over the sources that did score — not imputed with a fallback."""
+        """A wholly-missing pose source is excluded from the outer mean, not imputed."""
         df = _make_df(
             protein_ids=["P1"] * 3,
             vina_scores=[-10.0, -8.0, -6.0],
@@ -701,9 +691,8 @@ class TestMedianAggregation:
     a mean, so one aberrant pose source cannot drag the consensus as far."""
 
     def test_median_of_five_pose_source_votes_resists_one_aberrant_vote(self):
-        """Hand-computed case: 4 sources agree row 0 is the best binder, one
-        (diffdock, via its two rescore tracks) calls it the worst. The mean
-        gets dragged toward the outlier; the median ignores it."""
+        """4 sources agree row 0 is best, 1 (diffdock) calls it worst; the mean
+        gets dragged toward the outlier, the median ignores it."""
         df = _make_df(
             protein_ids=["P1"] * 3,
             vina_scores=[-10.0, -8.0, -6.0],  # row 0 best -> rp 1/3
@@ -738,8 +727,7 @@ class TestMedianAggregation:
         assert median_result[GLOBAL_RP_SCORE].iloc[0] < mean_result[GLOBAL_RP_SCORE].iloc[0]
 
     def test_missing_pose_source_takes_median_of_the_survivors(self):
-        """A row with only 3 of 5 pose sources scored takes the median of
-        those 3 — the 2 missing sources are excluded, not imputed as 0 or 1."""
+        """Median of 3 surviving pose sources; the 2 missing ones are excluded, not imputed."""
         df = _make_df(
             protein_ids=["P1"] * 3,
             vina_scores=[-10.0, -8.0, -6.0],  # row 0 -> rp 1/3
@@ -799,8 +787,7 @@ class TestMedianAggregation:
         np.testing.assert_allclose(result[GLOBAL_RP_SCORE].values, expected_mean.values)
 
     def test_flat_mode_unaffected_by_the_new_default(self):
-        """aggregation='flat' still reproduces the original nine-way-style
-        unweighted mean over every voting track, regardless of the default change."""
+        """aggregation='flat' still reproduces the unweighted mean over every voting track."""
         df = _make_df(
             protein_ids=["P1"] * 3,
             vina_scores=[-10.0, -8.0, -6.0],
@@ -819,9 +806,8 @@ class TestMedianAggregation:
 # 13. Boltz-2's affinity head votes as part of Boltz's pose source
 # ---------------------------------------------------------------------------
 class TestBoltzAffinityVote:
-    """boltz_affinity_score is a genuine affinity estimate (unlike boltz_score,
-    an ipTM confidence), so it is ranked and voted -- but it joins Boltz's
-    existing vote as a third estimate rather than counting as its own."""
+    """boltz_affinity_score is ranked and voted, joining Boltz's existing
+    vote as a third estimate rather than counting as its own."""
 
     def test_boltz_affinity_is_ranked(self):
         """rp_boltz_affinity_score / rank_boltz_affinity_score get produced."""
@@ -849,9 +835,7 @@ class TestBoltzAffinityVote:
         assert result.loc[2, rp_col] == pytest.approx(1.0)  # -5.0, least negative
 
     def test_boltz_affinity_joins_boltz_group_instead_of_voting_alone(self):
-        """Vina and Boltz's group (its two rescores plus the affinity head)
-        must combine as exactly two pose-source votes, not four independent
-        ones -- constructed so the two give a different global score."""
+        """Vina and Boltz's group must combine as two pose-source votes, not four independent ones."""
         df = _make_df(
             protein_ids=["P1"] * 3,
             vina_scores=[-10.0, -8.0, -6.0],
@@ -872,13 +856,11 @@ class TestBoltzAffinityVote:
         grb_rp = result[RP_SCORES_DICTIONARY["gnina_rescore_boltz"]]
         ba_rp = result[RP_SCORES_DICTIONARY["boltz_affinity"]]
 
-        # Actual contract: vina votes once, Boltz's 3 tracks average to one
-        # more vote -- 2 votes total (median of 2 = mean of 2).
+        # vina votes once, Boltz's 3 tracks average to one more vote (2 total).
         boltz_group = (vrb_rp + grb_rp + ba_rp) / 3
         expected_two_votes = (vina_rp + boltz_group) / 2
 
-        # What it would be if boltz_affinity voted independently alongside
-        # the other 3 columns, flat, with no pose-source grouping at all.
+        # What it would be if boltz_affinity voted independently, flat, ungrouped.
         expected_four_independent_votes = (vina_rp + vrb_rp + grb_rp + ba_rp) / 4
 
         np.testing.assert_allclose(result[GLOBAL_RP_SCORE].values, expected_two_votes.values)
@@ -887,9 +869,8 @@ class TestBoltzAffinityVote:
         )
 
     def test_missing_affinity_for_one_row_leaves_boltz_vote_intact(self):
-        """A row with no boltz_affinity_score still gets a Boltz vote, taken
-        from its two rescore siblings -- the missing value is excluded, not
-        imputed as 0 or as the group's worst case."""
+        """A missing boltz_affinity_score is excluded, not imputed; the Boltz
+        vote still comes from its two rescore siblings."""
         df = _make_df(
             protein_ids=["P1"] * 3,
             vina_scores=[-10.0, -8.0, -6.0],
@@ -946,11 +927,7 @@ class TestIsPhysicalScore:
         assert is_physical_score(1_000_000.0, "karmadock") is True
 
     def test_nesso_is_not_checked_against_the_vina_range(self):
-        """
-        Nesso shares vina's 'minimum' direction but is a different physical
-        quantity (log10(IC50/uM), not a docking energy), so the Vina-family
-        plausible range says nothing about it.
-        """
+        """Nesso is log10(IC50/uM), not a docking energy, so the vina range doesn't apply."""
         assert is_physical_score(5.0, "nesso") is True
         assert is_physical_score(-43_851_078, "nesso") is True
 
@@ -964,21 +941,9 @@ class TestIsPhysicalScore:
 # 15. Regression: the grouping column (and row order) must survive
 # ---------------------------------------------------------------------------
 class TestGroupingColumnSurvives:
-    """compute_rank_percentile_scores used to group with
-    ``groupby(protein_col, group_keys=False).apply(...)``, relying on the
-    grouping column being passed through to the callable and back out. That
-    stopped being the default on pandas 2.2+ and is gone on pandas 3.x, so
-    protein_col silently disappeared from the output. Fixed by computing
-    everything as groupby transforms over the whole frame instead of a
-    per-group ``.apply()``, which keeps every column and every row's
-    original position by construction.
-
-    The input here interleaves the two proteins in the opposite order to
-    their alphabetical sort (P2's row comes first), so any fix that
-    re-attaches columns by *position* rather than by index/label would pass
-    a naive column-presence check while silently scrambling ligand_id and
-    the scores against the wrong rows -- these tests would catch that.
-    """
+    """Regression: groupby(...).apply(...) used to drop protein_col on
+    pandas 2.2+/3.x. Rows are interleaved out of alphabetical order here so a
+    fix that re-attaches columns by position, not by index, would still fail."""
 
     def _interleaved_df(self):
         return pd.DataFrame(
@@ -1000,8 +965,7 @@ class TestGroupingColumnSurvives:
         assert len(result) == len(df)
 
     def test_unrelated_column_and_protein_col_stay_aligned_to_their_own_row(self):
-        """Not just present -- still attached to the right row, in the
-        original row order, not the group-sorted order."""
+        """Still attached to the right row, in original order, not group-sorted order."""
         df = self._interleaved_df()
         result = compute_rank_percentile_scores(df, methods=["vina"])
 
@@ -1009,8 +973,7 @@ class TestGroupingColumnSurvives:
         assert result[PROTEIN_CONF_ID].tolist() == df[PROTEIN_CONF_ID].tolist()
 
     def test_computed_scores_stay_aligned_to_their_own_row(self):
-        """Belt and braces: the computed rp_score itself must land on the
-        row it was computed for, not get shuffled by a positional re-attach."""
+        """The computed rp_score must land on its own row, not get shuffled by a positional re-attach."""
         df = self._interleaved_df()
         result = compute_rank_percentile_scores(df, methods=["vina"])
 

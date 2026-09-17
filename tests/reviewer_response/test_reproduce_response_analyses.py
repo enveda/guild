@@ -1,13 +1,8 @@
 """
-Tests for notebooks/analysis/reviewer_response/reproduce_response_analyses.py's
-direction_aware_auc, the helper behind r2_5_training_overlap. Getting a
-track's direction backwards silently inverts its AUC (1 - auc instead of
-auc), which would invert R2-5's argument, so this is worth a real test rather
-than only eyeballing the printed table.
+Tests for direction_aware_auc (reproduce_response_analyses.py), the helper behind
+r2_5_training_overlap. Getting a track's direction backwards silently inverts its AUC.
 
-Imported via sys.path, not a package -- this script is meant to run
-standalone from notebooks/analysis/reviewer_response/, same as its sibling
-scripts, so it has no __init__.py to import through normally.
+Imported via sys.path since the script runs standalone, with no __init__.py.
 """
 
 import sys
@@ -50,14 +45,9 @@ class TestDirectionAwareAuc:
         assert direction_aware_auc(actives, decoys, "minimum") == pytest.approx(0.0)
 
     def test_matches_the_verified_boltz_affinity_and_karmadock_rows(self):
-        # Concrete regression values from the 3-target rerun's 8GDC target
-        # (see HISTORY.rst / the reviewer_response README for the full
-        # verification): boltz_affinity_score is "minimum" and matches a
-        # hand-computed reference table directly; karmadock_score is
-        # "maximum" and needed the 1 - auc correction to match sklearn's
-        # roc_auc_score rather than that same reference table, which had it
-        # backwards. Both are pinned here so a future change to this helper
-        # cannot silently reintroduce that sign error.
+        # Regression values from the 3-target rerun's 8GDC target (see HISTORY.rst):
+        # karmadock_score is "maximum" and needs the 1 - auc correction, pinned here
+        # so this helper can't silently reintroduce that sign error.
         boltz_affinity_active = [-2.844814, -2.536119]
         boltz_affinity_decoy = [-2.1, -1.8, -0.9, -0.5, -0.2]
         assert direction_aware_auc(

@@ -324,14 +324,10 @@ def resolve_pipeline_steps(args: argparse.Namespace) -> tuple[bool, bool, bool]:
     """
     Decide which pipeline steps run for this invocation.
 
-    Each "-only" flag means exactly that: skip docking + scoring and run only
-    its own analysis step. Passing more than one "-only" flag together
-    re-runs each of those steps over an existing data/<project>/ tree without
-    re-docking; passing neither runs the full pipeline, with each step's own
-    on-by-default/--no-* flag deciding whether it runs.
+    Each "-only" flag skips docking + scoring and runs only its own step;
+    passing several together re-runs each over an existing tree; passing
+    none runs the full pipeline per each step's --no-* flag.
 
-    :param args: Parsed CLI namespace (or anything with the same attributes —
-        a plain object works fine for testing this in isolation).
     :returns: ``(skip_docking_and_scoring, run_plip, run_posebusters)``.
     """
     skip_docking_and_scoring = args.plip_only or args.posebusters_only
@@ -503,16 +499,12 @@ def main() -> None:
         bulk.run_interactions_analysis()
         print(f"PLIP time:    {time.time() - t0:.1f}s")
 
-    # PoseBusters pose-validity analysis: on by default, same contract as
-    # PLIP above (data/<project>/posebusters_validity.tsv and
-    # posebusters_full_report.tsv always exist, header-only when nothing was
-    # produced). --no-posebusters skips it; --posebusters-only runs ONLY this
-    # step (and --plip-only alone skips it).
+    # PoseBusters pose-validity analysis: on by default, same contract as PLIP
+    # (posebusters_validity.tsv / posebusters_full_report.tsv always exist).
+    # --no-posebusters skips it; --posebusters-only runs ONLY this step.
     if run_posebusters:
         t0 = time.time()
-        # --posebusters-only is the one case where a scores table might
-        # legitimately not exist yet (scoring skipped entirely); every other
-        # invocation ran scoring first, so a missing table there is a bug.
+        # Missing scores table is only legitimate for --posebusters-only.
         bulk.run_pose_validity_analysis(
             config=args.posebusters_config,
             expect_existing_scores=not args.posebusters_only,

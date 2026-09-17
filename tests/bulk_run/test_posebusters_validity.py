@@ -871,15 +871,8 @@ class TestCollectComplexMetadata:
 # Coverage — methods that cannot structurally produce a complex PDB
 # ---------------------------------------------------------------------------
 class TestComplexPdbCoverage:
-    """
-    karmadock writes no predicted-pose file this repo can read (its own
-    ``ligand_docking.py`` writes a scores CSV only — see
-    ``karmadock_guild_scoring``), so it is invisible to PoseBusters, PLIP and
-    ProLIF alike. A rows-only output table then has no row for it at all,
-    which reads exactly like "checked, nothing to report" instead of "not
-    applicable" unless something says so up front. These tests pin that the
-    partition is correct and that both analyses actually log it.
-    """
+    """karmadock writes no complex PDB this repo can read, so it must be
+    partitioned into "unsupported" rather than silently missing rows."""
 
     def test_karmadock_and_nesso_are_unsupported(self):
         supported, unsupported = _complex_pdb_coverage(
@@ -913,10 +906,7 @@ class TestRunPoseValidityAnalysis:
         )
 
     def test_karmadock_coverage_is_logged_not_silent(self, test_input_table, cleanup, caplog):
-        """
-        Requesting karmadock alongside vina must say so up front, rather than
-        letting karmadock simply not appear anywhere in the output.
-        """
+        """Requesting karmadock alongside vina must log its coverage status."""
         bulk = BulkRun(
             input_table=test_input_table,
             project_name="test-posebusters",
@@ -954,9 +944,7 @@ class TestRunPoseValidityAnalysis:
 
     def test_rows_written_and_attribute_set(self, test_input_table, cleanup):
         bulk = self._bulk(test_input_table)
-        # Scoring runs before pose validity in the real pipeline, so
-        # rp_scores_df is already in memory by the time this is called —
-        # expect_existing_scores defaults to True and would otherwise raise.
+        # Scoring runs first in the real pipeline, so rp_scores_df is already set.
         bulk.rp_scores_df = pd.DataFrame({BULK_COMBINATION_ID: [COMBO_ID], "vina_score": [-9.0]})
         fake_summary = pd.DataFrame(
             [
@@ -1225,14 +1213,8 @@ class TestScoresMerge:
         bulk._merge_posebusters_into_scores()  # must not raise
 
     def test_required_missing_scores_table_raises(self, test_input_table, cleanup):
-        """
-        A normal (non --posebusters-only) run expects scoring to have already
-        happened. A missing table there means the two steps resolved
-        different project folders (or scoring never ran) — exactly the bug
-        that once let a validated 1,930-pose run reach a reviewer response
-        with zero pb_ columns in guild_scores.txt and only a warning nobody
-        saw. This has to be loud, not a silent no-op.
-        """
+        """A missing scores table when merging is required must raise loudly,
+        not silently produce zero pb_ columns as it once did."""
         bulk = self._bulk_with_scores(test_input_table, pd.DataFrame())
         bulk.posebusters_df = self._summary(
             [{PB_COMBINATION_ID: "c1", PB_DOCKING_METHOD: VINA_PREFIX, PB_POSE: 1, PB_VALID: True}]
@@ -1243,13 +1225,8 @@ class TestScoresMerge:
             bulk._merge_posebusters_into_scores(required=True)
 
     def test_nonempty_validity_adding_zero_columns_raises(self, test_input_table, cleanup):
-        """
-        A non-empty posebusters_df that produces zero merged columns is never
-        legitimate — groupby silently drops rows whose key is NaN in either
-        grouping column, so a data-quality bug upstream (a null
-        combination_id or docking_method) must not degrade to "merge did
-        nothing" the way the missing-scores-table case does.
-        """
+        """A null combination_id/docking_method makes groupby drop all rows;
+        that must raise, not silently look like "merge did nothing"."""
         scores = pd.DataFrame({BULK_COMBINATION_ID: ["c1"], "vina_score": [-9.0]})
         bulk = self._bulk_with_scores(test_input_table, scores)
         bulk.posebusters_df = self._summary(

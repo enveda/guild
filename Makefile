@@ -96,15 +96,14 @@ _FLEXRES_GNINA_FLAG = $(if $(FLEXRES_GNINA),--flexres-gnina $(FLEXRES_GNINA),)
 NO_POSEBUSTERS ?=
 _NO_POSEBUSTERS_FLAG = $(if $(NO_POSEBUSTERS),--no-posebusters,)
 
-# PoseBusters config preset. Empty (default) → omit the flag ('dock' default
-# applies). Set POSEBUSTERS_CONFIG=dock_fast to skip the internal_energy
-# check on large/flexible ligand sets.
+# PoseBusters config preset. Empty uses the 'dock' default; set
+# POSEBUSTERS_CONFIG=dock_fast to skip the internal_energy check on
+# large/flexible ligand sets.
 POSEBUSTERS_CONFIG ?=
 _POSEBUSTERS_CONFIG_FLAG = $(if $(POSEBUSTERS_CONFIG),--posebusters-config $(POSEBUSTERS_CONFIG),)
 
 # Null out non-physical raw scores (e.g. a positive Vina-family energy)
-# before ranking. Empty (default) leaves them in the table as scored, only
-# logged. Set to 1 to opt a NEW run into nulling them.
+# before ranking. Empty (default) only logs them; set to 1 to opt in.
 EXCLUDE_NON_PHYSICAL ?=
 _EXCLUDE_NON_PHYSICAL_FLAG = $(if $(EXCLUDE_NON_PHYSICAL),--exclude-non-physical,)
 

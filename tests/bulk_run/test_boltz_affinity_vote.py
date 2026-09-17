@@ -1,12 +1,5 @@
-"""
-Tests that ``boltz_affinity`` (Boltz-2's own affinity head) is auto-added to
-``methods_to_run`` whenever ``boltz`` is requested, and only then -- mirroring
-the ``vina_rescore_*`` / ``gnina_rescore_*`` auto-additions in
-test_vina_rescore_split.py / test_gnina_rescore_split.py. It needs no docking
-step of its own: the value is already parsed by boltz_guild_scoring alongside
-boltz_score, so it has no entry in run_docking's method_runners map and is a
-no-op there, the same way the rescore tracks are.
-"""
+"""boltz_affinity should be auto-added to methods_to_run whenever boltz is
+requested, mirroring the vina_rescore_*/gnina_rescore_* auto-additions."""
 
 import shutil
 from pathlib import Path
@@ -80,9 +73,8 @@ def test_boltz_affinity_not_added_without_boltz(test_input_table, cleanup):
 
 
 def test_boltz_affinity_has_no_docking_runner(test_input_table, cleanup):
-    """boltz_affinity must be absent from run_docking's method_runners map --
-    it rides along with boltz_guild_scoring and needs no docking step, the
-    same way vina_rescore_* is a no-op during docking."""
+    """boltz_affinity needs no docking step, so it must be absent from
+    run_docking's method_runners map."""
     bulk = BulkRun(
         input_table=test_input_table,
         project_name="test-boltz-affinity-vote",
@@ -101,10 +93,8 @@ def test_boltz_affinity_has_no_docking_runner(test_input_table, cleanup):
 
 
 def test_boltz_affinity_registered_in_ranking_dictionaries():
-    """available_methods_preparation indexes RANKS_DICTIONARY and
-    SCORES_TO_USE_DICTIONARY by every entry in methods_to_run -- since
-    boltz_affinity is now auto-added there, both must have an entry for it
-    or a real bulk run raises KeyError the first time boltz is requested."""
+    """Both dictionaries must have an entry for boltz_affinity, or a real
+    bulk run raises KeyError."""
     assert BOLTZ_AFFINITY_PREFIX in RANKS_DICTIONARY
     assert BOLTZ_AFFINITY_PREFIX in RP_SCORES_DICTIONARY
     assert BOLTZ_AFFINITY_PREFIX in SCORES_TO_USE_DICTIONARY

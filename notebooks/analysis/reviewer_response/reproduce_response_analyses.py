@@ -156,13 +156,9 @@ def analysis_runtime(data: Path, out: Path) -> None:
 
 
 # ═══════════════════════════════════════════════ a2: aggregation rules
-# The five pose-source votes, per guild commit 20b3c50: confidences do not
-# vote, and each engine's rescore tracks are averaged before the cross-engine
-# combination -- which is itself now a MEDIAN by default (0e7c959), not the
-# mean this analysis compares it against below. Since 0d36671,
-# boltz_affinity_score also joins Boltz's pose-source vote in production;
-# it is left out of POSE_SOURCE_VOTES here so every rule below (current
-# default included) is compared against the same fixed five-vote structure.
+# The five pose-source votes (20b3c50): confidences don't vote, rescore tracks
+# are averaged within each engine. boltz_affinity_score joins Boltz's vote in
+# production (0d36671) but is left out here for a fixed five-vote comparison.
 POSE_SOURCE_VOTES = {
     "vina": ["rp_vina_score"],
     "gnina": ["rp_gnina_score"],
@@ -346,9 +342,7 @@ def analysis_size_control(data: Path, out: Path) -> None:
     print(f"      matched window: {low:.0f}-{high:.0f} heavy atoms  "
           f"({len(act_m)} actives, {len(dec_m)} decoys)")
 
-    # `higher_better` flips the sign convention: for heavy-atom count, a LARGER
-    # value marks the actives, so reporting it on the lower-is-better scale would
-    # print its complement and read as if size were anti-predictive.
+    # higher_better flips the sign for heavy-atom count (larger = active).
     tracks = [("rp_vina_score", "Vina", False), ("rp_gnina_score", "GNINA", False),
               ("rp_karmadock_score", "KarmaDock", False),
               ("rp_diffdock_score", "DiffDock conf", False),
@@ -382,10 +376,8 @@ TARGET_RELEASE_DATES = {
     "8gdc": ("2023-03-03", "2024-01-10", "Cryo-EM structure of the prostaglandin E2 receptor 3"),
 }
 
-# Raw score column -> its SCORES_DIRECTION_DICTIONARY prefix. Deliberately raw
-# scores, not rp_* -- see the module docstring on this analysis for why pooled
-# rank-percentile (Table S1) and within-target raw (this analysis) are
-# different questions that can legitimately disagree.
+# Raw score column -> its SCORES_DIRECTION_DICTIONARY prefix (deliberately raw,
+# not rp_* -- see analysis_training_overlap's docstring).
 R2_5_TRACKS = {
     "boltz_affinity_score": "boltz_affinity",
     "boltz_score": "boltz",
@@ -396,23 +388,9 @@ R2_5_TRACKS = {
 
 
 def direction_aware_auc(active_values, decoy_values, direction: str) -> float:
-    """Binder-vs-decoy AUC for one column, respecting its scoring direction.
-
-    ``auc_lower_better`` assumes lower = better. A "maximum" direction
-    (higher = better, e.g. DiffDock confidence, Boltz-2 ipTM, KarmaDock) is
-    corrected by taking ``1 - auc`` rather than by negating the input Series
-    -- the two are mathematically equivalent (ties survive negation
-    unchanged), but this avoids a silent dtype surprise from negating an
-    object-dtype or all-NaN column.
-
-    :param active_values: Raw scores for the active/binder class.
-    :param decoy_values: Raw scores for the decoy class.
-    :param direction: ``"minimum"`` or ``"maximum"``, as in
-        ``guild.constants.bulk.SCORES_DIRECTION_DICTIONARY``.
-    :return: AUC on the 0.5-is-random, 1.0-is-perfect scale, oriented so a
-        track that genuinely discriminates in its own stated direction scores
-        high regardless of whether that direction is minimum or maximum.
-    """
+    """Binder-vs-decoy AUC respecting a track's direction (from
+    SCORES_DIRECTION_DICTIONARY): auc_lower_better assumes lower = better,
+    so "maximum" tracks get 1 - auc instead."""
     auc = auc_lower_better(active_values, decoy_values)
     return 1 - auc if direction == "maximum" else auc
 
@@ -435,37 +413,20 @@ def _verify_release_dates() -> None:
 
 
 def analysis_training_overlap(data: Path, out: Path, verify_dates: bool = False) -> None:
-    """R2-5: within-target AUC by PDB release date -- is Boltz-2's affinity
-    head explained by training-set overlap?
+    """R2-5: within-target AUC by PDB release date -- does Boltz-2's affinity
+    head track training-set overlap?
 
-    Deliberately WITHIN-target and on RAW scores, unlike Table S1 (pooled,
-    rank-percentile). The two answer different questions: S1 asks how well a
-    track discriminates once every target is put on the same 0-1 scale;
-    this asks whether a track's discrimination *tracks the release-date
-    ordering*, which a pooled or rank-normalised number would wash out. A
-    pooled raw-score AUC is printed alongside for context, and it disagrees
-    with S1 (0.970 vs. 0.985 for Boltz-2 affinity here; 0.736 vs. 0.788 for
-    Vina) -- expected, not a bug, and not reconciled by switching either
-    number to the other's method.
+    Deliberately WITHIN-target and RAW-score, unlike Table S1 (pooled,
+    rank-percentile) -- S1 asks how well a track discriminates once every
+    target is on the same scale, this asks whether discrimination tracks
+    release-date ordering, which pooling/normalising would wash out. The two
+    can legitimately disagree (a pooled raw-score AUC is printed for context).
+    No ligand-level training-set audit (PDBBind/ECFP4) is attempted -- R2-5's
+    argument rests on the release-date contrast and scoping, not on
+    enumerating what Boltz-2 was trained on.
 
-    No ligand-level training-set audit is attempted here (no PDBBind overlap,
-    no ECFP4 similarity to a training set) -- the argument in R2-5 rests on
-    the release-date contrast and the scoping argument (any cutoff admitting
-    the newest target admits the other two), not on enumerating what Boltz-2
-    was trained on. That would be a different, unbuilt analysis; see the
-    commit message for why it stays unbuilt here.
-
-    Direction is read from SCORES_DIRECTION_DICTIONARY, not assumed: three of
-    the five tracks here (diffdock, boltz, karmadock) are "maximum" and need
-    the auc_lower_better result flipped (1 - auc), not diffdock alone.
-    boltz_affinity_score, diffdock_score and vina_score verify exactly against
-    an earlier hand-computed reference table for this analysis; that same
-    table had boltz_score and karmadock_score as the complement (1 - auc) of
-    what direction-correct scoring gives here, cross-checked independently
-    against sklearn.roc_auc_score. That looks like a sign error made while
-    computing that reference by hand, not a property of this analysis --
-    boltz_affinity_score (the only track R2-5's argument actually rests on)
-    is unaffected either way, since it verifies exactly under both readings.
+    Direction is read from SCORES_DIRECTION_DICTIONARY: diffdock, boltz and
+    karmadock are all "maximum" and need the 1 - auc flip, not diffdock alone.
     """
     print("\nr2_5_training_overlap  within-target AUC by PDB release date  (3-target benchmark)")
     if verify_dates:
@@ -489,9 +450,6 @@ def analysis_training_overlap(data: Path, out: Path, verify_dates: bool = False)
         for raw_col, prefix in R2_5_TRACKS.items():
             direction = SCORES_DIRECTION_DICTIONARY[prefix]
             value = pd.to_numeric(target[raw_col], errors="coerce")
-            # DIFFDOCK_PREFIX, BOLTZ_PREFIX and KARMADOCK_PREFIX are all
-            # "maximum" (higher = better), so all three -- not diffdock
-            # alone -- get the direction_aware_auc flip.
             auc = direction_aware_auc(value[is_act], value[is_dec], direction)
             rows.append({
                 "pdb_id": pdb_id, "release_date": released, "track": raw_col,

@@ -15,14 +15,11 @@ columns merged in by ``merge_posebusters_flags.py``.
 
 Conventions
 -----------
-* Binder-vs-decoy AUC is computed on the rp_* columns, already normalised per
-  protein, so pooling the three targets is legitimate. 0 = best, so an active
-  should rank LOWER; AUC = P(random active ranks better than random decoy).
-* Boltz-2's affinity head has its own rp_boltz_affinity_score column and is
-  ranked and voted like every other track, since guild commit 0d36671 --
-  it is read from that column here like any other, not from the raw value.
+* AUC is computed on rp_* columns (already normalised per protein, so pooling
+  is legitimate). 0 = best, so an active should rank lower.
+* Boltz-2's affinity head has its own rp_boltz_affinity_score, ranked and
+  voted like every other track since guild commit 0d36671.
 * "Non-physical" counts non-negative values for Vina-family energies only.
-  KarmaDock and Boltz ipTM are maximising scores where positive is correct.
 """
 
 from __future__ import annotations
