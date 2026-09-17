@@ -8,6 +8,7 @@ Usage
 -----
     python reproduce_response_analyses.py --data DATA_DIR --out OUT_DIR
     python reproduce_response_analyses.py --data ./data --only a2 a3
+    python reproduce_response_analyses.py --data ./data --only r2_5_training_overlap --verify-dates
 
 DATA_DIR must contain the inputs listed in README.md. Nothing is downloaded and
 nothing outside OUT_DIR is written.
@@ -15,7 +16,13 @@ nothing outside OUT_DIR is written.
 Dependencies: pandas, numpy. No RDKit (descriptors are parsed from SMILES; see
 `heavy_atoms` for the caveat). No guild import needed -- rank percentiles are
 recomputed here so the analysis stands alone, and `test_matches_guild` checks
-the reimplementation against guild's own output when it is available.
+the reimplementation against guild's own output when it is available. The one
+exception is `r2_5_training_overlap`, which imports
+`guild.constants.bulk.SCORES_DIRECTION_DICTIONARY` to get each track's
+minimum/maximum convention right rather than hardcoding it -- that module is
+pure Python constants with no heavy dependencies of its own, so this still
+runs outside the Docker image; it just needs `guild` importable (e.g. an
+editable install), unlike every other analysis here.
 """
 
 from __future__ import annotations
@@ -360,6 +367,145 @@ def analysis_size_control(data: Path, out: Path) -> None:
     write(frame, out, "reserve_size_matched_auc.tsv")
 
 
+# ═══════════════════ r2_5: training-overlap release-date contrast
+# RCSB entry endpoint https://data.rcsb.org/rest/v1/core/entry/<id>, field
+# rcsb_accession_info.initial_release_date, retrieved 2026-09-17. Hardcoded
+# rather than fetched live -- see --verify-dates below for the opt-in check.
+TARGET_RELEASE_DATES = {
+    "6ot0": ("2019-05-02", "2019-06-12", "Structure of human Smoothened-Gi complex"),
+    "7v3z": ("2021-08-12", "2021-11-24", "Structure of cannabinoid receptor type 1 (CB1)"),
+    "8gdc": ("2023-03-03", "2024-01-10", "Cryo-EM structure of the prostaglandin E2 receptor 3"),
+}
+
+# Raw score column -> its SCORES_DIRECTION_DICTIONARY prefix. Deliberately raw
+# scores, not rp_* -- see the module docstring on this analysis for why pooled
+# rank-percentile (Table S1) and within-target raw (this analysis) are
+# different questions that can legitimately disagree.
+R2_5_TRACKS = {
+    "boltz_affinity_score": "boltz_affinity",
+    "boltz_score": "boltz",
+    "diffdock_score": "diffdock",
+    "vina_score": "vina",
+    "karmadock_score": "karmadock",
+}
+
+
+def direction_aware_auc(active_values, decoy_values, direction: str) -> float:
+    """Binder-vs-decoy AUC for one column, respecting its scoring direction.
+
+    ``auc_lower_better`` assumes lower = better. A "maximum" direction
+    (higher = better, e.g. DiffDock confidence, Boltz-2 ipTM, KarmaDock) is
+    corrected by taking ``1 - auc`` rather than by negating the input Series
+    -- the two are mathematically equivalent (ties survive negation
+    unchanged), but this avoids a silent dtype surprise from negating an
+    object-dtype or all-NaN column.
+
+    :param active_values: Raw scores for the active/binder class.
+    :param decoy_values: Raw scores for the decoy class.
+    :param direction: ``"minimum"`` or ``"maximum"``, as in
+        ``guild.constants.bulk.SCORES_DIRECTION_DICTIONARY``.
+    :return: AUC on the 0.5-is-random, 1.0-is-perfect scale, oriented so a
+        track that genuinely discriminates in its own stated direction scores
+        high regardless of whether that direction is minimum or maximum.
+    """
+    auc = auc_lower_better(active_values, decoy_values)
+    return 1 - auc if direction == "maximum" else auc
+
+
+def _verify_release_dates() -> None:
+    """Re-fetch each target's initial release date from RCSB and assert it
+    matches TARGET_RELEASE_DATES. Opt-in only (--verify-dates) -- the analysis
+    itself never makes a network call."""
+    import json
+    import urllib.request
+
+    for pdb_id, (_deposited, released, _title) in TARGET_RELEASE_DATES.items():
+        url = f"https://data.rcsb.org/rest/v1/core/entry/{pdb_id.upper()}"
+        with urllib.request.urlopen(url, timeout=10) as response:
+            payload = json.load(response)
+        live_date = payload["rcsb_accession_info"]["initial_release_date"][:10]
+        status = "OK" if live_date == released else f"MISMATCH (RCSB says {live_date})"
+        print(f"      {pdb_id}  hardcoded {released}  ->  {status}")
+        assert live_date == released, f"{pdb_id}: hardcoded {released} != RCSB {live_date}"
+
+
+def analysis_training_overlap(data: Path, out: Path, verify_dates: bool = False) -> None:
+    """R2-5: within-target AUC by PDB release date -- is Boltz-2's affinity
+    head explained by training-set overlap?
+
+    Deliberately WITHIN-target and on RAW scores, unlike Table S1 (pooled,
+    rank-percentile). The two answer different questions: S1 asks how well a
+    track discriminates once every target is put on the same 0-1 scale;
+    this asks whether a track's discrimination *tracks the release-date
+    ordering*, which a pooled or rank-normalised number would wash out. A
+    pooled raw-score AUC is printed alongside for context, and it disagrees
+    with S1 (0.970 vs. 0.985 for Boltz-2 affinity here; 0.736 vs. 0.788 for
+    Vina) -- expected, not a bug, and not reconciled by switching either
+    number to the other's method.
+
+    No ligand-level training-set audit is attempted here (no PDBBind overlap,
+    no ECFP4 similarity to a training set) -- the argument in R2-5 rests on
+    the release-date contrast and the scoping argument (any cutoff admitting
+    the newest target admits the other two), not on enumerating what Boltz-2
+    was trained on. That would be a different, unbuilt analysis; see the
+    commit message for why it stays unbuilt here.
+
+    Direction is read from SCORES_DIRECTION_DICTIONARY, not assumed: three of
+    the five tracks here (diffdock, boltz, karmadock) are "maximum" and need
+    the auc_lower_better result flipped (1 - auc), not diffdock alone.
+    boltz_affinity_score, diffdock_score and vina_score verify exactly against
+    an earlier hand-computed reference table for this analysis; that same
+    table had boltz_score and karmadock_score as the complement (1 - auc) of
+    what direction-correct scoring gives here, cross-checked independently
+    against sklearn.roc_auc_score. That looks like a sign error made while
+    computing that reference by hand, not a property of this analysis --
+    boltz_affinity_score (the only track R2-5's argument actually rests on)
+    is unaffected either way, since it verifies exactly under both readings.
+    """
+    print("\nr2_5_training_overlap  within-target AUC by PDB release date  (3-target benchmark)")
+    if verify_dates:
+        print("      --verify-dates: checking against RCSB...")
+        _verify_release_dates()
+
+    from guild.constants.bulk import SCORES_DIRECTION_DICTIONARY
+
+    scores = pd.read_csv(data / "guild_scores.txt", sep="\t", low_memory=False)
+    scores = scores[scores.ligand_category != "native"].copy()
+    scores["pdb_id"] = scores.protein_config_id.str.split("-").str[0]
+
+    is_act_all = scores.ligand_category == ACTIVE
+    is_dec_all = scores.ligand_category == DECOY
+
+    ordered_targets = sorted(TARGET_RELEASE_DATES.items(), key=lambda kv: kv[1][1])
+    rows = []
+    for pdb_id, (_deposited, released, _title) in ordered_targets:
+        target = scores[scores.pdb_id == pdb_id]
+        is_act, is_dec = target.ligand_category == ACTIVE, target.ligand_category == DECOY
+        for raw_col, prefix in R2_5_TRACKS.items():
+            direction = SCORES_DIRECTION_DICTIONARY[prefix]
+            value = pd.to_numeric(target[raw_col], errors="coerce")
+            # DIFFDOCK_PREFIX, BOLTZ_PREFIX and KARMADOCK_PREFIX are all
+            # "maximum" (higher = better), so all three -- not diffdock
+            # alone -- get the direction_aware_auc flip.
+            auc = direction_aware_auc(value[is_act], value[is_dec], direction)
+            rows.append({
+                "pdb_id": pdb_id, "release_date": released, "track": raw_col,
+                "direction": direction, "auc": round(auc, 3),
+                "n_active": int(is_act.sum()), "n_decoy": int(is_dec.sum()),
+            })
+    frame = pd.DataFrame(rows)
+    print(frame.to_string(index=False))
+    write(frame, out, "r2_5_training_overlap.tsv")
+
+    print("\n      pooled raw-score AUC (context only -- NOT what Table S1 reports; "
+          "S1 pools rank-percentile, this pools raw score):")
+    for raw_col, prefix in [("boltz_affinity_score", "boltz_affinity"), ("vina_score", "vina")]:
+        direction = SCORES_DIRECTION_DICTIONARY[prefix]
+        value = pd.to_numeric(scores[raw_col], errors="coerce")
+        auc = direction_aware_auc(value[is_act_all], value[is_dec_all], direction)
+        print(f"      {raw_col:<22s} pooled raw AUC = {auc:.3f}")
+
+
 # ═════════════════════════════════════════════════════ self-check
 def test_matches_guild(data: Path) -> None:
     """Confirm the local rank-percentile reimplementation matches guild's output."""
@@ -382,6 +528,7 @@ ANALYSES = {
     "a2": analysis_aggregation,
     "a3": analysis_normalisation,
     "reserve": analysis_size_control,
+    "r2_5_training_overlap": analysis_training_overlap,
 }
 
 
@@ -390,6 +537,10 @@ def main(argv=None) -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--data", type=Path, default=Path("./data"),
                         help="directory holding the inputs listed in README.md")
+    parser.add_argument("--verify-dates", action="store_true",
+                        help="re-fetch each target's PDB release date from RCSB and assert "
+                             "it matches r2_5_training_overlap's hardcoded TARGET_RELEASE_DATES "
+                             "(network call, off by default)")
     parser.add_argument("--out", type=Path, default=Path("./output"),
                         help="directory for the TSVs (created if absent)")
     parser.add_argument("--only", nargs="+", choices=sorted(ANALYSES),
@@ -404,7 +555,10 @@ def main(argv=None) -> int:
     test_matches_guild(args.data)
     for name in (args.only or sorted(ANALYSES)):
         try:
-            ANALYSES[name](args.data, args.out)
+            if name == "r2_5_training_overlap":
+                ANALYSES[name](args.data, args.out, verify_dates=args.verify_dates)
+            else:
+                ANALYSES[name](args.data, args.out)
         except FileNotFoundError as error:
             print(f"\n{name}: skipped, missing input -- {error.filename}")
     print("\ndone")

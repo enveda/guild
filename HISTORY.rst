@@ -22,6 +22,29 @@ Unreleased
   real rerun data that the four numbers the response letter quotes verbatim from Table S1
   are unchanged: Guild combined 0.838, AutoDock Vina 0.788, Boltz-2 affinity 0.985, GNINA
   0.739.
+* Added ``r2_5_training_overlap`` to ``reproduce_response_analyses.py``: the within-target,
+  per-track, raw-score AUC ordered by each benchmark target's PDB release date that backs
+  R2-5's answer on training-set leakage (any cutoff admitting the most recently released
+  structure, 8GDC, necessarily admits the other two, so their ordering is informative
+  without knowing any method's actual cutoff). Boltz-2's affinity head verifies exactly:
+  0.956 (6OT0, 2019), 1.000 (7V3Z, 2021), 1.000 (8GDC, 2024) -- the newest structure ranked
+  best, the oldest worst, as the letter claims. Release dates are a hardcoded, cited
+  constant (RCSB entry endpoint, retrieved 2026-09-17), not a live call; an opt-in
+  ``--verify-dates`` re-fetches and asserts them instead. Deliberately does not attempt a
+  ligand-level training-set audit (no PDBBind overlap, no ECFP4 similarity to a training
+  set) -- the argument rests on the release-date contrast and the scoping logic, not on
+  enumerating what Boltz-2 was trained on, and building one would answer a question this
+  reply does not ask. Direction is read from ``guild.constants.bulk.SCORES_DIRECTION_DICTIONARY``
+  rather than hardcoded -- the only guild import anywhere in this otherwise guild-free
+  script, and still no heavy dependency, since that module is pure constants. The
+  direction-aware AUC itself is factored into a small, tested helper,
+  ``direction_aware_auc`` (``tests/reviewer_response/``, including a direction-flip case).
+  Verifying this against real data also surfaced that an earlier hand-computed draft of
+  this table had two of its five rows (``boltz_score``, ``karmadock_score``) backwards --
+  their values were the exact complement (1 - auc) of what direction-correct scoring
+  gives, independently cross-checked against ``sklearn.roc_auc_score``. Corrected here;
+  flagged in the module docstring and the response-analyses README. Does not affect
+  ``boltz_affinity_score``, the only track R2-5's argument depends on.
 * Added ``notebooks/analysis/build_rank_percentile_schematic.py``, which generates the
   Supplementary Text 3 rank-percentile schematic from the real 3-target rerun instead of
   the hand-built, uncaptioned original (``guild_rank_percentile_figure.png`` /
