@@ -4,6 +4,29 @@ History
 
 Unreleased
 ----------
+* R2-7: added ``guild.tools.decoy_matching``, the property-matched decoy panel and
+  descriptor-only-baseline control the reply to R2-7 promises for Figure 3, as ordinary
+  tested library code rather than a final render. ``match_decoys_to_binders`` keeps a
+  decoy only if it is within tolerance of at least one of its target's known binders on
+  molecular weight, cLogP, HBA, HBD, rotatable bonds and net charge *and* its ECFP4
+  Tanimoto similarity to every known binder for that target is below 0.35, so a "matched"
+  decoy is not simply a close structural analogue; MW/logP/HBA/HBD are reused from
+  ``guild.tools.ligand_properties.assign_properties`` rather than reimplemented, only
+  rotatable-bond count and net formal charge are new. ``descriptor_only_auc`` reports
+  binder-vs-decoy AUC per descriptor with no docking score at all, and
+  ``combined_descriptor_auc`` a cross-validated logistic-regression AUC across all six --
+  the control that separates binding signal from property bias (on the 3-target rerun,
+  an unmatched heavy-atom-count baseline alone reaches AUC 0.865, higher than any docking
+  method; size-matching collapses it to 0.645). ``score_comparison.ipynb``'s decoy-loading
+  cell now takes a ``DECOY_SUBSET`` (an explicit ligand_id list, or a predicate),
+  defaulting to ``None`` (every decoy, current behaviour); verified end-to-end that the
+  default reproduces Figure 3's three AUCs exactly (0.684 / 0.547 / 0.597, unchanged) and
+  added a demonstration cell that runs the real matching + baseline against a 5-target
+  slice of the actual Figure 3 inputs (460/5,000 decoys kept; combined AUC 0.778). Full
+  scale (133,000 decoys x 655 binders) is not run in the notebook -- descriptor computation
+  is roughly linear in decoy count and the check above took several seconds per 5,000, so
+  rendering the matched panel itself is left as follow-up work. 18 new tests in
+  ``tests/ligand_properties/test_decoy_matching.py``.
 * Figure 3 (``score_comparison.ipynb``): the grey/orange rug ticks (R4 b3), the "Density"
   y-axis (R4 b4), and the score-orientation inversion are now all explicit instead of
   implicit. The rug ticks are per-molecule values -- the decoy rug (grey) is a random
