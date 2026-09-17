@@ -4,6 +4,16 @@ History
 
 Unreleased
 ----------
+* ``guild.tools.scores.is_physical_score(value, method)`` flags Vina-family raw
+  scores (``vina_score``, ``gnina_score``, and the four rescore tracks)
+  outside a plausible −20 to 0 kcal/mol range — measured on the large Vina
+  case study, 6.06% of scored rows were non-negative and 0.79% exceeded
+  1,000,000 in magnitude (observed maximum 43,851,078). ``run_guild_scoring``
+  now logs a per-method count of these as a warning; stored values are
+  unchanged by default. ``run_guild_scoring(exclude_non_physical=True)``
+  (``--exclude-non-physical`` / ``EXCLUDE_NON_PHYSICAL=1``) nulls them for a
+  new run instead, opt-in only, since the published case-study numbers were
+  generated with these values left in the table.
 * PoseBusters and PLIP/ProLIF now log which requested methods produce no
   complex PDB by design (karmadock, nesso) instead of letting them simply
   not appear in ``posebusters_validity.tsv`` / ``plip_interactions.tsv`` —

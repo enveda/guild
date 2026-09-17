@@ -116,6 +116,11 @@ class TestArgParsing:
         assert args.no_posebusters is False
         assert args.posebusters_only is False
 
+    def test_exclude_non_physical_defaults_false(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["run_guild.py", "-p", "x", "-c", "combos.csv"])
+        args = run_guild.parse_args()
+        assert args.exclude_non_physical is False
+
 
 # ---------------------------------------------------------------------------
 # main() — routes CLI flags to BulkRun calls
@@ -169,8 +174,12 @@ class TestMainWiresPosebusters:
             config="dock", expect_existing_scores=True
         )
         bulk.run_docking.assert_called_once()
-        bulk.run_guild_scoring.assert_called_once()
+        bulk.run_guild_scoring.assert_called_once_with(exclude_non_physical=False)
         bulk.run_interactions_analysis.assert_called_once()
+
+    def test_exclude_non_physical_is_forwarded(self, monkeypatch, tmp_path):
+        bulk = self._run_main(monkeypatch, tmp_path, ["--exclude-non-physical"])
+        bulk.run_guild_scoring.assert_called_once_with(exclude_non_physical=True)
 
     def test_no_posebusters_skips_the_call(self, monkeypatch, tmp_path):
         bulk = self._run_main(monkeypatch, tmp_path, ["--no-posebusters"])

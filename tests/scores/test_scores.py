@@ -17,9 +17,10 @@ from guild.constants.bulk import (
     GLOBAL_RP_SCORE,
     RANKS_DICTIONARY,
     RP_SCORES_DICTIONARY,
+    VINA_FAMILY_PLAUSIBLE_SCORE_RANGE,
 )
 from guild.constants.guild import PROTEIN_CONF_ID
-from guild.tools.scores import compute_rank_percentile_scores
+from guild.tools.scores import compute_rank_percentile_scores, is_physical_score
 
 
 # ---------------------------------------------------------------------------
@@ -678,3 +679,46 @@ class TestGlobalScoreAggregation:
 
         # Row 0's diffdock pose source is entirely NaN, so global falls back to vina alone.
         assert result[GLOBAL_RP_SCORE].iloc[0] == pytest.approx(vina_rp.iloc[0])
+
+
+# ---------------------------------------------------------------------------
+# 12. Score plausibility
+# ---------------------------------------------------------------------------
+class TestIsPhysicalScore:
+    def test_plausible_vina_energy_is_physical(self):
+        assert is_physical_score(-9.5, "vina") is True
+
+    def test_range_endpoints_are_inclusive(self):
+        low, high = VINA_FAMILY_PLAUSIBLE_SCORE_RANGE
+        assert is_physical_score(low, "vina") is True
+        assert is_physical_score(high, "vina") is True
+
+    def test_positive_vina_score_is_not_physical(self):
+        assert is_physical_score(5.0, "vina") is False
+
+    def test_absurdly_large_magnitude_vina_score_is_not_physical(self):
+        assert is_physical_score(-43_851_078, "vina") is False
+
+    def test_gnina_and_its_rescore_tracks_use_the_same_range(self):
+        assert is_physical_score(-9.0, "gnina") is True
+        assert is_physical_score(5.0, "gnina_rescore_diffdock") is False
+        assert is_physical_score(-9.0, "vina_rescore_boltz") is True
+
+    def test_maximising_method_treats_a_positive_score_as_physical(self):
+        """karmadock_score is 'maximum'-direction — positive is correct, not suspicious."""
+        assert is_physical_score(5.0, "karmadock") is True
+        assert is_physical_score(1_000_000.0, "karmadock") is True
+
+    def test_nesso_is_not_checked_against_the_vina_range(self):
+        """
+        Nesso shares vina's 'minimum' direction but is a different physical
+        quantity (log10(IC50/uM), not a docking energy), so the Vina-family
+        plausible range says nothing about it.
+        """
+        assert is_physical_score(5.0, "nesso") is True
+        assert is_physical_score(-43_851_078, "nesso") is True
+
+    def test_missing_score_is_treated_as_physical(self):
+        """No score is a distinct, already-tracked failure mode, not a physicality one."""
+        assert is_physical_score(np.nan, "vina") is True
+        assert is_physical_score(None, "vina") is True

@@ -192,6 +192,19 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--exclude-non-physical",
+        action="store_true",
+        default=False,
+        help=(
+            "Null out raw scores that fail the Vina-family plausibility check "
+            "(is_physical_score) before ranking, instead of only logging their "
+            "count. Off by default — the published case-study numbers were "
+            "generated with non-physical values left in the table, so this "
+            "would change results retroactively for anyone reproducing them. "
+            "Opt in for a new run only."
+        ),
+    )
+    parser.add_argument(
         "--posebusters",
         action="store_true",
         default=False,
@@ -475,7 +488,7 @@ def main() -> None:
         print(f"Docking time: {time.time() - t0:.1f}s")
 
         t0 = time.time()
-        bulk.run_guild_scoring()
+        bulk.run_guild_scoring(exclude_non_physical=args.exclude_non_physical)
         print(f"Scoring time: {time.time() - t0:.1f}s")
     else:
         print("Skipping docking + scoring (--plip-only/--posebusters-only).")

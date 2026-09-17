@@ -11,6 +11,7 @@ from concurrent.futures import (
 )
 from concurrent.futures.process import BrokenProcessPool
 
+import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
@@ -176,7 +177,7 @@ from guild.tools.protein_sequence import (
     get_original_sequence_dictionary,
     process_into_fasta_string,
 )
-from guild.tools.scores import compute_rank_percentile_scores
+from guild.tools.scores import compute_rank_percentile_scores, is_physical_score
 from guild.transformers.msa import fetch_protein_msa
 from guild.transformers.pdb import (
     get_pocket_contacts_from_box,
@@ -1926,7 +1927,58 @@ class BulkRun:
         # Return RAW scores only - no ranks or rank percentile scores yet
         return raw_scores_table
 
-    def run_guild_scoring(self, n_processes=None):
+    def _log_score_physicality_summary(self, raw_scores_df):
+        """
+        Log how many raw scores per method fall outside a plausible range.
+
+        A non-physical value (e.g. a positive Vina-family energy, or one with
+        an absurd magnitude — see ``is_physical_score``) is never nulled or
+        clamped here: the case-study numbers were published against these
+        tables as they stand, and silently changing stored values would
+        change them retroactively. This only makes the phenomenon visible in
+        the logs, the same way a failed docking attempt already is, so the
+        next person filtering a score column does not have to rediscover it.
+        """
+        for method in self.methods_to_run:
+            raw_score_column = f"{method}_score"
+            if raw_score_column not in raw_scores_df.columns:
+                continue
+
+            scored = raw_scores_df[raw_score_column].dropna()
+            if scored.empty:
+                continue
+
+            non_physical = ~scored.apply(is_physical_score, method=method)
+            n_non_physical = int(non_physical.sum())
+            if n_non_physical:
+                logger.warning(
+                    f"{method}: {n_non_physical}/{len(scored)} "
+                    f"({100 * n_non_physical / len(scored):.2f}%) scored values "
+                    f"look non-physical (outside the plausible range for this "
+                    f"method) — kept in the table as scored, not nulled."
+                )
+
+    def _null_non_physical_scores(self, raw_scores_df):
+        """
+        Return a copy of ``raw_scores_df`` with non-physical raw scores nulled.
+
+        Opt-in only, via ``run_guild_scoring(exclude_non_physical=True)`` — a
+        nulled value then ranks exactly like a failed docking attempt (see
+        ``denominator="attempted"`` in ``compute_rank_percentile_scores``)
+        rather than voting in the consensus at face value.
+        """
+        raw_scores_df = raw_scores_df.copy()
+        for method in self.methods_to_run:
+            raw_score_column = f"{method}_score"
+            if raw_score_column not in raw_scores_df.columns:
+                continue
+            physical = raw_scores_df[raw_score_column].apply(
+                lambda value, method=method: is_physical_score(value, method)
+            )
+            raw_scores_df.loc[~physical, raw_score_column] = np.nan
+        return raw_scores_df
+
+    def run_guild_scoring(self, n_processes=None, exclude_non_physical=False):
         """
         Scoring function to uniformize multiple docking methods by leveraging the decoy dataset.
         Steps:
@@ -1936,6 +1988,13 @@ class BulkRun:
         4. Compute rank percentile scores from global ranks
 
         :param n_processes: Number of processes to use for multiprocessing.
+        :param exclude_non_physical: When True, null out raw scores that fail
+            ``is_physical_score`` before ranking (treating them the same as a
+            failed docking attempt) instead of only logging their count.
+            Default False — the published case-study numbers were generated
+            with non-physical values left in the table, so nulling them by
+            default would change those results retroactively for anyone
+            reproducing them. Opt in for a NEW run only.
         """
 
         if n_processes is None:
@@ -1970,6 +2029,10 @@ class BulkRun:
         if all_raw_scores.empty:
             logger.warning("No scores to process")
             return
+
+        self._log_score_physicality_summary(all_raw_scores)
+        if exclude_non_physical:
+            all_raw_scores = self._null_non_physical_scores(all_raw_scores)
 
         # Ensure ligand category is available before scoring.
         # Key the lookup on ligand_id (authoritative per-row category from the

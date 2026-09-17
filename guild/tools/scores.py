@@ -34,6 +34,8 @@ from guild.constants.bulk import (
     RANKS_DICTIONARY,
     RP_SCORES_DICTIONARY,
     SCORES_DIRECTION_DICTIONARY,
+    VINA_FAMILY_PLAUSIBLE_SCORE_RANGE,
+    VINA_FAMILY_SCORE_METHODS,
 )
 from guild.constants.guild import PROTEIN_CONF_ID
 
@@ -217,3 +219,45 @@ def compute_rank_percentile_scores(
         result[GLOBAL_RP_SCORE] = _combine_percentiles(result, voting_methods, aggregation)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Score plausibility
+# ---------------------------------------------------------------------------
+def is_physical_score(value, method: str) -> bool:
+    """
+    Is this raw score a plausible value for its method?
+
+    Vina-family methods (:data:`VINA_FAMILY_SCORE_METHODS`) report a binding
+    free-energy estimate in kcal/mol, which is negative by convention; a
+    positive value, or one whose magnitude is absurdly large, is a red flag
+    (numerical overflow, a parsing bug, a failed pose scored as a sentinel)
+    rather than a real weak binder. Measured on a large Vina case study,
+    6.06% of scored values were non-negative and 0.79% exceeded 1,000,000 in
+    magnitude, against an observed maximum of 43,851,078.
+
+    Every other method returns True unconditionally: a "maximum"-direction
+    method (karmadock, diffdock, boltz — see
+    :data:`SCORES_DIRECTION_DICTIONARY`) has no such sign convention, so a
+    positive score there is exactly what "better" looks like, and no
+    plausible numeric range is documented for methods outside the Vina
+    family (including Nesso, which shares the "minimum" direction but is a
+    different physical quantity — log10(IC50/uM), not a docking energy).
+
+    This is a plausibility check, not enforcement: it never nulls, clamps or
+    drops a value, so a caller can only use it to *count* how suspicious a
+    scored value looks, the same way a failed docking attempt is counted.
+
+    :param value: Raw score value. NaN/None is treated as physical — "no
+        score" is a distinct, already-tracked failure mode.
+    :param method: Method prefix key into :data:`SCORES_DIRECTION_DICTIONARY`.
+    :return: False only for a numeric Vina-family score outside
+        :data:`VINA_FAMILY_PLAUSIBLE_SCORE_RANGE`.
+    """
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return True
+    if method not in VINA_FAMILY_SCORE_METHODS:
+        return True
+
+    low, high = VINA_FAMILY_PLAUSIBLE_SCORE_RANGE
+    return low <= value <= high

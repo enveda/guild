@@ -145,6 +145,33 @@ SCORES_DIRECTION_DICTIONARY = {
     GNINA_RESCORE_DIFFDOCK_PREFIX: "minimum",
 }
 
+# Methods whose raw score is a Vina-family (AutoDock Vina / gnina, native or
+# rescored) binding free-energy estimate in kcal/mol. Nesso's raw score is
+# also "minimum"-direction (lower = stronger) but a different physical
+# quantity entirely (log10(IC50/uM), not a docking energy), so it is
+# deliberately not included here — the plausible range below would not mean
+# anything for it.
+VINA_FAMILY_SCORE_METHODS = frozenset(
+    {
+        VINA_PREFIX,
+        GNINA_PREFIX,
+        VINA_RESCORE_BOLTZ_PREFIX,
+        VINA_RESCORE_DIFFDOCK_PREFIX,
+        GNINA_RESCORE_BOLTZ_PREFIX,
+        GNINA_RESCORE_DIFFDOCK_PREFIX,
+    }
+)
+
+# Plausible range for a Vina-family score, in kcal/mol. Measured against the
+# large Vina case study (403k pairs): 93.9% of scored values fall inside this
+# range; 6.06% are non-negative (non-physical for a binding free energy) and
+# 0.79% exceed 1,000,000 in magnitude (observed maximum: 43,851,078) — almost
+# certainly a numerical or parsing failure rather than a real weak binder.
+# This is a plausibility check, not a hard physical bound: a value outside it
+# is suspicious, not necessarily wrong, and is never clamped or nulled by
+# default (see is_physical_score in guild/tools/scores.py).
+VINA_FAMILY_PLAUSIBLE_SCORE_RANGE = (-20.0, 0.0)
+
 RANKS_DICTIONARY = {
     VINA_PREFIX: RANK_VINA_SCORE,
     KARMADOCK_PREFIX: RANK_KARMADOCK_SCORE,

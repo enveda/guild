@@ -91,6 +91,7 @@ make run-vina \
 | `VINA_EXHAUSTIVENESS` | *(empty)* | Vina search exhaustiveness. Higher improves pose quality at the cost of runtime. Defaults to `16` when omitted. |
 | `NO_POSEBUSTERS` | *(empty)* | Set to `1` to skip the PoseBusters pose-validity step. On by default (mirrors PLIP): ~400ms/pose, and adds `<method>_pb_valid`/`<method>_pb_pose` to `guild_scores.txt`. See [PoseBusters](#posebusters). |
 | `POSEBUSTERS_CONFIG` | *(empty → `dock`)* | `dock` \| `dock_fast`. `dock_fast` skips the `internal_energy` conformer-ensemble check — a lever worth trying on large/very flexible ligand sets. |
+| `EXCLUDE_NON_PHYSICAL` | *(empty)* | Set to `1` to null non-physical Vina-family raw scores (e.g. a positive binding energy) before ranking, for a **new** run. Off by default — see [Raw score plausibility](#raw-score-plausibility). |
 | `MIN_MOL_WT` | `250` | Minimum molecular weight filter for known-binder expansion |
 | `MAX_MOL_WT` | `450` | Maximum molecular weight filter for known-binder expansion |
 | `CHEMBL_VERSION` | `chembl_36` | ChEMBL version string used for known-binder lookup |
@@ -884,6 +885,22 @@ methods fail to generate physically valid poses or generalise to novel sequences
 `guild_scores.txt` keeps only the best pose per combination. When Vina or gnina runs, each
 batch also gets `vina_scores.txt` / `gnina_scores.txt` with **one row per pose**, so the full
 score distribution is available without re-reading every per-combination file.
+
+#### Raw score plausibility
+
+Vina-family raw scores (`vina_score`, `gnina_score`, and the four rescore tracks) are never
+filtered, clamped or nulled by default — a value outside a plausible range is stored exactly as
+scored, the same as every other row. On the large Vina case study (403k pairs): 25.2% of rows had
+no score at all, 6.06% of *scored* rows were non-negative (non-physical for a binding free
+energy), 0.79% exceeded 1,000,000 in magnitude (observed maximum: 43,851,078), and 93.9% fell
+within a plausible −20 to 0 kcal/mol. `guild.tools.scores.is_physical_score(value, method)`
+encodes that plausible range and is method-aware — it never flags a "maximum"-direction score
+such as `karmadock_score`, where a large positive value is correct, not suspicious. Every scoring
+run logs a per-method count of non-physical values as a warning, the same way a failed docking
+attempt is counted; pass `--exclude-non-physical` (`EXCLUDE_NON_PHYSICAL=1` via `make`) to null
+them out for a **new** run instead of only logging them — off by default, since the published
+case-study numbers were generated with these values left in the table, and nulling them
+retroactively would change those numbers for anyone reproducing them.
 
 #### Guild score
 
