@@ -4,6 +4,29 @@ History
 
 Unreleased
 ----------
+* Figure 2 (``score_distribution.ipynb``) is rebuilt on the 3-target rerun and no longer
+  plots DiffDock's or Boltz-2's *pose confidence* as the ranked quantity -- it now shows
+  the Vina-rescore ΔG that actually enters the score (``vina_rescore_diffdock_score``,
+  ``vina_rescore_boltz_score``), matching what ``20b3c50`` stopped letting the raw
+  confidences do, and adds GNINA and KarmaDock so the figure covers all five pose sources
+  its caption already claimed. The native confidences (``diffdock_score``, ``boltz_score``)
+  are still reported per panel but are not ranked or plotted as the voted quantity, the
+  same treatment ``gnina_cnn_score`` already gets; the panel notes that
+  ``boltz_affinity_score`` also joins Boltz's vote (``0d36671``). ``vina_rescore_boltz_score``
+  is populated for 134/165 rows (receptor-preparation failures) and
+  ``vina_rescore_diffdock_score`` for only 34/165 once non-negative values -- a
+  rescoring-failure sentinel, 79.4% of the column -- are nulled alongside the strictly
+  non-physical ones; both counts are printed rather than left implicit, and the figure
+  states on its own face that three targets replace what the published version covered
+  many more of.
+* Figure 2's right column (rank percentile) no longer plots a density that overshoots
+  [0, 1] (R4 b2) -- the KDE grid used to run from -0.06 to 1.06 with the axis merely
+  clipped to (-0.04, 1.04), which still let the drawn curve cross the valid boundary.
+  Replaced with ``kde_curve_bounded``, a reflected boundary-corrected KDE evaluated only
+  on ``[0, 1]``, so the curve cannot leave the valid range and still integrates to 1
+  (checked with ``np.trapezoid`` against every panel with enough points to make that
+  check meaningful; verified to ~1e-3 in every one). The left column (raw docking score)
+  is genuinely unbounded and keeps the original, unreflected KDE.
 * ``score_distribution.ipynb`` (Figure 2) and ``score_comparison.ipynb`` (Figure 3) now
   read their input tables from a ``--data``-style directory
   (``GUILD_FIGURES_DATA_DIR`` env var, default ``data``) instead of a hardcoded relative
