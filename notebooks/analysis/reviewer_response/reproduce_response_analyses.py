@@ -156,8 +156,13 @@ def analysis_runtime(data: Path, out: Path) -> None:
 
 
 # ═══════════════════════════════════════════════ a2: aggregation rules
-# The five pose-source votes, per guild commit 20b3c50: confidences do not vote,
-# and each engine's rescore tracks are averaged before the cross-engine mean.
+# The five pose-source votes, per guild commit 20b3c50: confidences do not
+# vote, and each engine's rescore tracks are averaged before the cross-engine
+# combination -- which is itself now a MEDIAN by default (0e7c959), not the
+# mean this analysis compares it against below. Since 0d36671,
+# boltz_affinity_score also joins Boltz's pose-source vote in production;
+# it is left out of POSE_SOURCE_VOTES here so every rule below (current
+# default included) is compared against the same fixed five-vote structure.
 POSE_SOURCE_VOTES = {
     "vina": ["rp_vina_score"],
     "gnina": ["rp_gnina_score"],
@@ -190,8 +195,8 @@ def analysis_aggregation(data: Path, out: Path) -> None:
     weights = weights / weights.sum()
 
     rules = {
-        "unweighted mean (current)": votes.mean(axis=1),
-        "median": votes.median(axis=1),
+        "unweighted mean": votes.mean(axis=1),
+        "median (current default, 0e7c959)": votes.median(axis=1),
         "best-of-rank (min)": votes.min(axis=1),
         "worst-of-rank (max)": votes.max(axis=1),
         "rank-sum": votes.rank(axis=0).sum(axis=1),

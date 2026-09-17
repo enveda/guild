@@ -45,6 +45,13 @@ Unreleased
   gives, independently cross-checked against ``sklearn.roc_auc_score``. Corrected here;
   flagged in the module docstring and the response-analyses README. Does not affect
   ``boltz_affinity_score``, the only track R2-5's argument depends on.
+* Relabelled two stale comments in ``reproduce_response_analyses.py``'s ``a2`` analysis
+  that went stale when the median default (``0e7c959``) landed after it was written: the
+  rule labelled ``"unweighted mean (current)"`` is now just ``"unweighted mean"``, and
+  ``"median"`` is now ``"median (current default, 0e7c959)"``; a comment above
+  ``POSE_SOURCE_VOTES`` no longer claims the cross-engine combination is a mean. Labels
+  only -- ``a2`` computes every aggregation rule itself rather than calling
+  ``compute_rank_percentile_scores``, so no number moves.
 * Added ``notebooks/analysis/build_rank_percentile_schematic.py``, which generates the
   Supplementary Text 3 rank-percentile schematic from the real 3-target rerun instead of
   the hand-built, uncaptioned original (``guild_rank_percentile_figure.png`` /
