@@ -4,6 +4,43 @@ History
 
 Unreleased
 ----------
+* Fixed the rank-percentile label/axis contradiction shared by the schematic's Step 4 and
+  ``score_distribution.ipynb``'s Figure 2 right column: each showed a ``P = 98%``-style
+  label sitting at ``x = 0.02`` on an axis literally labelled "rank percentile" -- the
+  stored ``rp_*`` column is 0 = best throughout guild, and the annotation was already
+  flipped for display while the axis position was not, asserting both conventions on the
+  same panel (the same confusion behind the Supp. Text 6 discrepancy). Both now plot
+  ``1 - rp`` and label the axis "(higher = better)", matching what ``score_comparison.ipynb``
+  already does for Figure 3, so all three figures share one convention, stated on each
+  figure rather than left to the caption.
+* Fixed ``score_distribution.ipynb``'s Sankey/alluvial cells (4-9), which ``fe148e1`` had
+  flagged as broken against the rerun -- they referenced ``guild_vina_score`` /
+  ``guild_boltz_score`` / ``guild_diffdock_score``, column names that rerun never had, so
+  running the notebook top to bottom failed partway through cell 5. Repointed at the
+  current ``rp_vina_score`` / ``rp_boltz_score`` / ``rp_diffdock_score`` names (each pose
+  source's own rank percentile); the notebook now runs top to bottom without raising.
+* Restored ``build_rank_percentile_schematic.py``'s chrome and switched its Step 3/Step 4
+  distributions from 12-bin histograms to the same KDE treatment Figure 2 uses
+  (``kde_curve`` / ``kde_curve_bounded``, from ``kde_helpers.py``), removing the comb
+  artefact a ~55-value panel produced. Step 3 and Step 4 panels are white rounded cards
+  again, each STEP sits on its own tinted band (extending the treatment the Step 1 cards
+  and Step 2 chips already had), Step 2's method chips are separated by a visible gap
+  rather than touching, and titles use em dashes rather than ``--``. Note for accuracy: the
+  published panels were bar histograms, not KDE -- the KDE is a deliberate improvement
+  (consistency with Figure 2, no comb artefact), not a restoration of the original.
+* Rendered all three figures (Figure 2, Figure 3, the schematic) against their real inputs
+  and saved PNG/PDF/SVG at 600 dpi outside the repo, and re-ran ``score_distribution.ipynb``
+  and ``score_comparison.ipynb`` with their outputs saved, so the committed notebooks show
+  what the code produces without needing to be run. Figure 3's three pooled AUCs (binder vs.
+  decoy): rank percentile 0.684, min-max 0.547, z-score 0.597 -- rank percentile clearly
+  ahead of z-score here, not the near-tie ``reproduce_response_analyses.py``'s
+  ``a3_normalisations`` gives over its own (pooled, raw-score) computation (0.675 vs.
+  0.674); that is a different analysis over the same three normalisations, not a
+  contradiction. Figure 2: ``vina_rescore_boltz_score`` covers 134/165 rows (81.2%) and
+  79.4% of ``vina_rescore_diffdock_score`` values are excluded as non-physical, both printed
+  by the notebook rather than left implicit in the figure. Added
+  ``GUILD_FIGURES_OUT_DIR`` (mirroring the existing ``GUILD_FIGURES_DATA_DIR``) to both
+  notebooks so a real render can target a durable directory instead of the scratch default.
 * Added ``notebooks/analysis/reviewer_response/build_supplementary_tables.py``, ported
   from a session scratchpad so Supplementary Tables S1-S6 (every per-method AUC quoted in
   R2-3/R2-4, the PoseBusters pose-validity rates in R2-4) have a committed, regenerable

@@ -39,7 +39,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from kde_helpers import kde_curve, kde_curve_bounded  # noqa: E402
 
 from guild.constants.guild import (  # noqa: E402
     BOLTZ_AFFINITY_PREFIX,
@@ -168,6 +171,64 @@ def _draw_arrow(ax, x, y0, y1):
                 arrowprops={"arrowstyle": "-|>", "color": "#444444", "linewidth": 1.5})
 
 
+def _draw_step_band(fig, subplotspec, facecolor, heading, heading_color):
+    """A tinted rounded band spanning one STEP row, with its heading drawn
+    inside it -- restores the published schematic's grouping chrome (each
+    step sits on its own tinted band, not a bare white background)."""
+    ax_bg = fig.add_subplot(subplotspec)
+    ax_bg.set_xlim(0, 1)
+    ax_bg.set_ylim(0, 1)
+    ax_bg.add_patch(mpatches.FancyBboxPatch(
+        (0.0, 0.0), 1.0, 1.0, transform=ax_bg.transAxes,
+        boxstyle="round,pad=0,rounding_size=0.02",
+        facecolor=facecolor, edgecolor="none", zorder=0,
+    ))
+    ax_bg.text(0.01, 0.93, heading, fontsize=13, fontweight="bold",
+               color=heading_color, va="top", transform=ax_bg.transAxes)
+    ax_bg.axis("off")
+    return ax_bg
+
+
+def _draw_step_band_split(fig, subplotspec, facecolor, heading, heading_color, header_frac=0.3):
+    """Same tinted band as `_draw_step_band`, but for a step whose content
+    panels fill their own full height (the Step 3/4 distribution cards) --
+    without this split, those cards (each a full-height rounded patch) paint
+    over the header text, since both would otherwise share the same
+    SubplotSpec rectangle. Carves off a slim header strip at the top of the
+    band and returns the SubplotSpec for the row underneath, for the caller
+    to subdivide into per-panel columns."""
+    ax_bg = fig.add_subplot(subplotspec)
+    ax_bg.set_xlim(0, 1)
+    ax_bg.set_ylim(0, 1)
+    ax_bg.add_patch(mpatches.FancyBboxPatch(
+        (0.0, 0.0), 1.0, 1.0, transform=ax_bg.transAxes,
+        boxstyle="round,pad=0,rounding_size=0.02",
+        facecolor=facecolor, edgecolor="none", zorder=0,
+    ))
+    ax_bg.text(0.01, 0.95, heading, fontsize=13, fontweight="bold",
+               color=heading_color, va="top", transform=ax_bg.transAxes)
+    ax_bg.axis("off")
+    rows = subplotspec.subgridspec(2, 1, height_ratios=[header_frac, 1 - header_frac], hspace=0.0)
+    return rows[1]
+
+
+def _draw_card_bg(ax, edgecolor="#d8d8d8"):
+    """A white rounded card behind one distribution panel, restoring the
+    published schematic's per-panel chrome. Drawn in the panel's own
+    transAxes (not the parent step band's), so it tracks that panel
+    regardless of its data coordinates; ax.patch is hidden first so the
+    sharp-cornered default axes background does not show past the rounded
+    corners (the same axis("off")-hides-facecolor fact noted above for the
+    title bar, applied here in reverse -- we want our own patch, not the
+    default one)."""
+    ax.patch.set_visible(False)
+    ax.add_patch(mpatches.FancyBboxPatch(
+        (0.0, 0.0), 1.0, 1.0, transform=ax.transAxes,
+        boxstyle="round,pad=0.02,rounding_size=0.06",
+        facecolor="white", edgecolor=edgecolor, linewidth=1.0, zorder=-1,
+    ))
+
+
 def build_figure(df: pd.DataFrame) -> plt.Figure:
     n = len(POSE_SOURCES)
     example = df[df["ligand_id"] == EXAMPLE_LIGAND_ID]
@@ -196,11 +257,7 @@ def build_figure(df: pd.DataFrame) -> plt.Figure:
     ax_title.axis("off")
 
     # ── Step 1: inputs ───────────────────────────────────────────────────────
-    ax1 = fig.add_subplot(gs[1])
-    ax1.set_xlim(0, 1)
-    ax1.set_ylim(0, 1)
-    ax1.axis("off")
-    ax1.text(0.01, 0.85, "STEP 1 -- INPUTS", fontsize=13, fontweight="bold", color="#1b2a41")
+    ax1 = _draw_step_band(fig, gs[1], "#eaf1f8", "STEP 1 — INPUTS", "#1b2a41")
     n_targets = df[PROTEIN_CONF_ID].str.split("-").str[0].nunique()
     n_binders = int((df["ligand_category"] == "strong-binder").sum())
     n_decoys = int((df["ligand_category"] == "decoy").sum())
@@ -216,39 +273,44 @@ def build_figure(df: pd.DataFrame) -> plt.Figure:
                    facecolor="white", edgecolor=color, fontcolor="#222222", fontsize=10)
 
     # ── Step 2: pose sources ─────────────────────────────────────────────────
-    ax2 = fig.add_subplot(gs[2])
-    ax2.set_xlim(0, 1)
-    ax2.set_ylim(0, 1)
-    ax2.axis("off")
-    ax2.text(0.01, 0.85, "STEP 2 -- SCORE WITH EACH PLBP METHOD", fontsize=13,
-              fontweight="bold", color="#1b2a41")
+    ax2 = _draw_step_band(fig, gs[2], "#eaf1f8", "STEP 2 — SCORE WITH EACH PLBP METHOD", "#1b2a41")
     box_w = 0.94 / n
+    chip_gap = 0.018
     for i, spec in enumerate(POSE_SOURCES):
         x0 = 0.03 + i * box_w
-        _draw_box(ax2, (x0 + 0.01, 0.1), box_w - 0.02, 0.55, spec["label"],
+        _draw_box(ax2, (x0 + chip_gap, 0.1), box_w - 2 * chip_gap, 0.55, spec["label"],
                    facecolor=POSE_SOURCE_COLOR[spec["label"]], fontsize=13)
 
     # ── Step 3: raw scores ────────────────────────────────────────────────────
-    gs3 = gs[3].subgridspec(1, n, wspace=0.35)
+    # Distributions restored as KDE curves (kde_curve, kde_helpers.py), not the
+    # 12-bin histograms the script previously drew -- the same treatment
+    # Figure 2 gives its raw-score column, and what keeps a ~55-value panel
+    # from reading as a comb (see the module docstring's Step 4 note on the
+    # bounded version of this same fix).
+    step3_content = _draw_step_band_split(
+        fig, gs[3], "#eef1f4", "STEP 3 — RAW SCORES (DIFFERENT SCALES, NOT COMPARABLE)", "#1b2a41",
+    )
+    gs3 = step3_content.subgridspec(1, n, wspace=0.35)
     for i, spec in enumerate(POSE_SOURCES):
         ax = fig.add_subplot(gs3[i])
+        _draw_card_bg(ax)
         color = POSE_SOURCE_COLOR[spec["label"]]
         vals = df[spec["raw_col"]].dropna()
-        ax.hist(vals, bins=12, color=color, alpha=0.55, edgecolor=color)
+        x_grid = np.linspace(vals.min(), vals.max(), 300)
+        curve = kde_curve(vals, x_grid)
+        ax.fill_between(x_grid, 0, curve, color=color, alpha=0.55, linewidth=0)
+        ax.plot(x_grid, curve, color=color, linewidth=1.6)
         ax.axvline(example[spec["raw_col"]], color="#d62728", linestyle="--", linewidth=1.5)
         ax.text(example[spec["raw_col"]], ax.get_ylim()[1] * 0.92, "ligand",
                  color="#d62728", fontsize=8, ha="center", fontweight="bold")
         ax.set_title(spec["label"], color=color, fontsize=11, fontweight="bold")
         ax.set_xlabel(spec["direction"], fontsize=7.5)
         ax.set_yticks([])
-        for spine in ("top", "right", "left"):
+        for spine in ("top", "right", "left", "bottom"):
             ax.spines[spine].set_visible(False)
         if spec["note"]:
             ax.text(0.5, -0.55, spec["note"], transform=ax.transAxes, fontsize=6,
                      ha="center", va="top", style="italic", color="#555555")
-        if i == 0:
-            ax.text(-0.35, 1.15, "STEP 3 -- RAW SCORES (DIFFERENT SCALES, NOT COMPARABLE)",
-                     transform=ax.transAxes, fontsize=12, fontweight="bold", color="#1b2a41")
 
     # ── Standardize arrow ─────────────────────────────────────────────────────
     ax_std = fig.add_subplot(gs[4])
@@ -259,38 +321,52 @@ def build_figure(df: pd.DataFrame) -> plt.Figure:
     ax_std.text(
         0.5, 0.35,
         "Rank within each protein -> rank / N -> combine each pose source's tracks by MEAN,\n"
-        "then combine pose sources by MEDIAN across sources (0e7c959) -- not a flat mean.",
+        "then combine pose sources by MEDIAN across sources (0e7c959) — not a flat mean.",
         ha="center", va="center", fontsize=9, style="italic", color="#333333",
     )
 
     # ── Step 4: rank percentile ───────────────────────────────────────────────
-    gs4 = gs[5].subgridspec(1, n, wspace=0.35)
+    # Plotted as 1 - vote (higher = better), matching score_comparison.ipynb's
+    # Figure 3 and score_distribution.ipynb's Figure 2 right column -- the
+    # stored rank-percentile columns are 0 = best throughout guild, but a
+    # figure that shows a "P = 98%" label sitting at x = 0.02 on an axis
+    # literally labelled "rank percentile" asserts both conventions on the
+    # same panel (the same confusion documented in the Supp. Text 6 caveat).
+    # kde_curve_bounded is exactly the reflected/boundary-corrected KDE Figure
+    # 2's b2 fix introduced, since this column is bounded to [0, 1] by
+    # construction and a plain KDE would put visible mass outside it.
+    step4_content = _draw_step_band_split(
+        fig, gs[5], "#e8f5ee", "STEP 4 — RANK PERCENTILE (UNIFIED SCALE, ONE VOTE PER POSE SOURCE)", "#1b7a41",
+    )
+    gs4 = step4_content.subgridspec(1, n, wspace=0.35)
+    rp_x_grid = np.linspace(0.0, 1.0, 300)
     for i, spec in enumerate(POSE_SOURCES):
         ax = fig.add_subplot(gs4[i])
+        _draw_card_bg(ax)
         color = POSE_SOURCE_COLOR[spec["label"]]
         vote = _pose_source_vote(df, spec["rp_cols"])
-        vals = vote.dropna()
-        ax.hist(vals, bins=12, range=(0, 1), color=color, alpha=0.55, edgecolor=color)
+        vals = (1 - vote).dropna()
+        curve = kde_curve_bounded(vals, rp_x_grid)
+        ax.fill_between(rp_x_grid, 0, curve, color=color, alpha=0.55, linewidth=0)
+        ax.plot(rp_x_grid, curve, color=color, linewidth=1.6)
         example_vote = _pose_source_vote(df.loc[[example.name]], spec["rp_cols"]).iloc[0]
-        ax.axvline(example_vote, color="#d62728", linestyle="--", linewidth=1.5)
-        pct = 100 * (1 - example_vote)  # 0 = best -> report as a percentile, higher = better
-        ax.text(example_vote, ax.get_ylim()[1] * 0.85, f"P = {pct:.0f}%", color="white",
+        example_display = 1 - example_vote
+        ax.axvline(example_display, color="#d62728", linestyle="--", linewidth=1.5)
+        pct = 100 * example_display
+        ax.text(example_display, ax.get_ylim()[1] * 0.85, f"P = {pct:.0f}%", color="white",
                  fontsize=8, ha="center", fontweight="bold",
                  bbox={"boxstyle": "round,pad=0.2", "facecolor": "#d62728", "edgecolor": "none"})
         n_votes = 1 if isinstance(spec["rp_cols"], str) else len(spec["rp_cols"])
         title = spec["label"] if n_votes == 1 else f"{spec['label']} (1 vote, mean of {n_votes} tracks)"
         ax.set_title(title, color=color, fontsize=10, fontweight="bold")
-        ax.set_xlabel("rank percentile", fontsize=8)
+        ax.set_xlabel("rank percentile (higher = better)", fontsize=8)
         ax.set_xlim(0, 1)
         ax.set_yticks([])
-        for spine in ("top", "right", "left"):
+        for spine in ("top", "right", "left", "bottom"):
             ax.spines[spine].set_visible(False)
-        if i == 0:
-            ax.text(-0.35, 1.15, "STEP 4 -- RANK PERCENTILE (UNIFIED SCALE, ONE VOTE PER POSE SOURCE)",
-                     transform=ax.transAxes, fontsize=12, fontweight="bold", color="#1b7a41")
 
     fig.suptitle(
-        f"Built from the {n_targets}-target rerun -- ligand {EXAMPLE_LIGAND_ID} highlighted "
+        f"Built from the {n_targets}-target rerun — ligand {EXAMPLE_LIGAND_ID} highlighted "
         "throughout as a worked example. Schematic: clarity over completeness.",
         fontsize=9, color="#777777", y=0.005,
     )
@@ -316,7 +392,7 @@ def main(argv=None) -> int:
     fig = build_figure(df)
     for ext in ("png", "pdf", "svg"):
         out_path = args.out / f"rank_percentile_schematic.{ext}"
-        fig.savefig(out_path, dpi=300, bbox_inches="tight")
+        fig.savefig(out_path, dpi=600, bbox_inches="tight")
         print(f"Saved {out_path}")
     return 0
 
