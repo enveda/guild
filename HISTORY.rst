@@ -4,6 +4,43 @@ History
 
 Unreleased
 ----------
+* Figure 3 (``score_comparison.ipynb``): the grey/orange rug ticks (R4 b3), the "Density"
+  y-axis (R4 b4), and the score-orientation inversion are now all explicit instead of
+  implicit. The rug ticks are per-molecule values -- the decoy rug (grey) is a random
+  subsample (``RUG_SUBSAMPLE_N = 400``, ``RUG_SEED = 42``, both now named and printed),
+  the known-binder rug (orange) is the complete set -- not "per-target values underlying
+  the pooled distributions" as the current draft reply to b3 says; that sentence needs
+  correcting in the letter. The y-axis is relabelled "Probability density" and now uses
+  the same ``kde_curve_bounded`` as Figure 2's b2 fix, so each panel's curve genuinely
+  integrates to 1 on its own bounded support; the shared y-scale is kept (comparability
+  across the three panels is the point of the figure) and is now stated in the printed
+  output rather than left to be inferred from the hidden y-ticks. The x-axis label is now
+  "Normalized score (higher = better)": panel A plots ``1 - rp_vina_score`` even though
+  the stored column is 0 = best, which is the actual source of the Supp. Text 6 vs. code
+  discrepancy ("1 indicates the top-ranked molecule" is about the plotted axis, not the
+  stored value) -- both were right about different things, and nobody had flagged that
+  the notebook flips it. Neither the stored value nor the inversion itself is changed.
+  Also now prints the three panel AUCs, which were computed for the in-panel annotation
+  but never emitted: on this dataset, rank percentile (0.684) beats z-score (0.597) by a
+  real margin, unlike the reviewer-response reproduction over 47 targets (0.675 vs.
+  0.674, effectively tied) -- these are different analyses (this notebook's own
+  binder/decoy join vs. that script's stricter "both classes present per target" filter),
+  so the discrepancy is reported rather than resolved here; whoever finalises the a3 reply
+  needs to reconcile it. ``kde_curve``/``kde_curve_bounded`` now live in a shared
+  ``kde_helpers.py``, imported by both figure notebooks, so the b2 fix is one function,
+  not two copies that could drift.
+* ``score_comparison.ipynb``'s ``_decoy_pct``, ``_zscore`` and ``_decoy_fit_unbounded``
+  no longer use ``groupby(protein_col, group_keys=False).apply(...)`` -- the same pattern
+  ``e9a6fe7`` removed from ``guild.tools.scores.compute_rank_percentile_scores``, and
+  confirmed here to emit the same ``FutureWarning`` on pandas 2.2+ that fix described.
+  ``_zscore`` is now a straightforward ``groupby(...).transform("mean"/"std")``; the other
+  two reference a different set (decoys only) than the group being scored, so they cannot
+  be a single `.transform()` call, but no longer touch ``DataFrameGroupBy.apply()``
+  either -- rewritten as a per-protein decoy-array lookup (built by iterating the groupby
+  object, not ``.apply()``) plus the same per-value arithmetic as before. Verified
+  numerically identical to the old implementation on the real Figure 3 input data (max
+  abs diff 8.8e-16, floating-point noise only) and that row count and row order are
+  unchanged (asserted in the notebook itself, not just checked once here).
 * Figure 2 (``score_distribution.ipynb``) is rebuilt on the 3-target rerun and no longer
   plots DiffDock's or Boltz-2's *pose confidence* as the ranked quantity -- it now shows
   the Vina-rescore ΔG that actually enters the score (``vina_rescore_diffdock_score``,
