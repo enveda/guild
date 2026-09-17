@@ -480,6 +480,8 @@ which is not ranked.
 > KarmaDock each vote once, and DiffDock's/Boltz's two auto-added rescores (`vina_rescore_*`
 > and `gnina_rescore_*`) are averaged together first so that pose source also votes once,
 > rather than the naive flat mean handing DiffDock/Boltz three votes apiece for one pose.
+> `boltz_affinity_score` (see below) joins that same Boltz group as a third estimate, so
+> requesting `boltz` still contributes one pose-source vote, not two.
 >
 > Across pose sources, the **default takes the median**, not the mean
 > (`aggregation="pose_source_median"`). On the three-target benchmark (165 pairs, 15 known
@@ -504,6 +506,16 @@ which is not ranked.
 > use `vina_rescore_boltz_score`. Likewise `gnina`'s `gnina_score` is the Vina-style affinity
 > (kcal/mol, lower = better) while `gnina_cnn_score` is a pose-confidence side channel that does
 > not participate in guild's rank-percentile aggregation.
+>
+> **`boltz_affinity_score`** is different from all three: it's Boltz-2's own affinity
+> prediction — log10(IC50/µM), **lower = more potent**, populated whenever `boltz` runs (read
+> from the same output tree `boltz_guild_scoring` already parses; NaN for a combination with
+> no affinity output). It gets `rank_boltz_affinity_score` / `rp_boltz_affinity_score` and
+> votes in `global_rp_score` as part of Boltz's pose-source group, alongside
+> `vina_rescore_boltz_score` and `gnina_rescore_boltz_score`. Whether that's a fair test is
+> still open — Boltz-2's affinity head is trained on binding-affinity data, and the benchmark
+> binders are ChEMBL compounds, so some of its strength there may be training-set recall
+> rather than generalisation; that overlap audit is still outstanding.
 
 #### Coordinate-frame caveat
 

@@ -76,13 +76,22 @@ NESSO_SCORE = f"{NESSO_PREFIX}_score"
 # RANKS_DICTIONARY / RP_SCORES_DICTIONARY.
 NESSO_BINDER_PROBABILITY = f"{NESSO_PREFIX}_binder_probability"
 NESSO_ENTROPY_PL = f"{NESSO_PREFIX}_entropy_pl"
-# Side channel: Boltz-2's own affinity head (log10(IC50/uM)), read from the
-# same output tree boltz_guild_scoring already produces. guild's primary
-# boltz_score is an ipTM confidence, not this — this column exists purely as
-# a free, same-quantity comparator for validating Nesso-1 against. Also
-# deliberately absent from ALL_AVAILABLE_METHODS / SCORES_DICTIONARY /
-# RANKS_DICTIONARY / RP_SCORES_DICTIONARY.
+# Boltz-2's own affinity head (log10(IC50/uM), lower = more potent), read
+# from the same output tree boltz_guild_scoring already produces. Unlike
+# boltz_score (an ipTM confidence), this is a genuine affinity estimate, so
+# it is ranked and voted into global_rp_score under BOLTZ_AFFINITY_PREFIX —
+# see SCORES_DIRECTION_DICTIONARY / RANKS_DICTIONARY / RP_SCORES_DICTIONARY
+# in guild/constants/bulk.py. It is grouped into Boltz's own pose source
+# there (POSE_SOURCE_DICTIONARY), not a sixth independent vote, since it is
+# co-predicted with the same complex vina_rescore_boltz / gnina_rescore_boltz
+# already rescore. Populated whenever boltz runs; NaN for a combination with
+# no affinity output (e.g. a run predating this column).
 BOLTZ_AFFINITY_SCORE = f"{BOLTZ_PREFIX}_affinity_score"
+# Prefix key for the ranking/voting machinery above. Not a docking method in
+# its own right — it has no entry in method_runners (guild/bulk.py) and needs
+# no docking step of its own, since the value is already parsed alongside
+# boltz_score.
+BOLTZ_AFFINITY_PREFIX = "boltz_affinity"
 
 
 SCORES_DICTIONARY = {

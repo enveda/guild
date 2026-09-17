@@ -816,7 +816,109 @@ class TestMedianAggregation:
 
 
 # ---------------------------------------------------------------------------
-# 13. Score plausibility
+# 13. Boltz-2's affinity head votes as part of Boltz's pose source
+# ---------------------------------------------------------------------------
+class TestBoltzAffinityVote:
+    """boltz_affinity_score is a genuine affinity estimate (unlike boltz_score,
+    an ipTM confidence), so it is ranked and voted -- but it joins Boltz's
+    existing vote as a third estimate rather than counting as its own."""
+
+    def test_boltz_affinity_is_ranked(self):
+        """rp_boltz_affinity_score / rank_boltz_affinity_score get produced."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[None, None, None],
+            boltz_affinity_scores=[-9.0, -7.0, -5.0],
+        )
+        result = compute_rank_percentile_scores(df, methods=["boltz_affinity"])
+
+        assert RP_SCORES_DICTIONARY["boltz_affinity"] in result.columns
+        assert RANKS_DICTIONARY["boltz_affinity"] in result.columns
+
+    def test_direction_is_minimum_most_negative_is_best(self):
+        """Lower log10(IC50/uM) = more potent = best -> lowest rp_score."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[None, None, None],
+            boltz_affinity_scores=[-9.0, -7.0, -5.0],
+        )
+        result = compute_rank_percentile_scores(df, methods=["boltz_affinity"])
+
+        rp_col = RP_SCORES_DICTIONARY["boltz_affinity"]
+        assert result.loc[0, rp_col] == pytest.approx(1 / 3)  # -9.0, most negative
+        assert result.loc[2, rp_col] == pytest.approx(1.0)  # -5.0, least negative
+
+    def test_boltz_affinity_joins_boltz_group_instead_of_voting_alone(self):
+        """Vina and Boltz's group (its two rescores plus the affinity head)
+        must combine as exactly two pose-source votes, not four independent
+        ones -- constructed so the two give a different global score."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],
+            vina_rescore_boltz_scores=[-1.0, -5.0, -9.0],
+            gnina_rescore_boltz_scores=[-2.0, -5.0, -8.0],
+            boltz_affinity_scores=[-1.0, -4.0, -9.0],
+        )
+        methods = [
+            "vina",
+            "vina_rescore_boltz",
+            "gnina_rescore_boltz",
+            "boltz_affinity",
+        ]
+        result = compute_rank_percentile_scores(df, methods=methods)
+
+        vina_rp = result[RP_SCORES_DICTIONARY["vina"]]
+        vrb_rp = result[RP_SCORES_DICTIONARY["vina_rescore_boltz"]]
+        grb_rp = result[RP_SCORES_DICTIONARY["gnina_rescore_boltz"]]
+        ba_rp = result[RP_SCORES_DICTIONARY["boltz_affinity"]]
+
+        # Actual contract: vina votes once, Boltz's 3 tracks average to one
+        # more vote -- 2 votes total (median of 2 = mean of 2).
+        boltz_group = (vrb_rp + grb_rp + ba_rp) / 3
+        expected_two_votes = (vina_rp + boltz_group) / 2
+
+        # What it would be if boltz_affinity voted independently alongside
+        # the other 3 columns, flat, with no pose-source grouping at all.
+        expected_four_independent_votes = (vina_rp + vrb_rp + grb_rp + ba_rp) / 4
+
+        np.testing.assert_allclose(result[GLOBAL_RP_SCORE].values, expected_two_votes.values)
+        assert not np.allclose(
+            result[GLOBAL_RP_SCORE].values, expected_four_independent_votes.values
+        )
+
+    def test_missing_affinity_for_one_row_leaves_boltz_vote_intact(self):
+        """A row with no boltz_affinity_score still gets a Boltz vote, taken
+        from its two rescore siblings -- the missing value is excluded, not
+        imputed as 0 or as the group's worst case."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],
+            vina_rescore_boltz_scores=[-1.0, -5.0, -9.0],
+            gnina_rescore_boltz_scores=[-2.0, -5.0, -8.0],
+            boltz_affinity_scores=[np.nan, -4.0, -9.0],
+        )
+        methods = [
+            "vina",
+            "vina_rescore_boltz",
+            "gnina_rescore_boltz",
+            "boltz_affinity",
+        ]
+        result = compute_rank_percentile_scores(df, methods=methods)
+
+        vina_rp = result[RP_SCORES_DICTIONARY["vina"]]
+        vrb_rp = result[RP_SCORES_DICTIONARY["vina_rescore_boltz"]]
+        grb_rp = result[RP_SCORES_DICTIONARY["gnina_rescore_boltz"]]
+        ba_rp = result[RP_SCORES_DICTIONARY["boltz_affinity"]]
+
+        assert np.isnan(ba_rp.iloc[0])  # premise: row 0's affinity head is missing
+
+        expected_boltz_group_row0 = (vrb_rp.iloc[0] + grb_rp.iloc[0]) / 2
+        expected_row0 = (vina_rp.iloc[0] + expected_boltz_group_row0) / 2
+        assert result[GLOBAL_RP_SCORE].iloc[0] == pytest.approx(expected_row0)
+
+
+# ---------------------------------------------------------------------------
+# 14. Score plausibility
 # ---------------------------------------------------------------------------
 class TestIsPhysicalScore:
     def test_plausible_vina_energy_is_physical(self):

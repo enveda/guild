@@ -4,6 +4,23 @@ History
 
 Unreleased
 ----------
+* ``boltz_affinity_score`` (Boltz-2's own affinity head, log10(IC50/uM), read
+  from the same output tree ``boltz_guild_scoring`` already parses) is now
+  ranked and votes in ``global_rp_score``, via the new
+  ``BOLTZ_AFFINITY_PREFIX`` prefix. Previously deliberately excluded as a
+  side channel for validating Nesso-1 against; that rationale doesn't
+  survive the criterion adopted for the pose-confidence exclusion above —
+  it's a genuine affinity estimate, not a confidence, so it qualifies on the
+  same grounds ``vina_rescore_boltz``/``gnina_rescore_boltz`` do. It joins
+  Boltz's existing pose-source group as a third estimate
+  (``POSE_SOURCE_DICTIONARY[BOLTZ_AFFINITY_PREFIX] == BOLTZ_PREFIX``) rather
+  than voting independently, so requesting ``boltz`` still contributes one
+  pose-source vote, not two. Whether this is a fair test is unresolved —
+  Boltz-2's affinity head is trained on binding-affinity data and the
+  benchmark's 15 known binders are ChEMBL compounds at pChEMBL 9.15–10.7, so
+  some of its benchmark strength may be training-set recall; that overlap
+  audit is still outstanding, and no performance claim is made here on the
+  strength of the benchmark number.
 * ``global_rp_score`` now combines pose sources with their **median**, not
   their mean (``compute_rank_percentile_scores(..., aggregation=
   "pose_source_median")``, the new default). Measured on the three-target

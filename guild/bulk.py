@@ -48,6 +48,7 @@ from guild.constants.diffdock import (
 )
 from guild.constants.guild import (
     ALL_AVAILABLE_METHODS,
+    BOLTZ_AFFINITY_PREFIX,
     BOLTZ_FOLDER,
     BOLTZ_PREFIX,
     BOX_LOCATION,
@@ -493,6 +494,17 @@ class BulkRun:
             and GNINA_RESCORE_BOLTZ_PREFIX not in self.methods_to_run
         ):
             self.methods_to_run = list(self.methods_to_run) + [GNINA_RESCORE_BOLTZ_PREFIX]
+        # boltz_affinity is not a docking method — the value is already parsed
+        # by boltz_guild_scoring alongside boltz_score, so this needs no
+        # docking step of its own (method_runners in run_docking has no entry
+        # for it, so it is a no-op there, same as the rescore tracks above).
+        # It only needs to be listed so compute_rank_percentile_scores ranks
+        # and votes it in — see BOLTZ_AFFINITY_PREFIX in guild/constants/bulk.py.
+        if (
+            BOLTZ_PREFIX in self.methods_to_run
+            and BOLTZ_AFFINITY_PREFIX not in self.methods_to_run
+        ):
+            self.methods_to_run = list(self.methods_to_run) + [BOLTZ_AFFINITY_PREFIX]
 
         # Resolve gnina_input_mode against the (now auto-extended) methods
         # list. SDF-mode only applies when gnina is the *sole* PDBQT-relevant
