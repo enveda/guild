@@ -4,6 +4,24 @@ History
 
 Unreleased
 ----------
+* Added ``notebooks/analysis/reviewer_response/build_supplementary_tables.py``, ported
+  from a session scratchpad so Supplementary Tables S1-S6 (every per-method AUC quoted in
+  R2-3/R2-4, the PoseBusters pose-validity rates in R2-4) have a committed, regenerable
+  path instead of existing nowhere but a prior session. Follows its committed sibling
+  ``reproduce_response_analyses.py``'s conventions (``--data``/``--out``, module
+  docstring, ``write()`` helper). Ported changes only, output unchanged: hardcoded
+  ``C:/Users/...`` paths replaced with ``--data``/``--out``; the ``sys.path`` insert
+  dropped (unnecessary once the file lives in the repo); the pandas-3 ``_pcid_keep``
+  save/restore workaround deleted as dead code now that ``e9a6fe7`` fixed
+  ``compute_rank_percentile_scores`` to keep its grouping column at source (the
+  recompute itself is kept, and why: the file on disk predates both the median
+  aggregation, ``0e7c959``, and ``boltz_affinity_score``'s ranking, ``0d36671``); and a
+  stale docstring line rewritten (Boltz-2's affinity head has had its own
+  ``rp_boltz_affinity_score`` column, ranked like every other track, since ``0d36671`` --
+  the code already read it correctly, only the comment was wrong). Verified against the
+  real rerun data that the four numbers the response letter quotes verbatim from Table S1
+  are unchanged: Guild combined 0.838, AutoDock Vina 0.788, Boltz-2 affinity 0.985, GNINA
+  0.739.
 * Added ``notebooks/analysis/build_rank_percentile_schematic.py``, which generates the
   Supplementary Text 3 rank-percentile schematic from the real 3-target rerun instead of
   the hand-built, uncaptioned original (``guild_rank_percentile_figure.png`` /
