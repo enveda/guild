@@ -476,14 +476,23 @@ which is not ranked.
 > **How `global_rp_score` combines methods.** `diffdock_score` and `boltz_score` are pose
 > confidences (a diffusion confidence and an ipTM), not affinity estimates, so — like
 > `gnina_cnn_score` — they get their own `rp_*` column but do not vote in `global_rp_score`.
-> The remaining tracks are grouped by which engine generated the pose before averaging: Vina,
-> gnina and KarmaDock each vote once, and DiffDock's/Boltz's two auto-added rescores
-> (`vina_rescore_*` and `gnina_rescore_*`) are averaged together first so that pose source also
-> votes once, rather than the naive flat mean handing DiffDock/Boltz three votes apiece for one
-> pose. `compute_rank_percentile_scores(..., aggregation="flat")` reproduces that older
-> unweighted mean, kept only so scores computed before this grouping existed stay reproducible.
-> Methods can have different denominators for the same protein, so `global_rp_score` is not
-> bounded by any single method's endpoints.
+> The remaining tracks are grouped by which engine generated the pose: Vina, gnina and
+> KarmaDock each vote once, and DiffDock's/Boltz's two auto-added rescores (`vina_rescore_*`
+> and `gnina_rescore_*`) are averaged together first so that pose source also votes once,
+> rather than the naive flat mean handing DiffDock/Boltz three votes apiece for one pose.
+>
+> Across pose sources, the **default takes the median**, not the mean
+> (`aggregation="pose_source_median"`). On the three-target benchmark (165 pairs, 15 known
+> binders, 150 decoys) the unweighted mean scored 0.781 AUC, below AutoDock Vina alone
+> (0.790), almost entirely because one track (DiffDock, 0.281 standalone there) dragged it
+> down; the median scored 0.824 with the same five methods included, with no engine singled
+> out and no fitted weight. This is a directional result at 15 known binders — the confidence
+> intervals overlap heavily — not a significant one.
+> `compute_rank_percentile_scores(..., aggregation="pose_source")` takes the mean across pose
+> sources instead (the previous default), and `aggregation="flat"` reproduces the original
+> unweighted mean with no pose-source grouping at all, kept only so scores computed before
+> that grouping existed stay reproducible. Methods can have different denominators for the
+> same protein, so `global_rp_score` is not bounded by any single method's endpoints.
 
 > **Denominator.** `n` above is the number of molecules that produced a valid score for that
 > protein. `compute_rank_percentile_scores(..., denominator="attempted")` divides by every pair

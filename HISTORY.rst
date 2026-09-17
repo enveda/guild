@@ -4,6 +4,19 @@ History
 
 Unreleased
 ----------
+* ``global_rp_score`` now combines pose sources with their **median**, not
+  their mean (``compute_rank_percentile_scores(..., aggregation=
+  "pose_source_median")``, the new default). Measured on the three-target
+  benchmark (165 pairs, 15 known binders, 150 decoys): the unweighted mean
+  scored 0.781 AUC, below AutoDock Vina alone (0.790), because one track
+  (DiffDock, 0.281 standalone) dragged it down with no defence against a
+  single aberrant vote; the median scored 0.824 with all five methods still
+  included. Chosen over performance-weighting (0.851) or dropping DiffDock
+  (0.852) because it needs no fitted parameter and makes no engine-specific
+  judgement. This is a direction, not a significant result — the confidence
+  intervals overlap heavily at 15 binders. ``aggregation="pose_source"``
+  (the previous default, a mean) and ``aggregation="flat"`` are both still
+  available for reproducing older scores.
 * Added ``notebooks/analysis/reviewer_response/`` — the scripts and
   provenance notes behind every number quoted in the reviewer response that
   isn't read directly off a guild output table (runtime, aggregation-rule

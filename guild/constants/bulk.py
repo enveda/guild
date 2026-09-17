@@ -226,13 +226,23 @@ POSE_SOURCE_DICTIONARY = {
     GNINA_RESCORE_BOLTZ_PREFIX: BOLTZ_PREFIX,
 }
 
-# How GLOBAL_RP_SCORE combines the per-method percentiles. POSE_SOURCE means
-# one pose hypothesis, one vote: mean within each pose source, then mean across
-# sources. FLAT is the original unweighted mean over every voting track, kept so
-# scores produced before the grouping existed stay reproducible.
+# How GLOBAL_RP_SCORE combines the per-method percentiles. Every mode averages
+# rescore tracks within a pose source first (mean — DiffDock and Boltz each
+# have only two rescores, where mean and median are identical anyway), then
+# combines across sources. POSE_SOURCE_MEDIAN takes the median across sources
+# and is the default: on the three-target benchmark it scored 0.824 AUC
+# against 0.781 for the flat/unweighted mean, because a single aberrant vote
+# (DiffDock scored 0.281 standalone there) drags a mean down without needing
+# to be the majority — the median has no fitted parameters, unlike
+# performance-weighting, and makes no engine-specific judgement, unlike
+# dropping a track outright. POSE_SOURCE is the plain mean across sources,
+# kept for anyone who wants it explicitly. FLAT is the original unweighted
+# mean over every voting track with no pose-source grouping at all, kept so
+# scores produced before that grouping existed stay reproducible.
 AGGREGATION_POSE_SOURCE = "pose_source"
+AGGREGATION_POSE_SOURCE_MEDIAN = "pose_source_median"
 AGGREGATION_FLAT = "flat"
-AGGREGATION_MODES = (AGGREGATION_POSE_SOURCE, AGGREGATION_FLAT)
+AGGREGATION_MODES = (AGGREGATION_POSE_SOURCE, AGGREGATION_POSE_SOURCE_MEDIAN, AGGREGATION_FLAT)
 
 SCORES_TO_USE_DICTIONARY = {
     VINA_PREFIX: [

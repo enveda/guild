@@ -12,6 +12,7 @@ import pytest
 from guild.constants.bulk import (
     AGGREGATION_FLAT,
     AGGREGATION_POSE_SOURCE,
+    AGGREGATION_POSE_SOURCE_MEDIAN,
     DENOMINATOR_ATTEMPTED,
     DENOMINATOR_VALID,
     GLOBAL_RP_SCORE,
@@ -611,20 +612,31 @@ class TestGlobalScoreAggregation:
 
         np.testing.assert_allclose(result[GLOBAL_RP_SCORE].values, expected_flat.values)
 
-    def test_default_aggregation_is_pose_source(self):
-        """Adding the parameter must not silently change existing single-pose-source callers."""
+    def test_default_aggregation_is_pose_source_median(self):
+        """Default must be pose_source_median, not the older pose_source mean."""
         df = _make_df(
             protein_ids=["P1"] * 3,
-            vina_scores=[-10.0, -8.0, -6.0],
-            karmadock_scores=[1.0, 5.0, 3.0],
+            vina_scores=[-10.0, -8.0, -6.0],  # row 0 best (rank 1 -> rp 1/3)
+            karmadock_scores=[9.0, 5.0, 1.0],  # row 0 best (rank 1 -> rp 1/3)
+            gnina_scores=[10.0, 8.0, 6.0],  # row 0 worst (rank 3 -> rp 1.0) -- the aberrant vote
         )
-        default = compute_rank_percentile_scores(df, methods=["vina", "karmadock"])
-        explicit = compute_rank_percentile_scores(
-            df, methods=["vina", "karmadock"], aggregation=AGGREGATION_POSE_SOURCE
+        default = compute_rank_percentile_scores(df, methods=["vina", "karmadock", "gnina"])
+        explicit_median = compute_rank_percentile_scores(
+            df,
+            methods=["vina", "karmadock", "gnina"],
+            aggregation=AGGREGATION_POSE_SOURCE_MEDIAN,
+        )
+        explicit_mean = compute_rank_percentile_scores(
+            df, methods=["vina", "karmadock", "gnina"], aggregation=AGGREGATION_POSE_SOURCE
         )
 
         np.testing.assert_allclose(
-            default[GLOBAL_RP_SCORE].values, explicit[GLOBAL_RP_SCORE].values
+            default[GLOBAL_RP_SCORE].values, explicit_median[GLOBAL_RP_SCORE].values
+        )
+        # With 3 independent sources disagreeing, median and mean actually differ,
+        # so this also confirms the default really is the median, not the mean.
+        assert not np.allclose(
+            default[GLOBAL_RP_SCORE].values, explicit_mean[GLOBAL_RP_SCORE].values
         )
 
     def test_unknown_aggregation_raises(self):
@@ -682,7 +694,129 @@ class TestGlobalScoreAggregation:
 
 
 # ---------------------------------------------------------------------------
-# 12. Score plausibility
+# 12. Median cross-source aggregation (the new default)
+# ---------------------------------------------------------------------------
+class TestMedianAggregation:
+    """pose_source_median combines per-source votes with a median instead of
+    a mean, so one aberrant pose source cannot drag the consensus as far."""
+
+    def test_median_of_five_pose_source_votes_resists_one_aberrant_vote(self):
+        """Hand-computed case: 4 sources agree row 0 is the best binder, one
+        (diffdock, via its two rescore tracks) calls it the worst. The mean
+        gets dragged toward the outlier; the median ignores it."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],  # row 0 best -> rp 1/3
+            karmadock_scores=[9.0, 5.0, 1.0],  # row 0 best -> rp 1/3
+            gnina_scores=[-10.0, -8.0, -6.0],  # row 0 best -> rp 1/3
+            nesso_scores=[-10.0, -8.0, -6.0],  # row 0 best -> rp 1/3
+            # diffdock pose source (rescore tracks, mean of the two): row 0 worst -> rp 1.0
+            vina_rescore_diffdock_scores=[-1.0, -2.0, -3.0],
+            gnina_rescore_diffdock_scores=[-1.0, -2.0, -3.0],
+        )
+        methods = [
+            "vina",
+            "karmadock",
+            "gnina",
+            "nesso",
+            "vina_rescore_diffdock",
+            "gnina_rescore_diffdock",
+        ]
+        median_result = compute_rank_percentile_scores(
+            df, methods=methods, aggregation=AGGREGATION_POSE_SOURCE_MEDIAN
+        )
+        mean_result = compute_rank_percentile_scores(
+            df, methods=methods, aggregation=AGGREGATION_POSE_SOURCE
+        )
+
+        # 5 pose-source votes for row 0: [1/3, 1/3, 1/3, 1/3, 1.0].
+        expected_median = 1 / 3
+        expected_mean = (4 * (1 / 3) + 1.0) / 5
+
+        assert median_result[GLOBAL_RP_SCORE].iloc[0] == pytest.approx(expected_median)
+        assert mean_result[GLOBAL_RP_SCORE].iloc[0] == pytest.approx(expected_mean)
+        assert median_result[GLOBAL_RP_SCORE].iloc[0] < mean_result[GLOBAL_RP_SCORE].iloc[0]
+
+    def test_missing_pose_source_takes_median_of_the_survivors(self):
+        """A row with only 3 of 5 pose sources scored takes the median of
+        those 3 — the 2 missing sources are excluded, not imputed as 0 or 1."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],  # row 0 -> rp 1/3
+            karmadock_scores=[9.0, 5.0, 1.0],  # row 0 -> rp 1/3
+            gnina_scores=[10.0, 8.0, 6.0],  # row 0 -> rp 1.0
+            nesso_scores=[np.nan, -8.0, -6.0],  # row 0 missing entirely
+            vina_rescore_diffdock_scores=[np.nan, -2.0, -3.0],  # row 0 missing
+            gnina_rescore_diffdock_scores=[np.nan, 10.0, 1.0],  # row 0 missing (whole source gone)
+        )
+        methods = [
+            "vina",
+            "karmadock",
+            "gnina",
+            "nesso",
+            "vina_rescore_diffdock",
+            "gnina_rescore_diffdock",
+        ]
+        result = compute_rank_percentile_scores(
+            df, methods=methods, aggregation=AGGREGATION_POSE_SOURCE_MEDIAN
+        )
+
+        # Row 0 has 3 surviving votes: vina=1/3, karmadock=1/3, gnina=1.0.
+        assert result[GLOBAL_RP_SCORE].iloc[0] == pytest.approx(1 / 3)
+
+    def test_two_surviving_votes_give_their_mean(self):
+        """The even-count case: median of exactly 2 votes equals their mean."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],  # row 0 -> rp 1/3
+            karmadock_scores=[1.0, 5.0, 9.0],  # row 0 -> rp 1.0
+        )
+        result = compute_rank_percentile_scores(
+            df, methods=["vina", "karmadock"], aggregation=AGGREGATION_POSE_SOURCE_MEDIAN
+        )
+
+        vina_rp = result[RP_SCORES_DICTIONARY["vina"]].iloc[0]
+        karma_rp = result[RP_SCORES_DICTIONARY["karmadock"]].iloc[0]
+        assert result[GLOBAL_RP_SCORE].iloc[0] == pytest.approx((vina_rp + karma_rp) / 2)
+
+    def test_explicit_pose_source_still_reproduces_the_plain_mean(self):
+        """aggregation='pose_source' must still mean the mean, not the new default."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],
+            karmadock_scores=[9.0, 5.0, 1.0],
+            gnina_scores=[10.0, 8.0, 6.0],
+        )
+        result = compute_rank_percentile_scores(
+            df, methods=["vina", "karmadock", "gnina"], aggregation=AGGREGATION_POSE_SOURCE
+        )
+
+        vina_rp = result[RP_SCORES_DICTIONARY["vina"]]
+        karma_rp = result[RP_SCORES_DICTIONARY["karmadock"]]
+        gnina_rp = result[RP_SCORES_DICTIONARY["gnina"]]
+        expected_mean = (vina_rp + karma_rp + gnina_rp) / 3
+
+        np.testing.assert_allclose(result[GLOBAL_RP_SCORE].values, expected_mean.values)
+
+    def test_flat_mode_unaffected_by_the_new_default(self):
+        """aggregation='flat' still reproduces the original nine-way-style
+        unweighted mean over every voting track, regardless of the default change."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],
+            karmadock_scores=[9.0, 5.0, 1.0],
+            gnina_scores=[10.0, 8.0, 6.0],
+            nesso_scores=[-10.0, -8.0, -6.0],
+        )
+        methods = ["vina", "karmadock", "gnina", "nesso"]
+        result = compute_rank_percentile_scores(df, methods=methods, aggregation=AGGREGATION_FLAT)
+
+        expected_flat = sum(result[RP_SCORES_DICTIONARY[m]] for m in methods) / len(methods)
+        np.testing.assert_allclose(result[GLOBAL_RP_SCORE].values, expected_flat.values)
+
+
+# ---------------------------------------------------------------------------
+# 13. Score plausibility
 # ---------------------------------------------------------------------------
 class TestIsPhysicalScore:
     def test_plausible_vina_energy_is_physical(self):
