@@ -8,6 +8,7 @@ Welcome to Guild's documentation!
    readme
    installation
    usage
+   adding_a_prediction_method
    modules
    contributing
    authors

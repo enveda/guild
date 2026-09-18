@@ -31,6 +31,12 @@ Thank you for your interest in contributing to Guild! This document provides gui
 4. Commit with a clear message and push to your fork
 5. Open a Pull Request against `main`
 
+## Adding a new prediction method
+
+Wiring in a new docking/scoring method is a code contract, not a config change — see
+[docs/adding_a_prediction_method.rst](docs/adding_a_prediction_method.rst) for the six steps,
+using the GNINA integration as a worked example.
+
 ## Code Style
 
 - We use [ruff](https://docs.astral.sh/ruff/) for linting and [black](https://black.readthedocs.io/) for formatting

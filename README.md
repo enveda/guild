@@ -28,6 +28,7 @@ Guild is an open-source Protein-Ligand Binding Tools orchestrator that covers th
   * [Covalent docking (gnina)](#covalent-docking-gnina)
   * [Nesso (affinity only, no pose)](#nesso-affinity-only-no-pose)
   * [Post-analysis](#post-analysis)
+* [Adding a new prediction method](docs/adding_a_prediction_method.rst)
 
 ## Docker
 

@@ -4,6 +4,33 @@ History
 
 Unreleased
 ----------
+* Added ``docs/adding_a_prediction_method.rst``, documenting the six-step contract for wiring
+  in a new docking/scoring method (constants module, runner module, registration in the six
+  ``guild/constants/bulk.py`` dictionaries, orchestration in ``guild/bulk.py`` /
+  ``scripts/run_guild.py`` / the Makefile, complex-PDB coverage, a test), with GNINA
+  (``2502502``) as the worked example and Nesso as a second reference. Makes R3-1's reply
+  true: it previously promised a documented contract that didn't exist. Linked from
+  ``CONTRIBUTING.md`` and the README's table of contents; added to the Sphinx toctree between
+  ``usage`` and ``modules``. Added ``tests/scores/test_scores.py::TestNewMethodRegistrationIsModular``,
+  which registers a throwaway method via monkeypatch and confirms
+  ``compute_rank_percentile_scores`` ranks and votes it in with no change to that function --
+  the claim the guide makes checkable. Docs-only otherwise; no behaviour change.
+  Gaps noticed while writing this and left alone, since they are the author's call rather than
+  this commit's: (1) ``nesso`` is registered in all four of ``SCORES_DIRECTION_DICTIONARY``,
+  ``RANKS_DICTIONARY``, ``RP_SCORES_DICTIONARY`` and ``POSE_SOURCE_DICTIONARY``, and is in
+  ``ALL_AVAILABLE_METHODS``, but is missing from ``scripts/run_guild.py``'s ``--methods``
+  ``choices`` list, so it cannot be selected from the CLI or ``make run-guild``, only via the
+  Python API. (2) The Sphinx docs build was already broken before this commit, independently
+  of the new page: ``docs/conf.py`` reads ``guild.__version__``, which does not exist
+  (``guild/__init__.py`` defines no ``__version__``), so ``sphinx-build`` fails at
+  config-loading before reaching any page; separately, ``docs/readme.rst``,
+  ``docs/contributing.rst`` and ``docs/authors.rst`` each ``.. include::`` a ``.rst`` sibling
+  of a root file that is actually ``.md`` or absent (``README.rst``, ``CONTRIBUTING.rst``,
+  ``AUTHORS.rst`` don't exist), and the toctree references a ``modules.rst`` that isn't there
+  either. Verified the new page itself is unaffected: built an isolated scratch copy of
+  ``docs/`` with those four pre-existing gaps worked around only for this check (not fixed in
+  the repo) and confirmed ``adding_a_prediction_method`` renders with zero warnings attached to
+  it, against a baseline of 50 pre-existing ones from the other four pages.
 * Fixed the rank-percentile label/axis contradiction shared by the schematic's Step 4 and
   ``score_distribution.ipynb``'s Figure 2 right column: each showed a ``P = 98%``-style
   label sitting at ``x = 0.02`` on an axis literally labelled "rank percentile" -- the

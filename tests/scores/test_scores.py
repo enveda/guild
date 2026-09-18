@@ -981,3 +981,48 @@ class TestGroupingColumnSurvives:
         # Row order in: P2(-9, best of its pair), P1(-10, best), P2(-7, worst), P1(-8, worst).
         expected_rp = [0.5, 0.5, 1.0, 1.0]
         np.testing.assert_allclose(result[rp_col].values, expected_rp)
+
+
+# ---------------------------------------------------------------------------
+# 16. R3-1: a newly-registered method needs no change to this module
+# ---------------------------------------------------------------------------
+class TestNewMethodRegistrationIsModular:
+    """docs/adding_a_prediction_method.rst promises that registering a method
+    in the three scoring dictionaries is enough for compute_rank_percentile_scores
+    to rank and vote it in, with no code change here. Verified with a throwaway
+    method rather than a real one, via monkeypatch so nothing leaks between tests."""
+
+    def _register_fake_method(self, monkeypatch):
+        import guild.tools.scores as scores_mod
+
+        monkeypatch.setitem(scores_mod.SCORES_DIRECTION_DICTIONARY, "fake_method", "minimum")
+        monkeypatch.setitem(scores_mod.RANKS_DICTIONARY, "fake_method", "rank_fake_method_score")
+        monkeypatch.setitem(scores_mod.RP_SCORES_DICTIONARY, "fake_method", "rp_fake_method_score")
+
+    def test_fake_method_gets_its_own_rp_column(self, monkeypatch):
+        self._register_fake_method(monkeypatch)
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],
+            fake_method_scores=[-1.0, -5.0, -3.0],
+        )
+        result = compute_rank_percentile_scores(df, methods=["vina", "fake_method"])
+        assert not result["rp_fake_method_score"].isna().any()
+
+    def test_fake_method_votes_in_global_rp_score(self, monkeypatch):
+        # Not in POSE_SOURCE_DICTIONARY or CONFIDENCE_ONLY_METHODS -> its own
+        # voting pose source, same default a brand new engine would get.
+        self._register_fake_method(monkeypatch)
+        without_it = compute_rank_percentile_scores(
+            _make_df(protein_ids=["P1"] * 3, vina_scores=[-10.0, -8.0, -6.0]),
+            methods=["vina"],
+        )[GLOBAL_RP_SCORE]
+        with_it = compute_rank_percentile_scores(
+            _make_df(
+                protein_ids=["P1"] * 3,
+                vina_scores=[-10.0, -8.0, -6.0],
+                fake_method_scores=[-1.0, -5.0, -3.0],
+            ),
+            methods=["vina", "fake_method"],
+        )[GLOBAL_RP_SCORE]
+        assert not with_it.equals(without_it)
