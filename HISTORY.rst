@@ -4,6 +4,20 @@ History
 
 Unreleased
 ----------
+* Removed the three explanatory text blocks ``score_distribution.ipynb`` drew onto Figure 2
+  itself (the panel-D/panel-E notes about ``diffdock_score``/``boltz_affinity_score`` not
+  being ranked or voted, and the footer disclosing the 3-target rerun). Panel labels A-E, axis
+  labels, column titles and the legend are all the figure needs; the rest is caption material
+  -- and the second note rendered a git commit hash (``0d36671``) onto a manuscript figure.
+  Removed the ``"note"`` keys from ``METHOD_SPECS`` (cell 2) and the ``ax.text``/``fig.text``
+  calls that drew them (cell 3), keeping the comment explaining *why* those two tracks report
+  a native confidence without voting -- worth keeping in the code, not on the canvas. The
+  footer's target-count disclosure moves into the manuscript caption, handled separately.
+  Re-rendered and re-ran the notebook top to bottom with its output saved; numbers unchanged
+  from the last verified render (165 rows, 3 targets; coverage and non-physical percentages
+  identical). **Aspect ratio moved**: PNG went from 4480x7467 (aspect 0.600) to 4480x7212
+  (aspect 0.621, a 3.5% shift) -- comfortably past the ~1% threshold, so the manuscript's
+  ``wp:extent`` for Figure 2 needs correcting to match the new height.
 * Shifted ``build_supplementary_tables.py``'s table tags up by one, S1-S6 -> S2-S7, to match
   ``Revision 1.docx``, where the manuscript's own pre-existing Supplementary Table 1 (the GPCR
   target list) keeps its number and everything this script generates shifted up under it.
