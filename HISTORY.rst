@@ -4,6 +4,16 @@ History
 
 Unreleased
 ----------
+* Removed reviewer-response references from ``score_comparison.ipynb``'s comments (``R2-7``
+  in a cell-2 config comment and a cell-5 section header/paragraph) so the notebook reads as
+  an independently built analysis rather than a reply to a specific review point; reworded
+  around the actual reason for the property-matched decoy control (Figure 3's decoys are not
+  size-matched to the binders) instead of "the reply to R2-7 promises...". Also trimmed
+  several over-long comments elsewhere in the same notebook to state the non-obvious point in
+  fewer lines, dropping one incidental commit-hash reference (``e9a6fe7``) and one internal
+  shorthand ("Figure 2's b2 fix") that meant nothing without cross-notebook context. No logic
+  changed; re-ran the notebook to confirm -- same AUCs (0.684/0.547/0.597) and unchanged PNG
+  dimensions (1950x2693, aspect 0.7241).
 * Dropped Figure 3's decoy rug. ``score_comparison.ipynb`` drew ``RUG_SUBSAMPLE_N = 400``
   decoy ticks per panel out of a 98,596-row decoy set (0.4%) -- sparse enough that the top
   percentile of decoys (~986 molecules) showed as about four ticks, visually understating
