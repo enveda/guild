@@ -106,10 +106,110 @@ def rank_percentile(frame: pd.DataFrame, score_col: str, group_col: str) -> pd.S
     return grouped.rank(method="average", ascending=True) / grouped.transform("size")
 
 
+def spearman_rho(x, y) -> float:
+    """Spearman rank correlation: Pearson correlation of the two average-rank series."""
+    rx = pd.Series(x).rank(method="average")
+    ry = pd.Series(y).rank(method="average")
+    if rx.std() == 0 or ry.std() == 0:
+        return float("nan")
+    return float(rx.corr(ry))
+
+
+def jaccard_overlap(a: set, b: set) -> float:
+    """Intersection over union. NaN for two empty sets, not a division by zero."""
+    union = a | b
+    return float(len(a & b) / len(union)) if union else float("nan")
+
+
 def write(frame: pd.DataFrame, out_dir: Path, name: str) -> None:
     path = out_dir / name
     frame.to_csv(path, sep="\t", index=False)
     print(f"      -> {path.name}  ({frame.shape[0]}x{frame.shape[1]})")
+
+
+# ═══════════════════════ a1: Vina exhaustiveness sensitivity
+EXHAUSTIVENESS_SETTINGS = (8, 16, 32)
+EXHAUSTIVENESS_PAIRS = [(8, 16), (8, 32), (16, 32)]
+
+# This sweep's own physicality cut: a score >= 0 kcal/mol is not a real binding
+# energy. Deliberately not PHYSICAL_VINA.between(...), which treats an exact
+# 0.0 as physical -- irrelevant here since every offending row is well above 0,
+# but the two should not be confused as the same cut.
+_NEGATIVE_ENERGY = 0.0
+
+
+def analysis_exhaustiveness(data: Path, out: Path) -> None:
+    """a1: how sensitive Vina's scoring and ranking are to --exhaustiveness.
+
+    Ten targets x 100 ligands, docked once each at exhaustiveness 8, 16 and 32,
+    identical pairs across all three settings. Per target, per pairwise
+    comparison: Spearman rho of the within-target ordering (ranking either the
+    raw score or rp_vina_score gives the same rho, since one is a monotone
+    function of the other within a target); the Jaccard overlap of the
+    best-scoring decile; and the raw score shift (mean absolute change, % within
+    0.5 kcal/mol, largest change).
+
+    The score-shift columns exclude rows where either compared setting scored
+    >= 0 kcal/mol -- a handful of ligands swing by up to 20 kcal/mol between
+    settings there, which would dominate the mean and misrepresent the shift
+    for the other ~99.5% of physical rows. They stay in rho/Jaccard, where a
+    handful of shared outliers is harmless.
+
+    Runtime is deliberately not reported: competing processes shared the
+    machine during this sweep, so its batch-log timings measure contention,
+    not exhaustiveness cost, and were not staged for that reason. R3-4's
+    runtime figures come from the three-target benchmark instead -- do not
+    add a runtime column here.
+    """
+    print("\na1  Vina exhaustiveness sensitivity  (10-target sweep)")
+
+    paths = {ex: data / f"guild_scores_ex{ex}.txt" for ex in EXHAUSTIVENESS_SETTINGS}
+    missing = [p.name for p in paths.values() if not p.exists()]
+    if missing:
+        for name in missing:
+            print(f"      skip a1: {name} not in DATA_DIR")
+        return
+
+    frames = {}
+    for ex, path in paths.items():
+        frame = pd.read_csv(path, sep="\t", low_memory=False)
+        frame["vina_score"] = pd.to_numeric(frame.vina_score, errors="coerce")
+        frames[ex] = frame.set_index(["protein_config_id", "ligand_id"])
+
+    rows = []
+    for lo, hi in EXHAUSTIVENESS_PAIRS:
+        col_lo, col_hi = f"vina_score_ex{lo}", f"vina_score_ex{hi}"
+        joined = frames[lo][["vina_score"]].join(
+            frames[hi][["vina_score"]], how="inner", lsuffix=f"_ex{lo}", rsuffix=f"_ex{hi}"
+        )
+
+        rhos, jaccards = [], []
+        for _target, sub in joined.groupby(level="protein_config_id"):
+            rhos.append(spearman_rho(sub[col_lo], sub[col_hi]))
+            k = max(1, int(len(sub) * 0.10))
+            top_lo = set(sub[col_lo].nsmallest(k).index)
+            top_hi = set(sub[col_hi].nsmallest(k).index)
+            jaccards.append(jaccard_overlap(top_lo, top_hi))
+
+        physical = joined[(joined[col_lo] < _NEGATIVE_ENERGY) & (joined[col_hi] < _NEGATIVE_ENERGY)]
+        delta = (physical[col_hi] - physical[col_lo]).abs()
+        rows.append({
+            "comparison": f"ex{lo} vs ex{hi}",
+            "median_rho": round(float(np.median(rhos)), 3),
+            "rho_min": round(float(np.min(rhos)), 3),
+            "rho_max": round(float(np.max(rhos)), 3),
+            "median_jaccard_top10pct": round(float(np.median(jaccards)), 2),
+            "mean_abs_change_kcal_mol": round(float(delta.mean()), 3),
+            "pct_within_0.5_kcal_mol": round(100 * float((delta <= 0.5).mean()), 1),
+            "largest_change_kcal_mol": round(float(delta.max()), 2),
+            "n_excluded_nonphysical": int(len(joined) - len(physical)),
+        })
+
+    frame = pd.DataFrame(rows)
+    print(frame.to_string(index=False))
+    print("      n_excluded_nonphysical: rows with vina_score >= 0 kcal/mol in either "
+          "compared setting, dropped from the three shift columns only (kept for rho/Jaccard).")
+    write(frame, out, "a1_exhaustiveness_sweep.tsv")
 
 
 # ═════════════════════════════════════════════════════════ R3-4: runtime
@@ -416,8 +516,8 @@ def analysis_training_overlap(data: Path, out: Path, verify_dates: bool = False)
     """R2-5: within-target AUC by PDB release date -- does Boltz-2's affinity
     head track training-set overlap?
 
-    Deliberately WITHIN-target and RAW-score, unlike Table S1 (pooled,
-    rank-percentile) -- S1 asks how well a track discriminates once every
+    Deliberately WITHIN-target and RAW-score, unlike Table S2 (pooled,
+    rank-percentile) -- S2 asks how well a track discriminates once every
     target is on the same scale, this asks whether discrimination tracks
     release-date ordering, which pooling/normalising would wash out. The two
     can legitimately disagree (a pooled raw-score AUC is printed for context).
@@ -460,8 +560,8 @@ def analysis_training_overlap(data: Path, out: Path, verify_dates: bool = False)
     print(frame.to_string(index=False))
     write(frame, out, "r2_5_training_overlap.tsv")
 
-    print("\n      pooled raw-score AUC (context only -- NOT what Table S1 reports; "
-          "S1 pools rank-percentile, this pools raw score):")
+    print("\n      pooled raw-score AUC (context only -- NOT what Table S2 reports; "
+          "S2 pools rank-percentile, this pools raw score):")
     for raw_col, prefix in [("boltz_affinity_score", "boltz_affinity"), ("vina_score", "vina")]:
         direction = SCORES_DIRECTION_DICTIONARY[prefix]
         value = pd.to_numeric(scores[raw_col], errors="coerce")
@@ -487,6 +587,7 @@ def test_matches_guild(data: Path) -> None:
 
 
 ANALYSES = {
+    "a1": analysis_exhaustiveness,
     "runtime": analysis_runtime,
     "a2": analysis_aggregation,
     "a3": analysis_normalisation,

@@ -16,6 +16,29 @@ Unreleased
   (``kabsch_rmsd``, ``within_2A``, ``kabsch_fit_rmsd_ca``), but ``build_tables()`` only reads
   the raw ``rmsd`` column into a wide per-target pivot. Pre-existing, not caused by this
   renumbering, and not fixed here -- see the README's updated outputs table for the same note.
+* Added ``analysis_exhaustiveness`` (registered as ``a1``) to ``reproduce_response_analyses.py``,
+  closing the gap behind Supplementary Table 9 and the a1 reply: nothing in the repo computed
+  the sensitivity of Vina's scoring/ranking to ``--exhaustiveness`` (8 vs. 16 vs. 32). Per
+  target, per pairwise comparison: Spearman rho of the within-target ordering, median top-10%
+  Jaccard overlap of the best-scoring decile, and the raw score shift excluding non-physical
+  rows (score >= 0 kcal/mol in either compared setting). Verified against the staged sweep at
+  ``review/exsweep/``: median rho 0.978/0.973/0.978 and mean absolute shift 0.157/0.158/0.138
+  kcal/mol for ex8-vs-ex16/ex8-vs-ex32/ex16-vs-ex32 respectively, matching the response
+  letter's quoted headline (median rho ~0.98, range 0.90-0.99, 93% of molecules within 0.5
+  kcal/mol) when pooled across all three comparisons. Runtime is deliberately not reported --
+  competing processes shared the sweep's machine, so its batch-log timings measure contention,
+  not exhaustiveness cost; R3-4's runtime figures come from the three-target benchmark instead.
+  Added ``spearman_rho`` and ``jaccard_overlap`` as small, independently-tested helpers
+  (``tests/reviewer_response/test_reproduce_response_analyses.py``, including a tied-score
+  case for the rank computation). Noted a factual correction for the response letter while
+  verifying this: the exsweep's own staged README and the letter draft both say its five
+  non-physical rows are all in target ``6me6``; the data shows a fifth
+  (``7v3z-A-9GF-A``/``CNP0002880``) that is non-physical in all three settings too. Doesn't
+  change any ``a1`` number (the exclusion is per-row, not per-target), but the "all in one
+  target" sentence needs correcting before the letter goes out. Also fixed two stray
+  ``Table S1`` references (a docstring and a print statement in
+  ``analysis_training_overlap``) left over from the S1->S2 shift in the sibling commit,
+  since this file was already being touched.
 * Added ``docs/adding_a_prediction_method.rst``, documenting the six-step contract for wiring
   in a new docking/scoring method (constants module, runner module, registration in the six
   ``guild/constants/bulk.py`` dictionaries, orchestration in ``guild/bulk.py`` /

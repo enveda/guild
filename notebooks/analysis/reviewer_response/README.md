@@ -45,6 +45,7 @@ notebooks. `--data` and `--out` are not committed — provide them locally (see 
 | `vinarun_batch_progress.log` | `guild/vina_data/data/vinarun/batch_progress.log` | yes, small |
 | `npsvinarun_batch.log` | `guild/vina_data/data/npsvinarun/batch_progress.log` | yes, small |
 | `knownbindersvinarun_batch.log` | `guild/vina_data_2/data/knownbindersvinarun/batch_progress.log` | yes, small |
+| `guild_scores_ex8.txt` / `ex16` / `ex32` | AutoDock Vina exhaustiveness sweep — 1,000 rows each, 10 targets × 100 ligands, identical pairs across all three. `a1` only. | **yes** |
 
 Azure root:
 `abfss://cheminformatics@platformncus01.dfs.core.windows.net/`, subscription
@@ -65,6 +66,7 @@ column from those files expecting the current 0 = best orientation. See
 
 | file | backs |
 | --- | --- |
+| `a1_exhaustiveness_sweep.tsv` | a1 — Table S9, Spearman rho / top-10% Jaccard / raw score shift across Vina exhaustiveness 8, 16, 32, per pairwise comparison. Runtime deliberately not reported — see `analysis_exhaustiveness`'s docstring. |
 | `R3-4_runtime.tsv` | R3-4 — 282.4 h over 538,931 pairs, 1.89 s/pair |
 | `a2_aggregation_rules.tsv` | a2, R2-2 — AUC under eight aggregation rules plus each method standalone |
 | `a3_normalisations.tsv` | a3 — pooled AUC for rank percentile, min-max, z-score, raw |
@@ -126,6 +128,13 @@ either.
    against `sklearn.roc_auc_score`. Treated as an error in that earlier draft, not in this
    analysis; corrected here. R2-5's actual argument rests only on `boltz_affinity_score`,
    which was never in question either way.
+8. **The exhaustiveness sweep's 5 non-physical rows (`vina_score` ≥ 0 kcal/mol) are not
+   all in one target.** Four are in `6me6-A-JEY-A` across all three settings; a fifth
+   (`CNP0002880`) is in `7v3z-A-9GF-A` and is non-physical in all three settings too. Both
+   `guild_publication/review/exsweep/README.md` and the response-letter draft describe all
+   five as being in `6me6` — confirmed against the raw files this is not the case. Doesn't
+   change `a1`'s numbers (the exclusion is per-row, not per-target), but the "all in one
+   target" sentence needs correcting before it goes out.
 
 ## Determinism
 

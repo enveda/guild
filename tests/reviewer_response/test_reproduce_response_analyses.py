@@ -16,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "notebooks" / "anal
 from reproduce_response_analyses import (  # noqa: E402
     auc_lower_better,
     direction_aware_auc,
+    jaccard_overlap,
+    spearman_rho,
 )
 
 
@@ -70,3 +72,44 @@ class TestDirectionAwareAuc:
     def test_too_few_points_is_nan_regardless_of_direction(self):
         assert np.isnan(direction_aware_auc([1.0], [2.0, 3.0], "minimum"))
         assert np.isnan(direction_aware_auc([1.0], [2.0, 3.0], "maximum"))
+
+
+class TestSpearmanRho:
+    def test_perfect_agreement_is_one(self):
+        assert spearman_rho([1, 2, 3, 4], [10, 20, 30, 40]) == pytest.approx(1.0)
+
+    def test_perfect_inversion_is_minus_one(self):
+        assert spearman_rho([1, 2, 3, 4], [40, 30, 20, 10]) == pytest.approx(-1.0)
+
+    def test_tied_values_use_average_rank_not_arbitrary_order(self):
+        # x has a three-way tie in the middle, ranked [1, 3, 3, 3, 5] under
+        # "average" rather than an arbitrary tie-break order; y is untied
+        # [1, 2, 3, 4, 5]. Pearson correlation of those two rank series.
+        x = [1, 5, 5, 5, 9]
+        y = [1, 2, 3, 4, 5]
+        assert spearman_rho(x, y) == pytest.approx(0.8944272, abs=1e-6)
+
+    def test_a_constant_series_is_nan_not_a_zero_division(self):
+        assert np.isnan(spearman_rho([1, 1, 1], [1, 2, 3]))
+
+    def test_ranking_a_monotone_transform_gives_the_same_rho(self):
+        # rp_vina_score is 1 - a monotone function of vina_score within a
+        # target, so ranking either column must agree exactly.
+        raw = [-9.0, -7.0, -5.0, -3.0]
+        rp = [v / 4 for v in [1, 2, 3, 4]]  # already rank/N, same order as raw ascending
+        assert spearman_rho(raw, rp) == pytest.approx(1.0)
+
+
+class TestJaccardOverlap:
+    def test_identical_sets_is_one(self):
+        assert jaccard_overlap({"a", "b", "c"}, {"a", "b", "c"}) == pytest.approx(1.0)
+
+    def test_disjoint_sets_is_zero(self):
+        assert jaccard_overlap({"a", "b"}, {"c", "d"}) == pytest.approx(0.0)
+
+    def test_partial_overlap(self):
+        # intersection {b, c} = 2, union {a, b, c, d} = 4 -> 0.5
+        assert jaccard_overlap({"a", "b", "c"}, {"b", "c", "d"}) == pytest.approx(0.5)
+
+    def test_two_empty_sets_is_nan_not_a_division_by_zero(self):
+        assert np.isnan(jaccard_overlap(set(), set()))
