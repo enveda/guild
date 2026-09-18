@@ -32,7 +32,12 @@ from guild.analysis.posebusters import (
     validate_batch_poses,
     validate_pose,
 )
-from guild.bulk import _COMPLEX_PDB_FOLDER_BY_METHOD, BulkRun, _collect_complex_metadata
+from guild.bulk import (
+    _COMPLEX_PDB_FOLDER_BY_METHOD,
+    BulkRun,
+    _collect_complex_metadata,
+    _complex_pdb_coverage,
+)
 from guild.constants.bulk import (
     BATCH_FOLDER,
     COMBINATIONS_TABLE_KEY,
@@ -863,6 +868,29 @@ class TestCollectComplexMetadata:
 
 
 # ---------------------------------------------------------------------------
+# Coverage — methods that cannot structurally produce a complex PDB
+# ---------------------------------------------------------------------------
+class TestComplexPdbCoverage:
+    """karmadock writes no complex PDB this repo can read, so it must be
+    partitioned into "unsupported" rather than silently missing rows."""
+
+    def test_karmadock_and_nesso_are_unsupported(self):
+        supported, unsupported = _complex_pdb_coverage(
+            [VINA_PREFIX, GNINA_PREFIX, KARMADOCK_PREFIX, NESSO_PREFIX]
+        )
+        assert supported == sorted([VINA_PREFIX, GNINA_PREFIX])
+        assert unsupported == sorted([KARMADOCK_PREFIX, NESSO_PREFIX])
+
+    def test_all_complex_pdb_emitters_are_supported(self):
+        supported, unsupported = _complex_pdb_coverage(list(_COMPLEX_PDB_FOLDER_BY_METHOD))
+        assert set(supported) == set(_COMPLEX_PDB_FOLDER_BY_METHOD)
+        assert unsupported == []
+
+    def test_empty_input_yields_two_empty_lists(self):
+        assert _complex_pdb_coverage([]) == ([], [])
+
+
+# ---------------------------------------------------------------------------
 # BulkRun orchestration
 # ---------------------------------------------------------------------------
 class TestRunPoseValidityAnalysis:
@@ -876,6 +904,22 @@ class TestRunPoseValidityAnalysis:
             use_gpu=False,
             n_workers=1,
         )
+
+    def test_karmadock_coverage_is_logged_not_silent(self, test_input_table, cleanup, caplog):
+        """Requesting karmadock alongside vina must log its coverage status."""
+        bulk = BulkRun(
+            input_table=test_input_table,
+            project_name="test-posebusters",
+            methods_to_run=[VINA_PREFIX, KARMADOCK_PREFIX],
+            use_decoys=False,
+            use_known_binders=False,
+            use_gpu=False,
+            n_workers=1,
+        )
+        with caplog.at_level("INFO", logger="guild.bulk"):
+            bulk.run_pose_validity_analysis()
+        assert "PoseBusters coverage" in caplog.text
+        assert KARMADOCK_PREFIX in caplog.text
 
     def test_header_only_tsvs_written_when_nothing_was_produced(self, test_input_table, cleanup):
         """
@@ -900,6 +944,8 @@ class TestRunPoseValidityAnalysis:
 
     def test_rows_written_and_attribute_set(self, test_input_table, cleanup):
         bulk = self._bulk(test_input_table)
+        # Scoring runs first in the real pipeline, so rp_scores_df is already set.
+        bulk.rp_scores_df = pd.DataFrame({BULK_COMBINATION_ID: [COMBO_ID], "vina_score": [-9.0]})
         fake_summary = pd.DataFrame(
             [
                 {
@@ -929,6 +975,7 @@ class TestRunPoseValidityAnalysis:
         written = pd.read_csv(bulk.posebusters_path, sep="\t")
         assert len(written) == 1
         assert written.iloc[0][PB_COMBINATION_ID] == COMBO_ID
+        assert bool(bulk.rp_scores_df.loc[0, "vina_pb_valid"]) is True
 
     def test_progress_logged_to_the_batch_log(self, test_input_table, cleanup):
         bulk = self._bulk(test_input_table)
@@ -957,6 +1004,62 @@ class TestRunPoseValidityAnalysis:
         kwargs = validate.call_args.kwargs
         assert kwargs["config"] == "dock_fast"
         assert kwargs["pose_scope"] == POSE_SCOPE_ALL
+
+    def test_expect_existing_scores_true_raises_on_a_missing_table(
+        self, test_input_table, cleanup
+    ):
+        bulk = self._bulk(test_input_table)
+        fake_summary = pd.DataFrame(
+            [
+                {
+                    **dict.fromkeys(POSEBUSTERS_COLUMNS),
+                    PB_COMBINATION_ID: COMBO_ID,
+                    PB_DOCKING_METHOD: VINA_PREFIX,
+                    PB_POSE: 1,
+                    PB_VALID: True,
+                    PB_STATUS: PB_STATUS_OK,
+                    PB_FAILED_CHECKS: "",
+                }
+            ]
+        )[POSEBUSTERS_COLUMNS]
+
+        with (
+            patch("guild.bulk._collect_complex_metadata") as collect,
+            patch("guild.bulk.validate_batch_poses") as validate,
+            pytest.raises(RuntimeError, match="No scores table"),
+        ):
+            collect.return_value = {VINA_PREFIX: [METADATA]}
+            validate.return_value = (fake_summary, pd.DataFrame([{"x": 1}]))
+            bulk.run_pose_validity_analysis()  # expect_existing_scores defaults True
+
+    def test_expect_existing_scores_false_tolerates_a_missing_table(
+        self, test_input_table, cleanup
+    ):
+        """The --posebusters-only path: no scoring happened, and that's fine."""
+        bulk = self._bulk(test_input_table)
+        fake_summary = pd.DataFrame(
+            [
+                {
+                    **dict.fromkeys(POSEBUSTERS_COLUMNS),
+                    PB_COMBINATION_ID: COMBO_ID,
+                    PB_DOCKING_METHOD: VINA_PREFIX,
+                    PB_POSE: 1,
+                    PB_VALID: True,
+                    PB_STATUS: PB_STATUS_OK,
+                    PB_FAILED_CHECKS: "",
+                }
+            ]
+        )[POSEBUSTERS_COLUMNS]
+
+        with (
+            patch("guild.bulk._collect_complex_metadata") as collect,
+            patch("guild.bulk.validate_batch_poses") as validate,
+        ):
+            collect.return_value = {VINA_PREFIX: [METADATA]}
+            validate.return_value = (fake_summary, pd.DataFrame([{"x": 1}]))
+            result = bulk.run_pose_validity_analysis(expect_existing_scores=False)
+
+        assert len(result) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1108,6 +1211,29 @@ class TestScoresMerge:
         if Path(bulk.rp_scores_path).exists():
             Path(bulk.rp_scores_path).unlink()
         bulk._merge_posebusters_into_scores()  # must not raise
+
+    def test_required_missing_scores_table_raises(self, test_input_table, cleanup):
+        """A missing scores table when merging is required must raise loudly,
+        not silently produce zero pb_ columns as it once did."""
+        bulk = self._bulk_with_scores(test_input_table, pd.DataFrame())
+        bulk.posebusters_df = self._summary(
+            [{PB_COMBINATION_ID: "c1", PB_DOCKING_METHOD: VINA_PREFIX, PB_POSE: 1, PB_VALID: True}]
+        )
+        if Path(bulk.rp_scores_path).exists():
+            Path(bulk.rp_scores_path).unlink()
+        with pytest.raises(RuntimeError, match="No scores table"):
+            bulk._merge_posebusters_into_scores(required=True)
+
+    def test_nonempty_validity_adding_zero_columns_raises(self, test_input_table, cleanup):
+        """A null combination_id/docking_method makes groupby drop all rows;
+        that must raise, not silently look like "merge did nothing"."""
+        scores = pd.DataFrame({BULK_COMBINATION_ID: ["c1"], "vina_score": [-9.0]})
+        bulk = self._bulk_with_scores(test_input_table, scores)
+        bulk.posebusters_df = self._summary(
+            [{PB_COMBINATION_ID: None, PB_DOCKING_METHOD: VINA_PREFIX, PB_POSE: 1, PB_VALID: True}]
+        )
+        with pytest.raises(RuntimeError, match="zero columns"):
+            bulk._merge_posebusters_into_scores()
 
     def test_scores_read_from_disk_when_scoring_was_skipped(self, test_input_table, cleanup):
         bulk = self._bulk_with_scores(test_input_table, pd.DataFrame())

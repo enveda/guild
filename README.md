@@ -28,6 +28,7 @@ Guild is an open-source Protein-Ligand Binding Tools orchestrator that covers th
   * [Covalent docking (gnina)](#covalent-docking-gnina)
   * [Nesso (affinity only, no pose)](#nesso-affinity-only-no-pose)
   * [Post-analysis](#post-analysis)
+* [Adding a new prediction method](docs/adding_a_prediction_method.rst)
 
 ## Docker
 
@@ -78,7 +79,7 @@ make run-vina \
 | `HEAD` | `0` | Take only the first N rows from the combinations table (0 = all) |
 | `DECOYS` | *(script default)* | Path to the decoys file; omit to use built-in default (`chembl_36_decoys_2.tsv`) |
 | `NO_DECOYS` | *(empty)* | Set to `1` to skip decoy expansion entirely (useful for single-protein runs where you only want to score the supplied ligands) |
-| `CLEAN` | *(empty)* | Set to `1` to delete the project output folder before running |
+| `CLEAN` | *(empty)* | Set to `1` to delete the project output folder before running. Omit it to resume an interrupted run instead. Existing outputs are reused where supported; DiffDock skips a fully complete batch but reruns the whole batch if any combination is missing. |
 | `KNOWN_BINDERS` | *(empty)* | Set to `1` to enable known-binders expansion |
 | `N_WORKERS` | `1` | Vina parallel-worker processes. Vina internally also threads — values >1 may oversubscribe on high-core hosts but are typically fine. |
 | `BOX` | *(empty)* | Global fallback Vina box file (`center_{x,y,z}` + `size_{x,y,z}`). Used for combinations whose CSV `box_location` cell is empty; per-row values always take precedence. See [Custom binding pocket](#custom-binding-pocket). |
@@ -89,6 +90,9 @@ make run-vina \
 | `FLEXIBLE_DOCKING` | *(empty)* | Set to `1` to let side chains of residues inside the docking box move during the search (Vina and gnina only). See [Flexible receptor docking](#flexible-receptor-docking). |
 | `FLEXRES_GNINA` | *(empty)* | gnina-only explicit flexible-residue spec, e.g. `"A:88,91"`. Takes priority over `FLEXIBLE_DOCKING`'s automatic selection for gnina. |
 | `VINA_EXHAUSTIVENESS` | *(empty)* | Vina search exhaustiveness. Higher improves pose quality at the cost of runtime. Defaults to `16` when omitted. |
+| `NO_POSEBUSTERS` | *(empty)* | Set to `1` to skip the PoseBusters pose-validity step. On by default (mirrors PLIP): ~400ms/pose, and adds `<method>_pb_valid`/`<method>_pb_pose` to `guild_scores.txt`. See [PoseBusters](#posebusters). |
+| `POSEBUSTERS_CONFIG` | *(empty → `dock`)* | `dock` \| `dock_fast`. `dock_fast` skips the `internal_energy` conformer-ensemble check — a lever worth trying on large/very flexible ligand sets. |
+| `EXCLUDE_NON_PHYSICAL` | *(empty)* | Set to `1` to null non-physical Vina-family raw scores (e.g. a positive binding energy) before ranking, for a **new** run. Off by default — see [Raw score plausibility](#raw-score-plausibility). |
 | `MIN_MOL_WT` | `250` | Minimum molecular weight filter for known-binder expansion |
 | `MAX_MOL_WT` | `450` | Maximum molecular weight filter for known-binder expansion |
 | `CHEMBL_VERSION` | `chembl_36` | ChEMBL version string used for known-binder lookup |
@@ -103,6 +107,7 @@ make run-vina \
 | `run-diffdock` | No | Shortcut for diffdock docking |
 | `run-gnina` | Yes* | Shortcut for gnina docking (*GPU used for CNN rescoring; pass `USE_GPU=` for CPU-only) |
 | `run-plip` | No | Re-run only the PLIP interactions step over an existing `data/<project>/` tree |
+| `run-posebusters` | No | Re-run only the PoseBusters pose-validity step over an existing `data/<project>/` tree |
 
 ### Direct script invocation
 
@@ -126,6 +131,7 @@ python scripts/run_guild.py \
 ### Requirements
 
 * NVIDIA GPU + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/) (for GPU methods)
+* If DiffDock crashes with an NVRTC/CUDA initialization error when run via `run-guild`, this was a known issue fixed prior to `1.1.0` by adding the nvidia CUDA library paths (`cu13`, `cuda_nvrtc`, `cudnn`, `cublas`) to `LD_LIBRARY_PATH` on that target. If you invoke DiffDock outside the provided `make run-*` targets, confirm your own environment's `LD_LIBRARY_PATH` includes those same paths.
 
 ### Consuming PLIP interactions output
 
@@ -209,6 +215,8 @@ Pre-requisites:
 * [Karmadock](https://github.com/schrojunzhang/KarmaDock)
 * [Diffdock](https://github.com/gcorso/DiffDock.git)
 * [Openbabel]
+
+DiffDock does not ship pre-trained weights in its own checkout — the first inference run downloads its score/confidence model checkpoints from the DiffDock GitHub Releases. A writable clone stores them in its local `workdir/`; a read-only clone uses `$DIFFDOCK_MODEL_CACHE` or the default `/tmp/diffdock_models/workdir`. Unlike Nesso-1's `NESSO_CACHE`, the default container location isn't persisted, so a fresh container or checkout re-downloads them.
 
 ```shell
 git clone https://github.com/openbabel/openbabel.git
@@ -447,18 +455,47 @@ and Boltz gets four distinct rescore scores:
 | `diffdock`      | `vina_rescore_diffdock`, `gnina_rescore_diffdock`| `vina_rescore_diffdock_score`, `gnina_rescore_diffdock_score`    |
 
 All four are in kcal/mol (lower = stronger predicted binding), independently ranked per
-protein and folded into the `global_rp_score`. The gnina tracks also emit
-`gnina_rescore_*_cnn_score` as a confidence side channel, which is not ranked.
+protein. The gnina tracks also emit `gnina_rescore_*_cnn_score` as a confidence side channel,
+which is not ranked.
 
 > **Rank-percentile orientation.** Every `rp_*_score` and the `global_rp_score` is bounded to
 > `(0, 1]` with **0 = best**. A ligand that is uniquely best for a protein scores `1 / n` and the
 > uniquely worst `1.0`, but ties share their average rank, so tied extremes fall short of those
-> endpoints — if all `n` molecules tie, every one scores `(n + 1) / 2n`. `global_rp_score` is the
-> unweighted mean of the per-method percentiles, and methods can have different denominators for
-> the same protein, so it is not bounded by any single method's endpoints.
+> endpoints — if all `n` molecules tie, every one scores `(n + 1) / 2n`.
 > Raw `*_score` columns keep their own native directions (Vina and gnina lower = better,
 > KarmaDock and Boltz higher = better), which is exactly what the rank percentile exists to
 > normalise away.
+>
+> **Older result files may predate this convention.** See
+> [guild/support/results/README.md](guild/support/results/README.md) for the
+> `dockwizard_*`/`drrp_*`/`guild_*` → `rp_*` column rename and the inverted orientation this
+> repo's own legacy fixture carries. The same drift affects result files produced before the
+> rename, including on Azure (e.g. `vinarun/dockwizard_scores.txt`,
+> `knownbindersvinarun/drrp_scores.txt`) — check the column names before assuming current
+> orientation and naming apply.
+
+> **How `global_rp_score` combines methods.** `diffdock_score` and `boltz_score` are pose
+> confidences (a diffusion confidence and an ipTM), not affinity estimates, so — like
+> `gnina_cnn_score` — they get their own `rp_*` column but do not vote in `global_rp_score`.
+> The remaining tracks are grouped by which engine generated the pose: Vina, gnina and
+> KarmaDock each vote once, and DiffDock's/Boltz's two auto-added rescores (`vina_rescore_*`
+> and `gnina_rescore_*`) are averaged together first so that pose source also votes once,
+> rather than the naive flat mean handing DiffDock/Boltz three votes apiece for one pose.
+> `boltz_affinity_score` (see below) joins that same Boltz group as a third estimate, so
+> requesting `boltz` still contributes one pose-source vote, not two.
+>
+> Across pose sources, the **default takes the median**, not the mean
+> (`aggregation="pose_source_median"`). On the three-target benchmark (165 pairs, 15 known
+> binders, 150 decoys) the unweighted mean scored 0.781 AUC, below AutoDock Vina alone
+> (0.790), almost entirely because one track (DiffDock, 0.281 standalone there) dragged it
+> down; the median scored 0.824 with the same five methods included, with no engine singled
+> out and no fitted weight. This is a directional result at 15 known binders — the confidence
+> intervals overlap heavily — not a significant one.
+> `compute_rank_percentile_scores(..., aggregation="pose_source")` takes the mean across pose
+> sources instead (the previous default), and `aggregation="flat"` reproduces the original
+> unweighted mean with no pose-source grouping at all, kept only so scores computed before
+> that grouping existed stay reproducible. Methods can have different denominators for the
+> same protein, so `global_rp_score` is not bounded by any single method's endpoints.
 
 > **Denominator.** `n` above is the number of molecules that produced a valid score for that
 > protein. `compute_rank_percentile_scores(..., denominator="attempted")` divides by every pair
@@ -470,6 +507,16 @@ protein and folded into the `global_rp_score`. The gnina tracks also emit
 > use `vina_rescore_boltz_score`. Likewise `gnina`'s `gnina_score` is the Vina-style affinity
 > (kcal/mol, lower = better) while `gnina_cnn_score` is a pose-confidence side channel that does
 > not participate in guild's rank-percentile aggregation.
+>
+> **`boltz_affinity_score`** is different from all three: it's Boltz-2's own affinity
+> prediction — log10(IC50/µM), **lower = more potent**, populated whenever `boltz` runs (read
+> from the same output tree `boltz_guild_scoring` already parses; NaN for a combination with
+> no affinity output). It gets `rank_boltz_affinity_score` / `rp_boltz_affinity_score` and
+> votes in `global_rp_score` as part of Boltz's pose-source group, alongside
+> `vina_rescore_boltz_score` and `gnina_rescore_boltz_score`. Whether that's a fair test is
+> still open — Boltz-2's affinity head is trained on binding-affinity data, and the benchmark
+> binders are ChEMBL compounds, so some of its strength there may be training-set recall
+> rather than generalisation; that overlap audit is still outstanding.
 
 #### Coordinate-frame caveat
 
@@ -840,8 +887,23 @@ Vina and gnina poses are not energy-minimised, so `internal_energy` can fail bro
 dominates your failures, judge placement only with `pb_intermolecular_valid`, and use
 `pb_failed_checks` to see which checks are firing.
 
+KarmaDock and Nesso write no complex PDB and are therefore invisible to PoseBusters *and* PLIP/
+ProLIF alike — not "checked and passed", structurally not applicable. Requesting either alongside
+a supported method logs a `PoseBusters coverage` / `PLIP/ProLIF coverage` line naming them, since a
+rows-only output table has no row for them either way and silence there is easy to misread as a
+clean bill of health.
+
 By default Guild escalates through a combination's poses until one passes; `pose_scope` can
 be set to `best` (top pose only) or `all` (validate every pose).
+
+PoseBusters runs by default after docking + scoring, same as PLIP. Pass `--no-posebusters`
+to `run_guild.py` (`NO_POSEBUSTERS=1` via `make`) to skip it, or `--posebusters-config
+dock_fast` (`POSEBUSTERS_CONFIG=dock_fast`) to drop the `internal_energy` check. To **re-run
+only PoseBusters** over an existing project (no re-docking), use:
+
+```shell
+make run-posebusters PROJECT=myproject COMBINATIONS=/workspace/path/to/combos.csv METHODS="vina diffdock"
+```
 
 * [PoseBusters](https://doi.org/10.1039/D3SC04185A)
 *Martin Buttenschoen, Garrett M. Morris, Charlotte M. Deane*, **PoseBusters: AI-based docking
@@ -853,6 +915,22 @@ methods fail to generate physically valid poses or generalise to novel sequences
 `guild_scores.txt` keeps only the best pose per combination. When Vina or gnina runs, each
 batch also gets `vina_scores.txt` / `gnina_scores.txt` with **one row per pose**, so the full
 score distribution is available without re-reading every per-combination file.
+
+#### Raw score plausibility
+
+Vina-family raw scores (`vina_score`, `gnina_score`, and the four rescore tracks) are never
+filtered, clamped or nulled by default — a value outside a plausible range is stored exactly as
+scored, the same as every other row. On the large Vina case study (403k pairs): 25.2% of rows had
+no score at all, 6.06% of *scored* rows were non-negative (non-physical for a binding free
+energy), 0.79% exceeded 1,000,000 in magnitude (observed maximum: 43,851,078), and 93.9% fell
+within a plausible −20 to 0 kcal/mol. `guild.tools.scores.is_physical_score(value, method)`
+encodes that plausible range and is method-aware — it never flags a "maximum"-direction score
+such as `karmadock_score`, where a large positive value is correct, not suspicious. Every scoring
+run logs a per-method count of non-physical values as a warning, the same way a failed docking
+attempt is counted; pass `--exclude-non-physical` (`EXCLUDE_NON_PHYSICAL=1` via `make`) to null
+them out for a **new** run instead of only logging them — off by default, since the published
+case-study numbers were generated with these values left in the table, and nulling them
+retroactively would change those numbers for anyone reproducing them.
 
 #### Guild score
 

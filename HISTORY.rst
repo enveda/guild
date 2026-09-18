@@ -2,6 +2,624 @@
 History
 =======
 
+Unreleased
+----------
+* Fixed the failing CI ``test`` check: ``759a50f`` added a ``docs`` dependency group to
+  ``pyproject.toml`` but never regenerated ``uv.lock``, so the Docker build's
+  ``uv sync --locked`` started failing with "The lockfile ... needs to be updated". Running
+  ``uv lock`` to fix it hit a separate, genuinely pre-existing problem: ``deepspeed``
+  (a transitive dependency of ``fair-esm[esmfold]``, already in ``pyproject.toml`` before
+  this branch) runs a native ``cpu_adam`` compile step as part of its own build backend,
+  which needs a C++ toolchain -- absent on this machine, so ``uv lock`` failed trying to
+  build it just to read its dependency list, independent of anything this branch touches.
+  Added a ``[[tool.uv.dependency-metadata]]`` override for ``deepspeed==0.5.9`` with its
+  dependencies copied verbatim from its own ``requirements/requirements.txt`` (``hjson``,
+  ``ninja``, ``numpy``, ``packaging``, ``psutil``, ``py-cpuinfo``, ``torch``, ``tqdm``), so
+  ``uv lock`` can resolve it from declared metadata instead of building it -- confirmed this
+  is the actual fix, not a side effect of also having ``torch`` installed locally, by
+  uninstalling ``torch`` and re-running ``uv lock`` successfully with it absent. It is a
+  metadata-only override and does not change what gets installed at sync time.
+  ``uv lock`` now adds the ``docs`` group's real dependencies (``sphinx``,
+  ``myst-parser``, and their own transitive dependencies) and passes ``uv lock --locked``
+  cleanly; ``markdown-it-py`` moves from 4.0.0 to 3.0.0 as the one version both ``rich`` and
+  the new ``myst-parser`` pin can share, chosen by the resolver, not by hand.
+  (that commit cleared the cell's stale cached output instead of leaving it inconsistent).
+  **Partial run: cells 1-4 only, cell 6 not executed** -- cell 6's full-pool descriptor
+  matching is unrelated to this fix and its ``8a359d7`` output is untouched; do not read
+  this as a full end-to-end execution of the notebook. Confirmed the three AUCs are
+  unchanged (0.684 / 0.547 / 0.597) and the decoy rug is still absent before saving over
+  the existing files. New dimensions are 2273 x 2694 px, aspect 0.8437, against the
+  previous 1950 x 2693, aspect 0.7241 -- a ~16.5% width increase, well past the ~1% this
+  was checked against. Isolated the cause before treating it as a rendering problem:
+  re-rendering with the old, short footer text reproduces 1950 x 2693 exactly in this same
+  environment, so the width change is the longer footer text alone (``bbox_inches="tight"``
+  widening to fit it), not a font or environment mismatch between this render and the
+  original. Left as-is per scope -- shortening the footer or accepting the new extent is
+  for whoever places the figure in the manuscript.
+* Reconciled the two a3 pools that gave rank percentile and z-score a near-tie in one
+  analysis (``reproduce_response_analyses.py``, 0.675 vs. 0.674) but a real margin in
+  Figure 3's own panel (``score_comparison.ipynb``, 0.684 vs. 0.597) -- an open note in
+  this file and in ``notebooks/analysis/reviewer_response/README.md``'s caveat 2 said this
+  needed reconciling before the a3 text could be finalised. Extended
+  ``analysis_normalisation`` to recompute the three pooled AUCs on four intermediate pools
+  between the two constructions, written to the new ``a3_pool_reconciliation.tsv``.
+  Restricting Figure 3's pool to binder-bearing targets only moves rank percentile by
+  0.001 (0.684 -> 0.685), so the 55 binder-free targets it currently pools in are inert and
+  its construction does not need to change. Applying the physical Vina range
+  (``PHYSICAL_VINA``, -20 to 0 kcal/mol) is the whole effect instead: z-score moves from
+  0.597 to 0.673, landing on rank percentile (also 0.673), while min-max barely moves
+  (0.547 -> 0.577). The two analyses differ only in whether non-physical scores are
+  included, and by nothing else that matters -- neither is wrong.
+  Also pinned down the one-binder 211-vs-212 question this reconciliation surfaced:
+  ``_load_case_study()`` (a3's existing pool) reports 212 binders across 47 targets because
+  it never applies Figure 3's five-protein exclusion at all -- it keeps ``8dzs-A-U9I-A``
+  (one of the five excluded proteins), which has exactly one binder inside the physical
+  range. Apply that exclusion on top of the same physical-range + both-classes-present
+  filter and the answer is 211 binders across 46 targets, not 212 across 47 --
+  ``7xt9-R-SRO-R`` separately drops out of that pool because none of its five binders
+  survive the physical filter, which is why the target count does not simply become 47 by
+  adding ``8dzs`` back. Neither number is a bug; ``a3_pool_reconciliation.tsv`` carries all
+  four intermediate pools for whoever finalises the manuscript text to cite from.
+  Also changed ``score_comparison.ipynb``'s Figure 3 sample-size reporting from
+  compound-sounding row counts to explicit combinations-vs-molecules: 98,596 decoy
+  protein-ligand combinations are 974 unique molecules, and 220 known-binder combinations
+  are 135 unique molecules -- both now printed, and the figure's own footer annotation
+  states both instead of the bare row count. Source-only change, not re-rendered here (a
+  full top-to-bottom execution is dominated by cell 6's full-pool descriptor matching,
+  unrelated to this fix, and was not re-run for a footer-text change); the cell's stale
+  cached output (old print text, old footer baked into the saved image) is cleared rather
+  than left inconsistent with the new source. **Rendered in the next bullet up**, cells 1-4
+  only.
+* Added ``analysis_binder_tail`` to ``reproduce_response_analyses.py``, giving the current
+  long-tail passage ("Of 212 known binders across 47 targets, 57 (26.9%) fall in the
+  worse-scoring half...") a committed derivation on Figure 3's own binder/decoy set
+  (``score_comparison.ipynb``'s ``EXCLUDE_PROTEINS``, non-null Vina score only): 220 binders,
+  47 targets, 58 (26.4%) worse half, 10 (4.5%) worst decile, heavy atoms 26.6 vs 28.2, Vina
+  -4.39 vs -8.46 kcal/mol.
+  **212 turns out to already be reachable from committed code** -- the existing
+  ``a3_failure_tail_summary.tsv`` (written by ``analysis_normalisation``, already committed,
+  already documented) reports 212 binders, 57 (26.9%), 14 (6.6%), 25.9 vs 28.3, -6.36 vs -8.88:
+  an exact, decimal-for-decimal match to the current passage. It uses a genuinely different,
+  also-legitimate pool: ``_load_case_study()`` keeps the physical Vina range and requires both
+  a binder and a decoy present per protein, with no named-protein exclusion, rather than
+  ``EXCLUDE_PROTEINS``. Same 47 targets, different binder counts (212 vs 220) -- not an error
+  in either derivation, but the two are being quoted against each other (the passage's 212 vs
+  the figure's own footer, which already prints 220) without saying so. Left the choice of
+  which pool to standardize on to the text; both derivations are now committed either way.
+  Also confirmed the one already-committed number this task asked to check:
+  ``a3_normalisations.tsv``'s raw-score pooled AUC is **0.619**, not the 0.626 currently quoted
+  (min-max 0.577, rank percentile 0.674, both already matching). Not fixed here -- reported for
+  the text to correct.
+* Fixed the documentation build (``make docs``), which failed at four separate points, verified
+  against the tree before fixing each: (1) ``docs/conf.py`` read ``guild.__version__``, which
+  ``guild/__init__.py`` never defined -- added it via ``importlib.metadata.version("guild")``
+  (falling back to ``"0.0.0"`` if the package isn't installed, e.g. reached only through
+  ``sys.path``); (2) the toctree listed ``modules``, but no ``docs/modules.rst`` was ever
+  generated -- dropped it rather than wiring up ``sphinx-apidoc``, since nothing else in this
+  docs setup currently maintains a full API reference and generating one now would mean
+  committing dozens of new auto-generated pages for a page nobody was reading; (3)
+  ``docs/readme.rst`` included ``../README.rst``, which is actually ``README.md``; (4)
+  ``docs/contributing.rst`` included ``../CONTRIBUTING.rst`` (actually ``.md``), and
+  ``docs/authors.rst`` included ``../AUTHORS.rst``, which doesn't exist in any extension.
+  For (3)/(4), added ``myst-parser`` and converted the two include-wrapper pages to
+  ``docs/readme.md``/``docs/contributing.md`` using MyST's ``{include}`` directive (with
+  ``relative-docs``/``relative-images``) so the real root ``README.md``/``CONTRIBUTING.md``
+  render as actual Markdown rather than being fed to the RST parser as raw text; dropped
+  ``authors.rst`` outright, since there's nothing to point it at. Also dropped the toctree's
+  now-permanently-dead ``:ref:`modindex``` link (no autodoc content exists to populate it).
+  Added a ``docs`` dependency group (``sphinx``, ``myst-parser``) -- not installed by
+  ``uv sync`` by default, so a normal dev setup stays as light as it is today -- and a
+  ``make docs`` target (``uv run --group docs sphinx-build -b html docs docs/_build/html``);
+  added ``docs/_build/`` to ``.gitignore``. Verified the build with an ephemeral
+  ``uv run --with sphinx --with myst-parser --no-project`` environment, since this sandbox's
+  full project sync fails on an unrelated pre-existing dependency
+  (``fair-esm[esmfold]``'s pinned ``deepspeed==0.5.9`` doesn't build without a working torch
+  here) -- not something this fix touches or needs. **The build succeeds; it is not
+  warning-free.** ``myst_heading_anchors = 4`` cut the warning count from 33 to 7 by resolving
+  most of README.md's own internal ``#anchor`` links; the remaining 7 are relative links to
+  files outside the doc tree (two in README.md, one in CONTRIBUTING.md) and two
+  ``Pygments lexer name 'csv' is not known`` notices for a fenced code block -- all benign,
+  none fatal. All seven pages render, including ``adding_a_prediction_method.rst``.
+* Ran ``score_comparison.ipynb``'s descriptor-only baseline and property-matched decoy panel
+  (cell 6) over the full pool instead of the 5-target demo slice: set ``N_TARGETS_FOR_DEMO =
+  None`` and committed it that way, since a saved output that doesn't match the committed
+  constant is worse than a slow cell. Full-pool numbers (131 targets, 655 binders, 133,000
+  candidate decoys): 9,910 property-matched, structurally-distinct decoys kept; per-descriptor
+  AUCs 0.453-0.732 (``molecular_weight`` highest at 0.732); combined-descriptor
+  cross-validated AUC 0.738. These supersede the 5-target demo's 460 kept / 0.631 / 0.778 --
+  notably, the full-pool numbers are *closer* to Figure 3's rank-percentile AUC (0.684) than
+  the demo suggested, not farther. The a3 caveat still applies here: binders come from
+  ``knownbindersvinarun``, decoys from ``vinarun``, matched only on ``protein_config_id`` --
+  if the docking box or protein preparation differed between those runs, this baseline
+  inherits that mismatch.
+* Rendered Figure 3 on exactly those 9,910 matched decoys (same 220 binders):
+  AUC 0.588 (rank percentile), 0.451 (min-max), 0.588 (z-score), against the
+  unmatched panel's 0.684/0.547/0.597 over 98,596 decoys. Saved separately as
+  ``figure_3_matched_decoys.{png,pdf,svg}`` in ``review/figures_regenerated/`` --
+  ``figure_3_validation_three_normalisations.*`` (embedded in the manuscript) is untouched.
+  ``DECOY_SUBSET`` is committed back to ``None`` so the notebook's own saved outputs stay the
+  unmatched panel; the matched render came from a scratch copy with ``DECOY_SUBSET`` set to a
+  per-(``protein_config_id``, ``ligand_id``) pair predicate.
+  Found and fixed a real bug in cell 6's own trailing instructions along the way: it told the
+  reader to set ``DECOY_SUBSET`` to ``matched_decoys['ligand_id'].tolist()`` -- ligand_id
+  alone. The decoy pool has only 1,000 unique molecules each docked against ~133 targets, so
+  filtering by ligand_id alone readmits every target-row for any decoy that matched
+  *anywhere*: 108,262 of 133,000 rows (81%), not a per-target matched panel -- confirmed by
+  actually trying it before switching to the pair-based predicate. The trailing print now
+  describes the pair-based recipe instead.
+* Added a per-pair PoseBusters validity column to ``build_supplementary_tables.py``'s Table S3,
+  alongside the existing per-pose ``pb_valid (%)``: R2-4 is switching its reply from "did this
+  pose pass" to "did any validated pose for this pair pass" (``<method>_pb_valid`` in
+  ``guild_scores.txt``, written by ``merge_posebusters_flags.py``). Per-pair validity over the
+  same 165 pairs: AutoDock Vina 77.6% (128/165, confirming the figure already in the tracker),
+  GNINA 81.8% (135/165), DiffDock 53.9% (89/165), Boltz-2 80.0% (132/165, coincidentally equal
+  to its own per-pose rate, since Boltz emits exactly one pose per pair). Regenerated
+  ``Table_S3.tsv`` into a scratch directory to verify (not written to ``review/supplementary/``,
+  left for the author to stage) and diffed the other five tables against the currently staged
+  ones to confirm nothing else moved: S4/S5/S7 identical; S6 still carries the previously
+  reported content gap (unrelated, pre-existing); S2 has one pre-existing 1-decimal rounding
+  mismatch unrelated to this change (``Vina rescore of Boltz-2 pose`` non-physical rate: this
+  script's own formula gives 1/165 = 0.6%, the staged file shows 0.7%, which matches a
+  different denominator, 1/135, used elsewhere in this codebase -- not fixed here).
+* Took the same explanatory-text-off-the-figure treatment ``d3c9e1b`` gave ``score_distribution.ipynb``
+  and applied it to ``build_rank_percentile_schematic.py``, which nobody had checked: it renders
+  Supplementary Text 3's schematic and still had a git commit hash (``0e7c959``) drawn into the
+  STANDARDIZE caption, plus two Step 3 panel notes naming internal column names
+  (``diffdock_score``, ``boltz_affinity_score``). Removed the hash, keeping the rest of that
+  sentence (mean-within-source then median-across-sources is the one thing on the figure a
+  reader needs). Removed the two panel notes entirely -- that reasoning already lives in
+  Supplementary Text 1 -- and kept the "why" as a code comment above ``POSE_SOURCES``, same
+  treatment ``d3c9e1b`` gave ``score_distribution.ipynb``'s ``METHOD_SPECS``. Also nudged Step
+  3's red "ligand" label so it no longer sits on top of the curve for KarmaDock, DiffDock and
+  Boltz-2: it now floats a fixed offset above the curve's own local height at that x-position
+  (interpolated), with headroom added to each panel's y-limit, instead of a fixed fraction of
+  the axes that only worked when the dashed line happened to land somewhere low. Left the four
+  steps, the worked ligand, the footer, and the Step 3/4 layout fixes alone.
+  Re-rendered: 7429x8857 (aspect 0.8388, was 7458x8857/0.8420 -- a 0.39% shift, well under the
+  ~1% threshold, so no ``wp:extent`` correction needed).
+* Removed reviewer-response references from ``score_comparison.ipynb``'s comments (``R2-7``
+  in a cell-2 config comment and a cell-5 section header/paragraph) so the notebook reads as
+  an independently built analysis rather than a reply to a specific review point; reworded
+  around the actual reason for the property-matched decoy control (Figure 3's decoys are not
+  size-matched to the binders) instead of "the reply to R2-7 promises...". Also trimmed
+  several over-long comments elsewhere in the same notebook to state the non-obvious point in
+  fewer lines, dropping one incidental commit-hash reference (``e9a6fe7``) and one internal
+  shorthand ("Figure 2's b2 fix") that meant nothing without cross-notebook context. No logic
+  changed; re-ran the notebook to confirm -- same AUCs (0.684/0.547/0.597) and unchanged PNG
+  dimensions (1950x2693, aspect 0.7241).
+* Dropped Figure 3's decoy rug. ``score_comparison.ipynb`` drew ``RUG_SUBSAMPLE_N = 400``
+  decoy ticks per panel out of a 98,596-row decoy set (0.4%) -- sparse enough that the top
+  percentile of decoys (~986 molecules) showed as about four ticks, visually understating
+  exactly the binder-decoy overlap region the figure exists to characterise, while the KDE
+  curve directly above represents that region correctly from every point. It also cost a
+  caption sentence that can't be phrased safely: "a random subsample of 400" reads as a claim
+  about how the panel was built, and the panel is filtered, not random (Supp. Text 2).
+  Deleted the decoy rug loop and the now-unused ``RUG_SUBSAMPLE_N``/``RUG_SEED`` constants
+  (referenced nowhere else). Moved the binder rug (every known binder, n=220, unchanged) up
+  into the freed band -- ``[-kmax*0.03, -kmax*0.11]``, was ``[-kmax*0.11, -kmax*0.19]`` -- and
+  tightened ``set_ylim``'s bottom from ``-kmax*0.25`` to ``-kmax*0.15`` so there's no empty
+  gutter where the decoy rug was; checked the rendered panel rather than trusting those
+  numbers blind. Updated the printed rug-composition line to state the binder rug is the
+  complete set and that decoy density is shown by the curve alone, kept printed as the check
+  that the caption matches the code. Left the ``n decoys = ...; n binders = ...`` footer, the
+  shared ``kmax`` cross-panel y-scale, the bounded KDE, the ``1 - rp_vina_score`` inversion,
+  and the AUC boxes untouched. The R2-7 matched-decoy path re-runs this same cell via
+  ``DECOY_SUBSET`` and inherits the fix with no separate change -- also why removing rather
+  than re-tuning the subsample was right, since a fixed 400 would have quietly become a
+  different fraction of that much smaller matched set. ``score_distribution.ipynb``'s own
+  decoy rug is untouched: its 150 decoys already fall under that notebook's ``min(500, n)``,
+  so every molecule is already drawn there.
+  Re-rendered and re-ran the notebook (against the large Vina case study data, not the
+  3-target rerun -- ``vinarun_scores.txt``/``knownbinders_scores.txt``). AUCs unchanged
+  (rank percentile 0.684, min-max 0.547, z-score 0.597). PNG dimensions and aspect ratio
+  unchanged at 1950x2693 (aspect 0.7241): the panels' pixel size is fixed by ``figsize``/
+  the gridspec, not by ``set_ylim``, so tightening the internal margin doesn't move
+  ``bbox_inches="tight"``'s outer crop here.
+* Labelled Figure 2's panels D and E as the Vina-rescore tracks they actually are.
+  ``score_distribution.ipynb`` plots ``vina_rescore_diffdock_score`` /
+  ``vina_rescore_boltz_score`` in those rows -- correct and deliberate (``20b3c50``, R2-3) --
+  but nothing on the figure said so: the bottom row's x-label is a hardcoded
+  ``"Raw docking score"`` shared across all five rows, and ``METHOD_SPECS``'s per-row
+  ``raw_xlabel`` was written but never read by cell 3, so rows D and E showed only
+  "DiffDock"/"Boltz-2", inviting a reader to take them for those methods' own native
+  confidences (a reading the manuscript text right before the figure makes likelier, since
+  it introduces DiffDock's confidence two paragraphs earlier). Added an optional ``track``
+  key to ``METHOD_SPECS`` for the two rescored rows and render it as a second line under the
+  panel label ("D)  DiffDock" / "Vina rescore of pose"), smaller and non-bold so it doesn't
+  compete with the panel label. Deleted the dead ``raw_xlabel`` entries and the cell-3 code
+  that unpacked and stored them without ever using the value, since keeping either would
+  have implied they did something. Also switched the (non-manuscript) rank-alluvial cell's
+  ``GUILD_COLS`` from ``rp_boltz_score``/``rp_diffdock_score`` (native confidences) to the
+  same rescore columns Figure 2 uses, so this internal figure's title ("rank percentile
+  score ranking across docking methods") doesn't contradict how Guild's consensus actually
+  treats these two methods. Checked the alluvial's ribbon count before and after: unchanged
+  (15 non-decoy compounds; per-column coverage among just those 15 is 15/15 Vina, 15/15
+  DiffDock rescore, 14/15 Boltz rescore) -- the 79.4% non-physical rate on
+  ``vina_rescore_diffdock_score`` is a dataset-wide figure that happens to fall almost
+  entirely on decoys, not on this figure's 15 binders.
+  Re-rendered and re-ran the notebook; PNG dimensions and aspect ratio unchanged at
+  4480x7212 (aspect 0.621) -- a two-line panel label doesn't move the figure height.
+* Removed the three explanatory text blocks ``score_distribution.ipynb`` drew onto Figure 2
+  itself (the panel-D/panel-E notes about ``diffdock_score``/``boltz_affinity_score`` not
+  being ranked or voted, and the footer disclosing the 3-target rerun). Panel labels A-E, axis
+  labels, column titles and the legend are all the figure needs; the rest is caption material
+  -- and the second note rendered a git commit hash (``0d36671``) onto a manuscript figure.
+  Removed the ``"note"`` keys from ``METHOD_SPECS`` (cell 2) and the ``ax.text``/``fig.text``
+  calls that drew them (cell 3), keeping the comment explaining *why* those two tracks report
+  a native confidence without voting -- worth keeping in the code, not on the canvas. The
+  footer's target-count disclosure moves into the manuscript caption, handled separately.
+  Re-rendered and re-ran the notebook top to bottom with its output saved; numbers unchanged
+  from the last verified render (165 rows, 3 targets; coverage and non-physical percentages
+  identical). **Aspect ratio moved**: PNG went from 4480x7467 (aspect 0.600) to 4480x7212
+  (aspect 0.621, a 3.5% shift) -- comfortably past the ~1% threshold, so the manuscript's
+  ``wp:extent`` for Figure 2 needs correcting to match the new height.
+* Shifted ``build_supplementary_tables.py``'s table tags up by one, S1-S6 -> S2-S7, to match
+  ``Revision 1.docx``, where the manuscript's own pre-existing Supplementary Table 1 (the GPCR
+  target list) keeps its number and everything this script generates shifted up under it.
+  Table S10 (parameter provenance) is out of scope, generated elsewhere. Verified by
+  regenerating into a scratch directory and diffing against the staged, renamed copies at
+  ``review/supplementary/``: identical for S2-S5 and S7. **S6 (native-ligand redocking RMSD)
+  differs in content, not just name** -- the staged version carries three extra columns
+  (post-Kabsch-superposition RMSD, a within-2-Å flag, receptor Cα-fit RMSD) reshaped long by
+  method; ``native_ligand_rmsd.tsv`` already has the source columns for this
+  (``kabsch_rmsd``, ``within_2A``, ``kabsch_fit_rmsd_ca``), but ``build_tables()`` only reads
+  the raw ``rmsd`` column into a wide per-target pivot. Pre-existing, not caused by this
+  renumbering, and not fixed here -- see the README's updated outputs table for the same note.
+* Added ``analysis_exhaustiveness`` (registered as ``a1``) to ``reproduce_response_analyses.py``,
+  closing the gap behind Supplementary Table 9 and the a1 reply: nothing in the repo computed
+  the sensitivity of Vina's scoring/ranking to ``--exhaustiveness`` (8 vs. 16 vs. 32). Per
+  target, per pairwise comparison: Spearman rho of the within-target ordering, median top-10%
+  Jaccard overlap of the best-scoring decile, and the raw score shift excluding non-physical
+  rows (score >= 0 kcal/mol in either compared setting). Verified against the staged sweep at
+  ``review/exsweep/``: median rho 0.978/0.973/0.978 and mean absolute shift 0.157/0.158/0.138
+  kcal/mol for ex8-vs-ex16/ex8-vs-ex32/ex16-vs-ex32 respectively, matching the response
+  letter's quoted headline (median rho ~0.98, range 0.90-0.99, 93% of molecules within 0.5
+  kcal/mol) when pooled across all three comparisons. Runtime is deliberately not reported --
+  competing processes shared the sweep's machine, so its batch-log timings measure contention,
+  not exhaustiveness cost; R3-4's runtime figures come from the three-target benchmark instead.
+  Added ``spearman_rho`` and ``jaccard_overlap`` as small, independently-tested helpers
+  (``tests/reviewer_response/test_reproduce_response_analyses.py``, including a tied-score
+  case for the rank computation). Noted a factual correction for the response letter while
+  verifying this: the exsweep's own staged README and the letter draft both say its five
+  non-physical rows are all in target ``6me6``; the data shows a fifth
+  (``7v3z-A-9GF-A``/``CNP0002880``) that is non-physical in all three settings too. Doesn't
+  change any ``a1`` number (the exclusion is per-row, not per-target), but the "all in one
+  target" sentence needs correcting before the letter goes out. Also fixed two stray
+  ``Table S1`` references (a docstring and a print statement in
+  ``analysis_training_overlap``) left over from the S1->S2 shift in the sibling commit,
+  since this file was already being touched.
+* Added ``docs/adding_a_prediction_method.rst``, documenting the six-step contract for wiring
+  in a new docking/scoring method (constants module, runner module, registration in the six
+  ``guild/constants/bulk.py`` dictionaries, orchestration in ``guild/bulk.py`` /
+  ``scripts/run_guild.py`` / the Makefile, complex-PDB coverage, a test), with GNINA
+  (``2502502``) as the worked example and Nesso as a second reference. Makes R3-1's reply
+  true: it previously promised a documented contract that didn't exist. Linked from
+  ``CONTRIBUTING.md`` and the README's table of contents; added to the Sphinx toctree between
+  ``usage`` and ``modules``. Added ``tests/scores/test_scores.py::TestNewMethodRegistrationIsModular``,
+  which registers a throwaway method via monkeypatch and confirms
+  ``compute_rank_percentile_scores`` ranks and votes it in with no change to that function --
+  the claim the guide makes checkable. Docs-only otherwise; no behaviour change.
+  Gaps noticed while writing this and left alone, since they are the author's call rather than
+  this commit's: (1) ``nesso`` is registered in all four of ``SCORES_DIRECTION_DICTIONARY``,
+  ``RANKS_DICTIONARY``, ``RP_SCORES_DICTIONARY`` and ``POSE_SOURCE_DICTIONARY``, and is in
+  ``ALL_AVAILABLE_METHODS``, but is missing from ``scripts/run_guild.py``'s ``--methods``
+  ``choices`` list, so it cannot be selected from the CLI or ``make run-guild``, only via the
+  Python API. (2) The Sphinx docs build was already broken before this commit, independently
+  of the new page: ``docs/conf.py`` reads ``guild.__version__``, which does not exist
+  (``guild/__init__.py`` defines no ``__version__``), so ``sphinx-build`` fails at
+  config-loading before reaching any page; separately, ``docs/readme.rst``,
+  ``docs/contributing.rst`` and ``docs/authors.rst`` each ``.. include::`` a ``.rst`` sibling
+  of a root file that is actually ``.md`` or absent (``README.rst``, ``CONTRIBUTING.rst``,
+  ``AUTHORS.rst`` don't exist), and the toctree references a ``modules.rst`` that isn't there
+  either. Verified the new page itself is unaffected: built an isolated scratch copy of
+  ``docs/`` with those four pre-existing gaps worked around only for this check (not fixed in
+  the repo) and confirmed ``adding_a_prediction_method`` renders with zero warnings attached to
+  it, against a baseline of 50 pre-existing ones from the other four pages.
+* Fixed the rank-percentile label/axis contradiction shared by the schematic's Step 4 and
+  ``score_distribution.ipynb``'s Figure 2 right column: each showed a ``P = 98%``-style
+  label sitting at ``x = 0.02`` on an axis literally labelled "rank percentile" -- the
+  stored ``rp_*`` column is 0 = best throughout guild, and the annotation was already
+  flipped for display while the axis position was not, asserting both conventions on the
+  same panel (the same confusion behind the Supp. Text 6 discrepancy). Both now plot
+  ``1 - rp`` and label the axis "(higher = better)", matching what ``score_comparison.ipynb``
+  already does for Figure 3, so all three figures share one convention, stated on each
+  figure rather than left to the caption.
+* Fixed ``score_distribution.ipynb``'s Sankey/alluvial cells (4-9), which ``fe148e1`` had
+  flagged as broken against the rerun -- they referenced ``guild_vina_score`` /
+  ``guild_boltz_score`` / ``guild_diffdock_score``, column names that rerun never had, so
+  running the notebook top to bottom failed partway through cell 5. Repointed at the
+  current ``rp_vina_score`` / ``rp_boltz_score`` / ``rp_diffdock_score`` names (each pose
+  source's own rank percentile); the notebook now runs top to bottom without raising.
+* Restored ``build_rank_percentile_schematic.py``'s chrome and switched its Step 3/Step 4
+  distributions from 12-bin histograms to the same KDE treatment Figure 2 uses
+  (``kde_curve`` / ``kde_curve_bounded``, from ``kde_helpers.py``), removing the comb
+  artefact a ~55-value panel produced. Step 3 and Step 4 panels are white rounded cards
+  again, each STEP sits on its own tinted band (extending the treatment the Step 1 cards
+  and Step 2 chips already had), Step 2's method chips are separated by a visible gap
+  rather than touching, and titles use em dashes rather than ``--``. Note for accuracy: the
+  published panels were bar histograms, not KDE -- the KDE is a deliberate improvement
+  (consistency with Figure 2, no comb artefact), not a restoration of the original.
+* Rendered all three figures (Figure 2, Figure 3, the schematic) against their real inputs
+  and saved PNG/PDF/SVG at 600 dpi outside the repo, and re-ran ``score_distribution.ipynb``
+  and ``score_comparison.ipynb`` with their outputs saved, so the committed notebooks show
+  what the code produces without needing to be run. Figure 3's three pooled AUCs (binder vs.
+  decoy): rank percentile 0.684, min-max 0.547, z-score 0.597 -- rank percentile clearly
+  ahead of z-score here, not the near-tie ``reproduce_response_analyses.py``'s
+  ``a3_normalisations`` gives over its own (pooled, raw-score) computation (0.675 vs.
+  0.674); that is a different analysis over the same three normalisations, not a
+  contradiction. Figure 2: ``vina_rescore_boltz_score`` covers 134/165 rows (81.2%) and
+  79.4% of ``vina_rescore_diffdock_score`` values are excluded as non-physical, both printed
+  by the notebook rather than left implicit in the figure. Added
+  ``GUILD_FIGURES_OUT_DIR`` (mirroring the existing ``GUILD_FIGURES_DATA_DIR``) to both
+  notebooks so a real render can target a durable directory instead of the scratch default.
+* Added ``notebooks/analysis/reviewer_response/build_supplementary_tables.py``, ported
+  from a session scratchpad so Supplementary Tables S1-S6 (every per-method AUC quoted in
+  R2-3/R2-4, the PoseBusters pose-validity rates in R2-4) have a committed, regenerable
+  path instead of existing nowhere but a prior session. Follows its committed sibling
+  ``reproduce_response_analyses.py``'s conventions (``--data``/``--out``, module
+  docstring, ``write()`` helper). Ported changes only, output unchanged: hardcoded
+  ``C:/Users/...`` paths replaced with ``--data``/``--out``; the ``sys.path`` insert
+  dropped (unnecessary once the file lives in the repo); the pandas-3 ``_pcid_keep``
+  save/restore workaround deleted as dead code now that ``e9a6fe7`` fixed
+  ``compute_rank_percentile_scores`` to keep its grouping column at source (the
+  recompute itself is kept, and why: the file on disk predates both the median
+  aggregation, ``0e7c959``, and ``boltz_affinity_score``'s ranking, ``0d36671``); and a
+  stale docstring line rewritten (Boltz-2's affinity head has had its own
+  ``rp_boltz_affinity_score`` column, ranked like every other track, since ``0d36671`` --
+  the code already read it correctly, only the comment was wrong). Verified against the
+  real rerun data that the four numbers the response letter quotes verbatim from Table S1
+  are unchanged: Guild combined 0.838, AutoDock Vina 0.788, Boltz-2 affinity 0.985, GNINA
+  0.739.
+* Added ``r2_5_training_overlap`` to ``reproduce_response_analyses.py``: the within-target,
+  per-track, raw-score AUC ordered by each benchmark target's PDB release date that backs
+  R2-5's answer on training-set leakage (any cutoff admitting the most recently released
+  structure, 8GDC, necessarily admits the other two, so their ordering is informative
+  without knowing any method's actual cutoff). Boltz-2's affinity head verifies exactly:
+  0.956 (6OT0, 2019), 1.000 (7V3Z, 2021), 1.000 (8GDC, 2024) -- the newest structure ranked
+  best, the oldest worst, as the letter claims. Release dates are a hardcoded, cited
+  constant (RCSB entry endpoint, retrieved 2026-09-17), not a live call; an opt-in
+  ``--verify-dates`` re-fetches and asserts them instead. Deliberately does not attempt a
+  ligand-level training-set audit (no PDBBind overlap, no ECFP4 similarity to a training
+  set) -- the argument rests on the release-date contrast and the scoping logic, not on
+  enumerating what Boltz-2 was trained on, and building one would answer a question this
+  reply does not ask. Direction is read from ``guild.constants.bulk.SCORES_DIRECTION_DICTIONARY``
+  rather than hardcoded -- the only guild import anywhere in this otherwise guild-free
+  script, and still no heavy dependency, since that module is pure constants. The
+  direction-aware AUC itself is factored into a small, tested helper,
+  ``direction_aware_auc`` (``tests/reviewer_response/``, including a direction-flip case).
+  Verifying this against real data also surfaced that an earlier hand-computed draft of
+  this table had two of its five rows (``boltz_score``, ``karmadock_score``) backwards --
+  their values were the exact complement (1 - auc) of what direction-correct scoring
+  gives, independently cross-checked against ``sklearn.roc_auc_score``. Corrected here;
+  flagged in the module docstring and the response-analyses README. Does not affect
+  ``boltz_affinity_score``, the only track R2-5's argument depends on.
+* Relabelled two stale comments in ``reproduce_response_analyses.py``'s ``a2`` analysis
+  that went stale when the median default (``0e7c959``) landed after it was written: the
+  rule labelled ``"unweighted mean (current)"`` is now just ``"unweighted mean"``, and
+  ``"median"`` is now ``"median (current default, 0e7c959)"``; a comment above
+  ``POSE_SOURCE_VOTES`` no longer claims the cross-engine combination is a mean. Labels
+  only -- ``a2`` computes every aggregation rule itself rather than calling
+  ``compute_rank_percentile_scores``, so no number moves.
+* Added ``notebooks/analysis/build_rank_percentile_schematic.py``, which generates the
+  Supplementary Text 3 rank-percentile schematic from the real 3-target rerun instead of
+  the hand-built, uncaptioned original (``guild_rank_percentile_figure.png`` /
+  ``Revision 1.docx``'s ``image4.png``) -- nothing in the repository produced that image,
+  so it could drift from the scoring code silently, and it already had. Two concrete
+  errors are fixed by construction: it showed four pose sources (Vina, DiffDock,
+  KarmaDock, Boltz-2), GNINA was missing; and its DiffDock panel was labelled "confidence
+  (higher = better)", exactly the input R2-3 objects to and what the rescore tracks and
+  ``20b3c50`` stopped letting vote. The regenerated schematic shows all five pose sources,
+  labels DiffDock's and Boltz-2's panels with the Vina-rescore ΔG that actually enters the
+  score (native confidences are still noted as reported, but not ranked or voted, mirroring
+  ``gnina_cnn_score``), shows Boltz-2 as one Step-4 vote (the mean of its two shown tracks,
+  including ``boltz_affinity_score`` per ``0d36671``) rather than one panel per track, and
+  states the cross-source combination is a median (``0e7c959``), not a mean.
+* R2-7: added ``guild.tools.decoy_matching``, the property-matched decoy panel and
+  descriptor-only-baseline control the reply to R2-7 promises for Figure 3, as ordinary
+  tested library code rather than a final render. ``match_decoys_to_binders`` keeps a
+  decoy only if it is within tolerance of at least one of its target's known binders on
+  molecular weight, cLogP, HBA, HBD, rotatable bonds and net charge *and* its ECFP4
+  Tanimoto similarity to every known binder for that target is below 0.35, so a "matched"
+  decoy is not simply a close structural analogue; MW/logP/HBA/HBD are reused from
+  ``guild.tools.ligand_properties.assign_properties`` rather than reimplemented, only
+  rotatable-bond count and net formal charge are new. ``descriptor_only_auc`` reports
+  binder-vs-decoy AUC per descriptor with no docking score at all, and
+  ``combined_descriptor_auc`` a cross-validated logistic-regression AUC across all six --
+  the control that separates binding signal from property bias (on the 3-target rerun,
+  an unmatched heavy-atom-count baseline alone reaches AUC 0.865, higher than any docking
+  method; size-matching collapses it to 0.645). ``score_comparison.ipynb``'s decoy-loading
+  cell now takes a ``DECOY_SUBSET`` (an explicit ligand_id list, or a predicate),
+  defaulting to ``None`` (every decoy, current behaviour); verified end-to-end that the
+  default reproduces Figure 3's three AUCs exactly (0.684 / 0.547 / 0.597, unchanged) and
+  added a demonstration cell that runs the real matching + baseline against a 5-target
+  slice of the actual Figure 3 inputs (460/5,000 decoys kept; combined AUC 0.778). Full
+  scale (133,000 decoys x 655 binders) is not run in the notebook -- descriptor computation
+  is roughly linear in decoy count and the check above took several seconds per 5,000, so
+  rendering the matched panel itself is left as follow-up work. 18 new tests in
+  ``tests/ligand_properties/test_decoy_matching.py``.
+* Figure 3 (``score_comparison.ipynb``): the grey/orange rug ticks (R4 b3), the "Density"
+  y-axis (R4 b4), and the score-orientation inversion are now all explicit instead of
+  implicit. The rug ticks are per-molecule values -- the decoy rug (grey) is a random
+  subsample (``RUG_SUBSAMPLE_N = 400``, ``RUG_SEED = 42``, both now named and printed),
+  the known-binder rug (orange) is the complete set -- not "per-target values underlying
+  the pooled distributions" as the current draft reply to b3 says; that sentence needs
+  correcting in the letter. The y-axis is relabelled "Probability density" and now uses
+  the same ``kde_curve_bounded`` as Figure 2's b2 fix, so each panel's curve genuinely
+  integrates to 1 on its own bounded support; the shared y-scale is kept (comparability
+  across the three panels is the point of the figure) and is now stated in the printed
+  output rather than left to be inferred from the hidden y-ticks. The x-axis label is now
+  "Normalized score (higher = better)": panel A plots ``1 - rp_vina_score`` even though
+  the stored column is 0 = best, which is the actual source of the Supp. Text 6 vs. code
+  discrepancy ("1 indicates the top-ranked molecule" is about the plotted axis, not the
+  stored value) -- both were right about different things, and nobody had flagged that
+  the notebook flips it. Neither the stored value nor the inversion itself is changed.
+  Also now prints the three panel AUCs, which were computed for the in-panel annotation
+  but never emitted: on this dataset, rank percentile (0.684) beats z-score (0.597) by a
+  real margin, unlike ``reproduce_response_analyses.py``'s own pooled computation over 47
+  targets (0.675 vs. 0.674, effectively tied) -- these are different analyses (this
+  notebook's own binder/decoy join vs. that script's stricter "both classes present per
+  target" filter). **Resolved separately** (see the pool-reconciliation bullet further
+  down): the physical Vina-range filter is the entire cause of the near-tie, not the target
+  set. ``kde_curve``/``kde_curve_bounded`` now live in a shared ``kde_helpers.py``,
+  imported by both figure notebooks, so the b2 fix is one function, not two copies that
+  could drift.
+* ``score_comparison.ipynb``'s ``_decoy_pct``, ``_zscore`` and ``_decoy_fit_unbounded``
+  no longer use ``groupby(protein_col, group_keys=False).apply(...)`` -- the same pattern
+  ``e9a6fe7`` removed from ``guild.tools.scores.compute_rank_percentile_scores``, and
+  confirmed here to emit the same ``FutureWarning`` on pandas 2.2+ that fix described.
+  ``_zscore`` is now a straightforward ``groupby(...).transform("mean"/"std")``; the other
+  two reference a different set (decoys only) than the group being scored, so they cannot
+  be a single `.transform()` call, but no longer touch ``DataFrameGroupBy.apply()``
+  either -- rewritten as a per-protein decoy-array lookup (built by iterating the groupby
+  object, not ``.apply()``) plus the same per-value arithmetic as before. Verified
+  numerically identical to the old implementation on the real Figure 3 input data (max
+  abs diff 8.8e-16, floating-point noise only) and that row count and row order are
+  unchanged (asserted in the notebook itself, not just checked once here).
+* Figure 2 (``score_distribution.ipynb``) is rebuilt on the 3-target rerun and no longer
+  plots DiffDock's or Boltz-2's *pose confidence* as the ranked quantity -- it now shows
+  the Vina-rescore ΔG that actually enters the score (``vina_rescore_diffdock_score``,
+  ``vina_rescore_boltz_score``), matching what ``20b3c50`` stopped letting the raw
+  confidences do, and adds GNINA and KarmaDock so the figure covers all five pose sources
+  its caption already claimed. The native confidences (``diffdock_score``, ``boltz_score``)
+  are still reported per panel but are not ranked or plotted as the voted quantity, the
+  same treatment ``gnina_cnn_score`` already gets; the panel notes that
+  ``boltz_affinity_score`` also joins Boltz's vote (``0d36671``). ``vina_rescore_boltz_score``
+  is populated for 134/165 rows (receptor-preparation failures) and
+  ``vina_rescore_diffdock_score`` for only 34/165 once non-negative values -- a
+  rescoring-failure sentinel, 79.4% of the column -- are nulled alongside the strictly
+  non-physical ones; both counts are printed rather than left implicit, and the figure
+  states on its own face that three targets replace what the published version covered
+  many more of.
+* Figure 2's right column (rank percentile) no longer plots a density that overshoots
+  [0, 1] (R4 b2) -- the KDE grid used to run from -0.06 to 1.06 with the axis merely
+  clipped to (-0.04, 1.04), which still let the drawn curve cross the valid boundary.
+  Replaced with ``kde_curve_bounded``, a reflected boundary-corrected KDE evaluated only
+  on ``[0, 1]``, so the curve cannot leave the valid range and still integrates to 1
+  (checked with ``np.trapezoid`` against every panel with enough points to make that
+  check meaningful; verified to ~1e-3 in every one). The left column (raw docking score)
+  is genuinely unbounded and keeps the original, unreflected KDE.
+* ``score_distribution.ipynb`` (Figure 2) and ``score_comparison.ipynb`` (Figure 3) now
+  read their input tables from a ``--data``-style directory
+  (``GUILD_FIGURES_DATA_DIR`` env var, default ``data``) instead of a hardcoded relative
+  path, mirroring ``reviewer_response/reproduce_response_analyses.py``. Neither
+  notebook's input was reachable before this: both paths are covered by the blanket
+  ``*.txt`` rule in ``.gitignore`` and were never committed, so no figure could be
+  regenerated from a clean checkout. Figure 2 now points at the 3-target rerun
+  (replacing a many-target case-study file that no longer exists anywhere reachable,
+  including the Zenodo deposit -- see Task 1 below); Figure 3's two inputs are unchanged
+  and load today. Added ``notebooks/analysis/README.md`` documenting, per figure, which
+  file is needed, which columns it must carry, and its provenance, plus a
+  ``legacy_columns.LEGACY_RENAME`` module shared by both notebooks (previously
+  duplicated in ``score_comparison.ipynb`` and absent from ``score_distribution.ipynb``
+  entirely) that now also covers ``global_dockwizard_score``, the one column-naming
+  generation it was missing. Orientation was checked directly against all three
+  generations and is unaffected -- 0 = best throughout; nothing here changes any stored
+  score.
+* Fixed the ``test`` CI job, which failed to even collect: the ``test``
+  Docker stage copied in ``guild/`` and ``tests/`` but never ``scripts/``,
+  and ``.dockerignore`` allowlisted only ``scripts/apply_karmadock_patches.py``,
+  so ``tests/scripts/test_run_guild.py``'s ``import run_guild`` had nothing to
+  import inside the container even though it works locally. Added
+  ``scripts/run_guild.py`` to both. Pre-existing since that test file was
+  added; unrelated to the other changes in this branch.
+* ``compute_rank_percentile_scores`` no longer drops ``protein_config_id``
+  (or scrambles row order against any other column) on pandas 3 — it grouped
+  with ``groupby(protein_col, group_keys=False).apply(...)``, relying on the
+  grouping column being passed through to the callable and back out, which
+  stopped being the default on pandas 2.2+ and is gone on 3.x. Not reachable
+  today (``pyproject.toml`` pins ``pandas<3``), but every downstream
+  consumer of ``guild_scores.txt`` groups by that column, so it was a
+  landmine for whenever that pin lifts. Rewritten as groupby transforms over
+  the whole frame instead of a per-group ``.apply()``, which keeps every
+  column and every row's original position by construction and needs no
+  ``.reset_index()``. Numbers are unchanged — verified against the existing
+  orientation and denominator tests, and manually against pandas 3.0.5.
+* ``boltz_affinity_score`` (Boltz-2's own affinity head, log10(IC50/uM), read
+  from the same output tree ``boltz_guild_scoring`` already parses) is now
+  ranked and votes in ``global_rp_score``, via the new
+  ``BOLTZ_AFFINITY_PREFIX`` prefix. Previously deliberately excluded as a
+  side channel for validating Nesso-1 against; that rationale doesn't
+  survive the criterion adopted for the pose-confidence exclusion above —
+  it's a genuine affinity estimate, not a confidence, so it qualifies on the
+  same grounds ``vina_rescore_boltz``/``gnina_rescore_boltz`` do. It joins
+  Boltz's existing pose-source group as a third estimate
+  (``POSE_SOURCE_DICTIONARY[BOLTZ_AFFINITY_PREFIX] == BOLTZ_PREFIX``) rather
+  than voting independently, so requesting ``boltz`` still contributes one
+  pose-source vote, not two. Whether this is a fair test is unresolved —
+  Boltz-2's affinity head is trained on binding-affinity data and the
+  benchmark's 15 known binders are ChEMBL compounds at pChEMBL 9.15–10.7, so
+  some of its benchmark strength may be training-set recall; that overlap
+  audit is still outstanding, and no performance claim is made here on the
+  strength of the benchmark number.
+* ``global_rp_score`` now combines pose sources with their **median**, not
+  their mean (``compute_rank_percentile_scores(..., aggregation=
+  "pose_source_median")``, the new default). Measured on the three-target
+  benchmark (165 pairs, 15 known binders, 150 decoys): the unweighted mean
+  scored 0.781 AUC, below AutoDock Vina alone (0.790), because one track
+  (DiffDock, 0.281 standalone) dragged it down with no defence against a
+  single aberrant vote; the median scored 0.824 with all five methods still
+  included. Chosen over performance-weighting (0.851) or dropping DiffDock
+  (0.852) because it needs no fitted parameter and makes no engine-specific
+  judgement. This is a direction, not a significant result — the confidence
+  intervals overlap heavily at 15 binders. ``aggregation="pose_source"``
+  (the previous default, a mean) and ``aggregation="flat"`` are both still
+  available for reproducing older scores.
+* Added ``notebooks/analysis/reviewer_response/`` — the scripts and
+  provenance notes behind every number quoted in the reviewer response that
+  isn't read directly off a guild output table (runtime, aggregation-rule
+  comparison, normalisation comparison, decoy size-matched control), plus
+  the recovery script for a merge that didn't run (see the PoseBusters merge
+  fix below). ``pandas``/``numpy`` only, no guild import needed.
+* Fixed a stale docstring in ``score_distribution.ipynb`` — the markdown
+  header cited ``figure_2_dockwizard_scores.txt`` while the code cell
+  correctly loads ``figure_2_guild_scores.txt``.
+* ``guild.tools.scores.is_physical_score(value, method)`` flags Vina-family raw
+  scores (``vina_score``, ``gnina_score``, and the four rescore tracks)
+  outside a plausible −20 to 0 kcal/mol range — measured on the large Vina
+  case study, 6.06% of scored rows were non-negative and 0.79% exceeded
+  1,000,000 in magnitude (observed maximum 43,851,078). ``run_guild_scoring``
+  now logs a per-method count of these as a warning; stored values are
+  unchanged by default. ``run_guild_scoring(exclude_non_physical=True)``
+  (``--exclude-non-physical`` / ``EXCLUDE_NON_PHYSICAL=1``) nulls them for a
+  new run instead, opt-in only, since the published case-study numbers were
+  generated with these values left in the table.
+* PoseBusters and PLIP/ProLIF now log which requested methods produce no
+  complex PDB by design (karmadock, nesso) instead of letting them simply
+  not appear in ``posebusters_validity.tsv`` / ``plip_interactions.tsv`` —
+  a rows-only table reads that silence as "checked, nothing to report"
+  rather than "structurally not applicable". KarmaDock's own docking script
+  writes a scores CSV only (see ``karmadock_guild_scoring``); nothing in
+  this repo defines a predicted-pose file for it, so generating a KarmaDock
+  complex PDB would mean guessing that external tool's output convention
+  rather than reading it off a verified path — left for a follow-up once
+  that's confirmed.
+* ``_merge_posebusters_into_scores`` now raises instead of only logging a
+  warning when ``guild_scores.txt`` is missing at merge time, unless the
+  caller explicitly expected that (``run_pose_validity_analysis(...,
+  expect_existing_scores=False)``, which ``--posebusters-only`` now passes).
+  It also raises if PoseBusters validated poses but the merge added zero
+  columns — previously possible, silently, whenever a combination_id or
+  docking_method value came through null. Both close the same gap: a real
+  run once produced a correct, non-empty ``posebusters_validity.tsv`` while
+  ``guild_scores.txt`` quietly kept zero ``pb_`` columns, with nothing louder
+  than a warning to notice by.
+* PoseBusters pose-validity analysis is now wired into ``scripts/run_guild.py``
+  and the Makefile (``--posebusters`` / ``--no-posebusters`` /
+  ``--posebusters-only`` / ``--posebusters-config``, ``NO_POSEBUSTERS`` /
+  ``POSEBUSTERS_CONFIG`` / ``make run-posebusters``). It runs by default,
+  mirroring PLIP; previously ``run_pose_validity_analysis`` was reachable only
+  from the test suite, and every real invocation went through a hand-rolled
+  script that re-instantiated ``BulkRun`` and risked silently validating the
+  wrong batch layout.
+* ``global_rp_score`` no longer averages ``diffdock_score`` and ``boltz_score``
+  in with the affinity tracks — they're pose confidences, not affinity
+  estimates, so (like ``gnina_cnn_score``) they keep their own ``rp_*`` column
+  but stop voting. The remaining tracks are grouped by which engine generated
+  the pose before averaging, so DiffDock's and Boltz's two auto-added rescores
+  count as one vote for that pose source instead of three. The previous flat
+  mean is still available via ``compute_rank_percentile_scores(...,
+  aggregation="flat")`` for reproducing older scores.
+
 1.4.0 (2026-09-15)
 ------------------
 * ``compute_rank_percentile_scores`` gained a ``denominator`` option
