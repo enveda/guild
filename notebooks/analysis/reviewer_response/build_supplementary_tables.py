@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the supplementary tables (S1-S6) backing R2-3, R2-4 and R3-4.
+"""Build the supplementary tables (S2-S7) backing R2-3, R2-4 and R3-4.
 
 Emits one TSV per table (exact numbers, reusable) plus a self-contained HTML
 document for review and for printing to the supplementary PDF.
@@ -210,25 +210,28 @@ def build_tables(scores: pd.DataFrame, pb: pd.DataFrame, rmsd: pd.DataFrame):
          "Per pair (s)": "one-off", "Note": "cached after first use for a given target"},
     ])
 
+    # Tags start at S2, not S1: the manuscript's own Supplementary Table 1 is
+    # the pre-existing GPCR target list, which predates all of this and isn't
+    # built here. Table S10 (parameter provenance) isn't built here either.
     return [
-        ("S1", "Per-method screening performance", s1,
+        ("S2", "Per-method screening performance", s1,
          "Three targets, 165 protein–ligand pairs (15 known binders, 150 property-matched decoys). "
          "AUC is binder-vs-decoy discrimination pooled across targets on the rank-percentile scale. "
          "Confidence intervals are Hanley–McNeil; they are wide because there are 15 binders. "
          "The combined score is the median across pose sources, with Boltz-2's affinity head folded into its own pose source (guild 0d36671). EF baselines are 1.0. Non-physical counts non-negative energies for Vina-family scores only."),
-        ("S2", "Pose validity by method", s2,
+        ("S3", "Pose validity by method", s2,
          "PoseBusters, config “dock”. Pose-level, all poses per pair. KarmaDock emits no complex "
          "structure, so no pose was available to check — this is a coverage gap, not a pass."),
-        ("S3", "Pose validity, individual checks", s3,
+        ("S4", "Pose validity, individual checks", s3,
          "Percentage of poses passing each check. Separates internal geometry from receptor fit."),
-        ("S4", "Binder-vs-decoy AUC per target", s4,
+        ("S5", "Binder-vs-decoy AUC per target", s4,
          "Five binders against 50 decoys per target, so per-target values are imprecise; the pooled "
          "column is the one to read."),
-        ("S5", "Native-ligand redocking RMSD (Å)", s5,
+        ("S6", "Native-ligand redocking RMSD (Å)", s5,
          "Each target's own co-crystal ligand redocked into its own structure. n = 1 per method per "
          "target — illustrative, not a pose-accuracy measurement. RMSD computed after Kabsch "
          "superposition, since receptor preparation re-frames coordinates per method."),
-        ("S6", "Runtime", s6,
+        ("S7", "Runtime", s6,
          "Single NVIDIA A100 80GB PCIe. Boltz-2's per-pair cost is measured from its own per-pair "
          "logs; the remaining tracks are given as an aggregate because the run log records batch "
          "boundaries rather than per-method timings."),

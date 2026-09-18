@@ -4,6 +4,18 @@ History
 
 Unreleased
 ----------
+* Shifted ``build_supplementary_tables.py``'s table tags up by one, S1-S6 -> S2-S7, to match
+  ``Revision 1.docx``, where the manuscript's own pre-existing Supplementary Table 1 (the GPCR
+  target list) keeps its number and everything this script generates shifted up under it.
+  Table S10 (parameter provenance) is out of scope, generated elsewhere. Verified by
+  regenerating into a scratch directory and diffing against the staged, renamed copies at
+  ``review/supplementary/``: identical for S2-S5 and S7. **S6 (native-ligand redocking RMSD)
+  differs in content, not just name** -- the staged version carries three extra columns
+  (post-Kabsch-superposition RMSD, a within-2-Å flag, receptor Cα-fit RMSD) reshaped long by
+  method; ``native_ligand_rmsd.tsv`` already has the source columns for this
+  (``kabsch_rmsd``, ``within_2A``, ``kabsch_fit_rmsd_ca``), but ``build_tables()`` only reads
+  the raw ``rmsd`` column into a wide per-target pivot. Pre-existing, not caused by this
+  renumbering, and not fixed here -- see the README's updated outputs table for the same note.
 * Added ``docs/adding_a_prediction_method.rst``, documenting the six-step contract for wiring
   in a new docking/scoring method (constants module, runner module, registration in the six
   ``guild/constants/bulk.py`` dictionaries, orchestration in ``guild/bulk.py`` /

@@ -8,7 +8,7 @@ regenerates all of them.
 python reproduce_response_analyses.py --data ./data --out ./output
 python reproduce_response_analyses.py --data ./data --only a2 a3                    # subset
 python reproduce_response_analyses.py --data ./data --only r2_5_training_overlap --verify-dates
-python build_supplementary_tables.py --data ./data --out ./output                   # Tables S1-S6
+python build_supplementary_tables.py --data ./data --out ./output                   # Tables S2-S7
 ```
 
 `reproduce_response_analyses.py` requires only `pandas` and `numpy` and does not import
@@ -38,8 +38,8 @@ notebooks. `--data` and `--out` are not committed — provide them locally (see 
 | file | provenance | needs to go to Zenodo |
 | --- | --- | --- |
 | `guild_scores.txt` | `small-example-all-methods` rerun, 168 combinations, 3 targets. Used by `a2`, `reserve`, `r2_5_training_overlap` and `build_supplementary_tables.py`. | **yes** |
-| `posebusters_validity.tsv` | same rerun — pose validity checks. `build_supplementary_tables.py` only (Tables S2, S3). | **yes** |
-| `native_ligand_rmsd.tsv` | same rerun — native-ligand redocking RMSD. `build_supplementary_tables.py` only (Table S5). | **yes** |
+| `posebusters_validity.tsv` | same rerun — pose validity checks. `build_supplementary_tables.py` only (Tables S3, S4). | **yes** |
+| `native_ligand_rmsd.tsv` | same rerun — native-ligand redocking RMSD. `build_supplementary_tables.py` only (Table S6). | **yes** |
 | `vinarun_scores.txt` | `guild/vina_data/data/vinarun/dockwizard_scores.txt` on Azure — 403,000 rows, 133 targets, decoy/NP/synthetic | **yes** (56 MB) |
 | `knownbinders_scores.txt` | `guild/vina_data_2/data/knownbindersvinarun/drrp_scores.txt` on Azure — 655 rows, 5 strong binders × 131 targets | **yes** |
 | `vinarun_batch_progress.log` | `guild/vina_data/data/vinarun/batch_progress.log` | yes, small |
@@ -77,14 +77,18 @@ column from those files expecting the current 0 = best orientation. See
 
 ### `build_supplementary_tables.py`
 
+Tags start at S2, not S1 — the manuscript's own Supplementary Table 1 is the pre-existing GPCR
+target list, which this script doesn't build. Table S10 (parameter provenance) isn't built here
+either.
+
 | file | backs |
 | --- | --- |
-| `Table_S1.tsv` | S1, quoted throughout R2-3/R2-4 — per-method screening AUC, EF and non-physical rate |
-| `Table_S2.tsv` | S2, R2-4 — pose validity rate by method. Four of five methods: KarmaDock emits no complex PDB, so it has no PoseBusters rows at all (a coverage gap, not a pass) — see `merge_posebusters_flags.py`'s own note on this. |
-| `Table_S3.tsv` | S3, R2-4 — pose validity, individual checks. Same four-of-five coverage as S2. |
-| `Table_S4.tsv` | R2-4 — per-target AUC, pooled column is the one to read (5 binders per target is imprecise alone) |
-| `Table_S5.tsv` | R3-4 — native-ligand redocking RMSD, illustrative (n = 1 per method per target). KarmaDock is null here too, for the same underlying reason as S2/S3 -- `native_ligand_rmsd.tsv` does carry a KarmaDock row per target, but its `rmsd` value itself is null throughout. |
-| `Table_S6.tsv` | R3-4 — runtime by stage |
+| `Table_S2.tsv` | S2, quoted throughout R2-3/R2-4 — per-method screening AUC, EF and non-physical rate |
+| `Table_S3.tsv` | S3, R2-4 — pose validity rate by method. Four of five methods: KarmaDock emits no complex PDB, so it has no PoseBusters rows at all (a coverage gap, not a pass) — see `merge_posebusters_flags.py`'s own note on this. |
+| `Table_S4.tsv` | S4, R2-4 — pose validity, individual checks. Same four-of-five coverage as S3. |
+| `Table_S5.tsv` | R2-4 — per-target AUC, pooled column is the one to read (5 binders per target is imprecise alone) |
+| `Table_S6.tsv` | R3-4 — native-ligand redocking RMSD, illustrative (n = 1 per method per target). KarmaDock is null here too, for the same underlying reason as S3/S4 -- `native_ligand_rmsd.tsv` does carry a KarmaDock row per target, but its `rmsd` value itself is null throughout. **Known gap:** the staged, submitted version of this table (`review/supplementary/Table_S6.tsv`) carries three additional columns -- post-Kabsch-superposition RMSD, a within-2-Å flag, and receptor Cα-fit RMSD -- reshaped long by method. `native_ligand_rmsd.tsv` already has the columns for this (`kabsch_rmsd`, `within_2A`, `kabsch_fit_rmsd_ca`); `build_tables()` currently only reads the raw `rmsd` column into a wide, per-target pivot. Confirmed by diffing a fresh regeneration against the staged file -- not introduced by the S1→S7 renumbering, and not fixed here; it needs its own commit. |
+| `Table_S7.tsv` | R3-4 — runtime by stage |
 | `supplementary_tables.html` | all of the above, one page, for the supplementary PDF |
 
 ## Caveats that belong in any write-up
@@ -109,9 +113,9 @@ column from those files expecting the current 0 = best orientation. See
 5. **Non-physical scores are dropped**, not imputed: any Vina-family energy outside
    −20 to 0 kcal/mol is excluded (`PHYSICAL_VINA`). About 6% of the large pool is
    non-negative and 0.8% exceeds 1,000, with a maximum of 43,851,078.
-6. **`r2_5_training_overlap` is deliberately within-target and raw-score; `Table_S1` is
+6. **`r2_5_training_overlap` is deliberately within-target and raw-score; `Table_S2` is
    deliberately pooled and rank-percentile.** They can legitimately disagree (Boltz-2
-   affinity: 0.970 pooled-raw here vs. 0.985 pooled-rank-percentile in S1; Vina: 0.736 vs.
+   affinity: 0.970 pooled-raw here vs. 0.985 pooled-rank-percentile in S2; Vina: 0.736 vs.
    0.788) — that is not an error in either one, and is not fixed by switching one to the
    other's method.
 7. **Two of `r2_5_training_overlap`'s five tracks needed a second look at their sign
