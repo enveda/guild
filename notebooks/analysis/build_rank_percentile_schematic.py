@@ -58,34 +58,32 @@ POSE_SOURCE_COLOR = {
 }
 
 # rp_cols: a single column, or a list meaning "vote is the mean of these tracks".
-# note: annotation for a native confidence that's reported but not ranked/voted.
+# DiffDock/Boltz-2 report a native confidence (diffdock_score/boltz_score) that isn't
+# ranked or voted -- true of gnina_cnn_score too. Worth stating in code, not on the figure.
 POSE_SOURCES = [
     {
         "label": "Vina", "raw_col": "vina_score", "physical_prefix": VINA_PREFIX,
-        "direction": "kcal/mol (lower = better)", "rp_cols": "rp_vina_score", "note": None,
+        "direction": "kcal/mol (lower = better)", "rp_cols": "rp_vina_score",
     },
     {
         "label": "GNINA", "raw_col": "gnina_score", "physical_prefix": GNINA_PREFIX,
-        "direction": "kcal/mol (lower = better)", "rp_cols": "rp_gnina_score", "note": None,
+        "direction": "kcal/mol (lower = better)", "rp_cols": "rp_gnina_score",
     },
     {
         "label": "KarmaDock", "raw_col": "karmadock_score", "physical_prefix": None,
-        "direction": "score (higher = better)", "rp_cols": "rp_karmadock_score", "note": None,
+        "direction": "score (higher = better)", "rp_cols": "rp_karmadock_score",
     },
     {
         "label": "DiffDock", "raw_col": "vina_rescore_diffdock_score",
         "physical_prefix": VINA_RESCORE_DIFFDOCK_PREFIX,
         "direction": "Vina rescore, kcal/mol (lower = better)",
         "rp_cols": "rp_vina_rescore_diffdock_score",
-        "note": "diffdock_score (native confidence)\nis reported, not ranked or voted",
     },
     {
         "label": "Boltz-2", "raw_col": "vina_rescore_boltz_score",
         "physical_prefix": VINA_RESCORE_BOLTZ_PREFIX,
         "direction": "Vina rescore, kcal/mol (lower = better)",
         "rp_cols": ["rp_vina_rescore_boltz_score", "rp_boltz_affinity_score"],
-        "note": ("boltz_score (native confidence) is reported, not ranked or voted;\n"
-                 "boltz_affinity_score also joins this vote (mean within source)"),
     },
 ]
 
@@ -253,17 +251,20 @@ def build_figure(df: pd.DataFrame) -> plt.Figure:
         curve = kde_curve(vals, x_grid)
         ax.fill_between(x_grid, 0, curve, color=color, alpha=0.55, linewidth=0)
         ax.plot(x_grid, curve, color=color, linewidth=1.6)
-        ax.axvline(example[spec["raw_col"]], color="#d62728", linestyle="--", linewidth=1.5)
-        ax.text(example[spec["raw_col"]], ax.get_ylim()[1] * 0.92, "ligand",
-                 color="#d62728", fontsize=8, ha="center", fontweight="bold")
+        # Headroom above the curve's own peak, not just a fixed fraction of the
+        # axes -- otherwise "ligand" sits on top of the fill wherever the dashed
+        # line lands near a peak (KarmaDock/DiffDock/Boltz-2 all did).
+        ax.set_ylim(0, curve.max() * 1.4)
+        example_x = example[spec["raw_col"]]
+        ax.axvline(example_x, color="#d62728", linestyle="--", linewidth=1.5)
+        label_y = np.interp(example_x, x_grid, curve) + curve.max() * 0.18
+        ax.text(example_x, label_y, "ligand",
+                 color="#d62728", fontsize=8, ha="center", va="bottom", fontweight="bold")
         ax.set_title(spec["label"], color=color, fontsize=11, fontweight="bold")
         ax.set_xlabel(spec["direction"], fontsize=7.5)
         ax.set_yticks([])
         for spine in ("top", "right", "left", "bottom"):
             ax.spines[spine].set_visible(False)
-        if spec["note"]:
-            ax.text(0.5, -0.55, spec["note"], transform=ax.transAxes, fontsize=6,
-                     ha="center", va="top", style="italic", color="#555555")
 
     # ── Standardize arrow ──
     ax_std = fig.add_subplot(gs[4])
@@ -274,7 +275,7 @@ def build_figure(df: pd.DataFrame) -> plt.Figure:
     ax_std.text(
         0.5, 0.35,
         "Rank within each protein -> rank / N -> combine each pose source's tracks by MEAN,\n"
-        "then combine pose sources by MEDIAN across sources (0e7c959) — not a flat mean.",
+        "then combine pose sources by MEDIAN across sources — not a flat mean.",
         ha="center", va="center", fontsize=9, style="italic", color="#333333",
     )
 

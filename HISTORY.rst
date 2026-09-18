@@ -4,6 +4,22 @@ History
 
 Unreleased
 ----------
+* Took the same explanatory-text-off-the-figure treatment ``d3c9e1b`` gave ``score_distribution.ipynb``
+  and applied it to ``build_rank_percentile_schematic.py``, which nobody had checked: it renders
+  Supplementary Text 3's schematic and still had a git commit hash (``0e7c959``) drawn into the
+  STANDARDIZE caption, plus two Step 3 panel notes naming internal column names
+  (``diffdock_score``, ``boltz_affinity_score``). Removed the hash, keeping the rest of that
+  sentence (mean-within-source then median-across-sources is the one thing on the figure a
+  reader needs). Removed the two panel notes entirely -- that reasoning already lives in
+  Supplementary Text 1 -- and kept the "why" as a code comment above ``POSE_SOURCES``, same
+  treatment ``d3c9e1b`` gave ``score_distribution.ipynb``'s ``METHOD_SPECS``. Also nudged Step
+  3's red "ligand" label so it no longer sits on top of the curve for KarmaDock, DiffDock and
+  Boltz-2: it now floats a fixed offset above the curve's own local height at that x-position
+  (interpolated), with headroom added to each panel's y-limit, instead of a fixed fraction of
+  the axes that only worked when the dashed line happened to land somewhere low. Left the four
+  steps, the worked ligand, the footer, and the Step 3/4 layout fixes alone.
+  Re-rendered: 7429x8857 (aspect 0.8388, was 7458x8857/0.8420 -- a 0.39% shift, well under the
+  ~1% threshold, so no ``wp:extent`` correction needed).
 * Removed reviewer-response references from ``score_comparison.ipynb``'s comments (``R2-7``
   in a cell-2 config comment and a cell-5 section header/paragraph) so the notebook reads as
   an independently built analysis rather than a reply to a specific review point; reworded
