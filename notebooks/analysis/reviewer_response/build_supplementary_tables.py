@@ -142,17 +142,30 @@ def build_tables(scores: pd.DataFrame, pb: pd.DataFrame, rmsd: pd.DataFrame):
         })
     s1 = pd.DataFrame(rows)
 
-    # pose validity joined onto the five native methods only
+    # Pose validity joined onto the five native methods only. Two different
+    # denominators, both worth reporting: "pb_valid (%)" is per POSE (from
+    # posebusters_validity.tsv); "Per-pair valid (%)" is per PAIR -- did any
+    # validated pose for this method pass (<method>_pb_valid in guild_scores.txt,
+    # written by merge_posebusters_flags.py) -- the figure R2-4 actually quotes.
     pv = []
     for name in ["vina", "gnina", "karmadock", "diffdock", "boltz"]:
+        pair_col = f"{name}_pb_valid"
+        if pair_col in scores.columns:
+            pair_valid = scores[pair_col]
+            n_pairs = int(pair_valid.notna().sum())
+            per_pair_pct = round(100 * pair_valid.eq(True).sum() / n_pairs, 1) if n_pairs else "n/a"
+        else:
+            per_pair_pct = "n/a"
         if name in pb_rate.index:
             pv.append({"Method": PB_LABEL.get(name, name),
                        "Poses checked": int(pb_rate.loc[name, "size"]),
                        "pb_valid (%)": round(100 * pb_rate.loc[name, "mean"], 1),
+                       "Per-pair valid (%)": per_pair_pct,
                        "Intramolecular (%)": round(100 * pb[pb.docking_method == name]["pb_intramolecular_valid"].mean(), 1),
                        "Intermolecular (%)": round(100 * pb[pb.docking_method == name]["pb_intermolecular_valid"].mean(), 1)})
         else:
             pv.append({"Method": "KarmaDock", "Poses checked": 0, "pb_valid (%)": "n/a",
+                       "Per-pair valid (%)": per_pair_pct,
                        "Intramolecular (%)": "n/a", "Intermolecular (%)": "n/a"})
     s2 = pd.DataFrame(pv)
 
@@ -220,8 +233,10 @@ def build_tables(scores: pd.DataFrame, pb: pd.DataFrame, rmsd: pd.DataFrame):
          "Confidence intervals are Hanley–McNeil; they are wide because there are 15 binders. "
          "The combined score is the median across pose sources, with Boltz-2's affinity head folded into its own pose source (guild 0d36671). EF baselines are 1.0. Non-physical counts non-negative energies for Vina-family scores only."),
         ("S3", "Pose validity by method", s2,
-         "PoseBusters, config “dock”. Pose-level, all poses per pair. KarmaDock emits no complex "
-         "structure, so no pose was available to check — this is a coverage gap, not a pass."),
+         "PoseBusters, config “dock”. “pb_valid (%)” is per pose, all poses per pair; "
+         "“Per-pair valid (%)” is per pair -- did any validated pose for this method pass "
+         "(<method>_pb_valid in guild_scores.txt). KarmaDock emits no complex structure, so "
+         "no pose was available to check — this is a coverage gap, not a pass."),
         ("S4", "Pose validity, individual checks", s3,
          "Percentage of poses passing each check. Separates internal geometry from receptor fit."),
         ("S5", "Binder-vs-decoy AUC per target", s4,

@@ -4,6 +4,20 @@ History
 
 Unreleased
 ----------
+* Added a per-pair PoseBusters validity column to ``build_supplementary_tables.py``'s Table S3,
+  alongside the existing per-pose ``pb_valid (%)``: R2-4 is switching its reply from "did this
+  pose pass" to "did any validated pose for this pair pass" (``<method>_pb_valid`` in
+  ``guild_scores.txt``, written by ``merge_posebusters_flags.py``). Per-pair validity over the
+  same 165 pairs: AutoDock Vina 77.6% (128/165, confirming the figure already in the tracker),
+  GNINA 81.8% (135/165), DiffDock 53.9% (89/165), Boltz-2 80.0% (132/165, coincidentally equal
+  to its own per-pose rate, since Boltz emits exactly one pose per pair). Regenerated
+  ``Table_S3.tsv`` into a scratch directory to verify (not written to ``review/supplementary/``,
+  left for the author to stage) and diffed the other five tables against the currently staged
+  ones to confirm nothing else moved: S4/S5/S7 identical; S6 still carries the previously
+  reported content gap (unrelated, pre-existing); S2 has one pre-existing 1-decimal rounding
+  mismatch unrelated to this change (``Vina rescore of Boltz-2 pose`` non-physical rate: this
+  script's own formula gives 1/165 = 0.6%, the staged file shows 0.7%, which matches a
+  different denominator, 1/135, used elsewhere in this codebase -- not fixed here).
 * Took the same explanatory-text-off-the-figure treatment ``d3c9e1b`` gave ``score_distribution.ipynb``
   and applied it to ``build_rank_percentile_schematic.py``, which nobody had checked: it renders
   Supplementary Text 3's schematic and still had a git commit hash (``0e7c959``) drawn into the
