@@ -4,6 +4,34 @@ History
 
 Unreleased
 ----------
+* Dropped Figure 3's decoy rug. ``score_comparison.ipynb`` drew ``RUG_SUBSAMPLE_N = 400``
+  decoy ticks per panel out of a 98,596-row decoy set (0.4%) -- sparse enough that the top
+  percentile of decoys (~986 molecules) showed as about four ticks, visually understating
+  exactly the binder-decoy overlap region the figure exists to characterise, while the KDE
+  curve directly above represents that region correctly from every point. It also cost a
+  caption sentence that can't be phrased safely: "a random subsample of 400" reads as a claim
+  about how the panel was built, and the panel is filtered, not random (Supp. Text 2).
+  Deleted the decoy rug loop and the now-unused ``RUG_SUBSAMPLE_N``/``RUG_SEED`` constants
+  (referenced nowhere else). Moved the binder rug (every known binder, n=220, unchanged) up
+  into the freed band -- ``[-kmax*0.03, -kmax*0.11]``, was ``[-kmax*0.11, -kmax*0.19]`` -- and
+  tightened ``set_ylim``'s bottom from ``-kmax*0.25`` to ``-kmax*0.15`` so there's no empty
+  gutter where the decoy rug was; checked the rendered panel rather than trusting those
+  numbers blind. Updated the printed rug-composition line to state the binder rug is the
+  complete set and that decoy density is shown by the curve alone, kept printed as the check
+  that the caption matches the code. Left the ``n decoys = ...; n binders = ...`` footer, the
+  shared ``kmax`` cross-panel y-scale, the bounded KDE, the ``1 - rp_vina_score`` inversion,
+  and the AUC boxes untouched. The R2-7 matched-decoy path re-runs this same cell via
+  ``DECOY_SUBSET`` and inherits the fix with no separate change -- also why removing rather
+  than re-tuning the subsample was right, since a fixed 400 would have quietly become a
+  different fraction of that much smaller matched set. ``score_distribution.ipynb``'s own
+  decoy rug is untouched: its 150 decoys already fall under that notebook's ``min(500, n)``,
+  so every molecule is already drawn there.
+  Re-rendered and re-ran the notebook (against the large Vina case study data, not the
+  3-target rerun -- ``vinarun_scores.txt``/``knownbinders_scores.txt``). AUCs unchanged
+  (rank percentile 0.684, min-max 0.547, z-score 0.597). PNG dimensions and aspect ratio
+  unchanged at 1950x2693 (aspect 0.7241): the panels' pixel size is fixed by ``figsize``/
+  the gridspec, not by ``set_ylim``, so tightening the internal margin doesn't move
+  ``bbox_inches="tight"``'s outer crop here.
 * Labelled Figure 2's panels D and E as the Vina-rescore tracks they actually are.
   ``score_distribution.ipynb`` plots ``vina_rescore_diffdock_score`` /
   ``vina_rescore_boltz_score`` in those rows -- correct and deliberate (``20b3c50``, R2-3) --
