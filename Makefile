@@ -1,8 +1,13 @@
-.PHONY : docker-local docker-test dev test run-boltz run-vina run-diffdock run-gnina run-plip run-posebusters run-guild project-init project-setup
+.PHONY : docker-local docker-test dev test docs run-boltz run-vina run-diffdock run-gnina run-plip run-posebusters run-guild project-init project-setup
 
 # Run the tests locally
 test:
 	uv run pytest -v
+
+# Build the Sphinx docs (sphinx + myst-parser live in the "docs" dependency
+# group, not installed by default `uv sync`). Output: docs/_build/html/index.html.
+docs:
+	uv run --group docs sphinx-build -b html docs docs/_build/html
 
 # Build a local guild image.
 # Uses gnina-bundle:local if already present; otherwise builds it first from

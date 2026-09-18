@@ -4,6 +4,36 @@ History
 
 Unreleased
 ----------
+* Fixed the documentation build (``make docs``), which failed at four separate points, verified
+  against the tree before fixing each: (1) ``docs/conf.py`` read ``guild.__version__``, which
+  ``guild/__init__.py`` never defined -- added it via ``importlib.metadata.version("guild")``
+  (falling back to ``"0.0.0"`` if the package isn't installed, e.g. reached only through
+  ``sys.path``); (2) the toctree listed ``modules``, but no ``docs/modules.rst`` was ever
+  generated -- dropped it rather than wiring up ``sphinx-apidoc``, since nothing else in this
+  docs setup currently maintains a full API reference and generating one now would mean
+  committing dozens of new auto-generated pages for a page nobody was reading; (3)
+  ``docs/readme.rst`` included ``../README.rst``, which is actually ``README.md``; (4)
+  ``docs/contributing.rst`` included ``../CONTRIBUTING.rst`` (actually ``.md``), and
+  ``docs/authors.rst`` included ``../AUTHORS.rst``, which doesn't exist in any extension.
+  For (3)/(4), added ``myst-parser`` and converted the two include-wrapper pages to
+  ``docs/readme.md``/``docs/contributing.md`` using MyST's ``{include}`` directive (with
+  ``relative-docs``/``relative-images``) so the real root ``README.md``/``CONTRIBUTING.md``
+  render as actual Markdown rather than being fed to the RST parser as raw text; dropped
+  ``authors.rst`` outright, since there's nothing to point it at. Also dropped the toctree's
+  now-permanently-dead ``:ref:`modindex``` link (no autodoc content exists to populate it).
+  Added a ``docs`` dependency group (``sphinx``, ``myst-parser``) -- not installed by
+  ``uv sync`` by default, so a normal dev setup stays as light as it is today -- and a
+  ``make docs`` target (``uv run --group docs sphinx-build -b html docs docs/_build/html``);
+  added ``docs/_build/`` to ``.gitignore``. Verified the build with an ephemeral
+  ``uv run --with sphinx --with myst-parser --no-project`` environment, since this sandbox's
+  full project sync fails on an unrelated pre-existing dependency
+  (``fair-esm[esmfold]``'s pinned ``deepspeed==0.5.9`` doesn't build without a working torch
+  here) -- not something this fix touches or needs. **The build succeeds; it is not
+  warning-free.** ``myst_heading_anchors = 4`` cut the warning count from 33 to 7 by resolving
+  most of README.md's own internal ``#anchor`` links; the remaining 7 are relative links to
+  files outside the doc tree (two in README.md, one in CONTRIBUTING.md) and two
+  ``Pygments lexer name 'csv' is not known`` notices for a fenced code block -- all benign,
+  none fatal. All seven pages render, including ``adding_a_prediction_method.rst``.
 * Ran ``score_comparison.ipynb``'s descriptor-only baseline and property-matched decoy panel
   (cell 6) over the full pool instead of the 5-target demo slice: set ``N_TARGETS_FOR_DEMO =
   None`` and committed it that way, since a saved output that doesn't match the committed

@@ -9,13 +9,10 @@ Welcome to Guild's documentation!
    installation
    usage
    adding_a_prediction_method
-   modules
    contributing
-   authors
    history
 
 Indices and tables
 ==================
 * :ref:`genindex`
-* :ref:`modindex`
 * :ref:`search`
