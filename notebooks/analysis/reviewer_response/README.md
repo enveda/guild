@@ -72,8 +72,9 @@ column from those files expecting the current 0 = best orientation. See
 | `a3_normalisations.tsv` | a3 — pooled AUC for rank percentile, min-max, z-score, raw |
 | `a3_mechanism.tsv` | a3 — per-target mean drift and its correlation with skewness |
 | `a3_per_target_skew.tsv` | a3 — per-target skewness and normalised means, 47 targets |
-| `a3_failure_tail_summary.tsv` | a3 — the poorly-ranked-binder characterisation |
+| `a3_failure_tail_summary.tsv` | a3 — the poorly-ranked-binder characterisation, on `_load_case_study()`'s pool (212 binders, physical-range + both-classes-present filter). This is the exact source of the current a3 manuscript passage (212 binders, 57/26.9%, 14/6.6%, 25.9 vs 28.3 heavy atoms, -6.36 vs -8.88 kcal/mol) — verified decimal for decimal. |
 | `a3_failure_tail_binders.tsv` | a3 — per-binder detail behind that summary |
+| `a3_binder_tail_figure3_set.tsv` | a3 — the same long-tail statistic recomputed on Figure 3's own pool instead (`score_comparison.ipynb`'s `EXCLUDE_PROTEINS`, non-null Vina score only): 220 binders, 47 targets, 58 (26.4%) worse half, 10 (4.5%) worst decile, heavy atoms 26.6 vs 28.2, Vina -4.39 vs -8.46. Two different, both legitimate pools give two different binder counts (212 vs 220) for the same 47 targets; see `analysis_binder_tail`'s docstring for exactly what differs. |
 | `reserve_size_matched_auc.tsv` | not quoted; see `../analysis_size_matched_control.md` |
 | `r2_5_training_overlap.tsv` | R2-5 — within-target AUC per track, ordered by PDB release date |
 
@@ -135,6 +136,15 @@ either.
    five as being in `6me6` — confirmed against the raw files this is not the case. Doesn't
    change `a1`'s numbers (the exclusion is per-row, not per-target), but the "all in one
    target" sentence needs correcting before it goes out.
+9. **The current a3 long-tail passage (212 binders) and Figure 3's footer (220 binders) use
+   two different, both legitimate pools, not a typo in either.** `_load_case_study()` (a3)
+   filters to the physical Vina range and requires both a binder and a decoy present per
+   protein; `score_comparison.ipynb` (Figure 3) excludes five named proteins instead and
+   requires only a non-null score. Same 47 targets, different binder counts. 212 **is**
+   reachable from committed code (`a3_failure_tail_summary.tsv`, exact match to the current
+   text); `a3_binder_tail_figure3_set.tsv` gives the same statistic on Figure 3's 220. Pick
+   one pool for the final text -- whichever it is, it should match whichever number the
+   figure people actually see prints in its own footer.
 
 ## Determinism
 

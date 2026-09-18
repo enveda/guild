@@ -569,6 +569,82 @@ def analysis_training_overlap(data: Path, out: Path, verify_dates: bool = False)
         print(f"      {raw_col:<22s} pooled raw AUC = {auc:.3f}")
 
 
+# ════════════════════ a3 binder long tail, on Figure 3's own set
+# Same protein exclusions as score_comparison.ipynb -- kept in sync by hand,
+# not imported, since that notebook has no importable module to share this
+# constant from.
+FIGURE3_EXCLUDE_PROTEINS = {"7v6a", "8fx5", "8wrz", "8wu1", "8dzs"}
+
+
+def analysis_binder_tail(data: Path, out: Path) -> None:
+    """a3 long tail, computed over Figure 3's own binder/decoy set -- NOT
+    a3's own _load_case_study() pool, which is a genuinely different,
+    already-committed derivation (see the note below).
+
+    Figure 3 (score_comparison.ipynb) excludes five named proteins
+    (FIGURE3_EXCLUDE_PROTEINS) and requires only a non-null Vina score,
+    giving 220 known binders across 47 targets -- printed in the figure's own
+    footer. a3's _load_case_study() instead keeps the physical score range
+    (PHYSICAL_VINA) and requires both a binder and a decoy present for a
+    protein, with no named exclusion, giving 212 binders across the same 47
+    targets. Both are legitimate; they are not the same 220/212 by coincidence
+    of one filter, they are two different conventions.
+
+    212 IS reachable from committed code: a3_failure_tail_summary.tsv
+    (written by analysis_normalisation, already committed) reports 212
+    binders, 57 (26.9%) in the worse half, 14 (6.6%) in the worst decile,
+    heavy atoms 25.9 vs 28.3, Vina -6.36 vs -8.88 -- an exact match to the
+    manuscript's current a3 passage, decimal for decimal. The manuscript
+    text is not unreproducible; it just uses a3's pool, not Figure 3's.
+    This function exists so the same tail statistic is also available on
+    Figure 3's own 220, for whichever pool the manuscript text ultimately cites.
+    """
+    print("\na3_binder_tail  known-binder long tail on Figure 3's own set")
+    combined = pd.read_csv(data / "vinarun_scores.txt", sep="\t", low_memory=False)
+    combined = combined[combined["ligand_category"] == DECOY].copy()
+    combined["group"] = "decoy"
+
+    kb_path = data / "knownbinders_scores.txt"
+    if not kb_path.exists():
+        print(f"      skip a3_binder_tail: {kb_path.name} not in DATA_DIR")
+        return
+    kb_scores = pd.read_csv(kb_path, sep="\t", low_memory=False)
+    kb_scores["group"] = "known-binder"
+
+    unified = pd.concat([combined, kb_scores], ignore_index=True)
+    unified["pdb_id"] = unified["protein_config_id"].str.split("-").str[0]
+    unified = unified[~unified["pdb_id"].isin(FIGURE3_EXCLUDE_PROTEINS)].copy()
+    unified = unified[unified["vina_score"].notna()].copy()
+    unified["rank_pct"] = rank_percentile(unified, "vina_score", "protein_config_id")
+
+    binders = unified[unified["group"] == "known-binder"].copy()
+    n_binders, n_targets = len(binders), binders["protein_config_id"].nunique()
+    binders["poorly_ranked"] = binders["rank_pct"] > 0.5
+    in_worse_half = int(binders["poorly_ranked"].sum())
+    in_worst_decile = int((binders["rank_pct"] > 0.9).sum())
+    binders["n_heavy"] = binders["smiles"].map(heavy_atoms)
+
+    row = {
+        "n_binders": n_binders,
+        "n_targets": n_targets,
+        "in_worse_half": in_worse_half,
+        "pct_worse_half": round(100 * in_worse_half / n_binders, 1),
+        "in_worst_decile": in_worst_decile,
+        "pct_worst_decile": round(100 * in_worst_decile / n_binders, 1),
+        "heavy_atoms_poorly_ranked": round(
+            binders.loc[binders.poorly_ranked, "n_heavy"].mean(), 1),
+        "heavy_atoms_well_ranked": round(
+            binders.loc[~binders.poorly_ranked, "n_heavy"].mean(), 1),
+        "vina_poorly_ranked": round(
+            binders.loc[binders.poorly_ranked, "vina_score"].mean(), 2),
+        "vina_well_ranked": round(
+            binders.loc[~binders.poorly_ranked, "vina_score"].mean(), 2),
+    }
+    frame = pd.DataFrame([row])
+    print(frame.to_string(index=False))
+    write(frame, out, "a3_binder_tail_figure3_set.tsv")
+
+
 # ═════════════════════════════════════════════════════ self-check
 def test_matches_guild(data: Path) -> None:
     """Confirm the local rank-percentile reimplementation matches guild's output."""
@@ -591,6 +667,7 @@ ANALYSES = {
     "runtime": analysis_runtime,
     "a2": analysis_aggregation,
     "a3": analysis_normalisation,
+    "a3_binder_tail": analysis_binder_tail,
     "reserve": analysis_size_control,
     "r2_5_training_overlap": analysis_training_overlap,
 }

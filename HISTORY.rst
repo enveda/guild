@@ -4,6 +4,26 @@ History
 
 Unreleased
 ----------
+* Added ``analysis_binder_tail`` to ``reproduce_response_analyses.py``, giving the current
+  long-tail passage ("Of 212 known binders across 47 targets, 57 (26.9%) fall in the
+  worse-scoring half...") a committed derivation on Figure 3's own binder/decoy set
+  (``score_comparison.ipynb``'s ``EXCLUDE_PROTEINS``, non-null Vina score only): 220 binders,
+  47 targets, 58 (26.4%) worse half, 10 (4.5%) worst decile, heavy atoms 26.6 vs 28.2, Vina
+  -4.39 vs -8.46 kcal/mol.
+  **212 turns out to already be reachable from committed code** -- the existing
+  ``a3_failure_tail_summary.tsv`` (written by ``analysis_normalisation``, already committed,
+  already documented) reports 212 binders, 57 (26.9%), 14 (6.6%), 25.9 vs 28.3, -6.36 vs -8.88:
+  an exact, decimal-for-decimal match to the current passage. It uses a genuinely different,
+  also-legitimate pool: ``_load_case_study()`` keeps the physical Vina range and requires both
+  a binder and a decoy present per protein, with no named-protein exclusion, rather than
+  ``EXCLUDE_PROTEINS``. Same 47 targets, different binder counts (212 vs 220) -- not an error
+  in either derivation, but the two are being quoted against each other (the passage's 212 vs
+  the figure's own footer, which already prints 220) without saying so. Left the choice of
+  which pool to standardize on to the text; both derivations are now committed either way.
+  Also confirmed the one already-committed number this task asked to check:
+  ``a3_normalisations.tsv``'s raw-score pooled AUC is **0.619**, not the 0.626 currently quoted
+  (min-max 0.577, rank percentile 0.674, both already matching). Not fixed here -- reported for
+  the text to correct.
 * Fixed the documentation build (``make docs``), which failed at four separate points, verified
   against the tree before fixing each: (1) ``docs/conf.py`` read ``guild.__version__``, which
   ``guild/__init__.py`` never defined -- added it via ``importlib.metadata.version("guild")``

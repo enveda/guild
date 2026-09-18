@@ -146,7 +146,7 @@ def build_tables(scores: pd.DataFrame, pb: pd.DataFrame, rmsd: pd.DataFrame):
     # denominators, both worth reporting: "pb_valid (%)" is per POSE (from
     # posebusters_validity.tsv); "Per-pair valid (%)" is per PAIR -- did any
     # validated pose for this method pass (<method>_pb_valid in guild_scores.txt,
-    # written by merge_posebusters_flags.py) -- the figure R2-4 actually quotes.
+    # written by merge_posebusters_flags.py).
     pv = []
     for name in ["vina", "gnina", "karmadock", "diffdock", "boltz"]:
         pair_col = f"{name}_pb_valid"
