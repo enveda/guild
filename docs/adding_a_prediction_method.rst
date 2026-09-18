@@ -2,11 +2,9 @@
 Adding a new prediction method
 ================================
 
-A reviewer asked whether adding a new protein-ligand binding prediction (PLBP) method is
-something an end user can do, or whether it requires the authors. The honest answer is the
-second one: extension is a **six-step code contract**, not a plugin system or a configuration
-file. This page documents that contract as it exists today, using the GNINA integration as a
-worked example.
+Adding a new protein-ligand binding prediction (PLBP) method to Guild is a **six-step code
+contract**, not a plugin system or a configuration file. This page documents that contract as
+it exists today, using the GNINA integration as a worked example.
 
 There is one genuinely modular part, and it is worth stating up front: once a method is
 registered in the six dictionaries in ``guild/constants/bulk.py``, the rank-percentile
@@ -202,8 +200,9 @@ single ``nesso predict <directory>`` call scoring every complex in a batch at on
 directory-batched call is not an optimisation; it is where Nesso's speed advantage over Boltz-2
 actually comes from, so a per-ligand runner would defeat the point of adding it).
 
-Nesso is **not** one of this paper's five methods — it is a deliberately GitHub-only addition,
-outside the manuscript. Do not read its presence here as expanding that count.
+Nesso is a deliberately GitHub-only addition, not one of the five methods described in the
+associated publication — a useful second reference for this contract, not evidence that the
+published method count has grown.
 
 One gap worth flagging rather than fixing here: Nesso is registered in
 ``SCORES_DIRECTION_DICTIONARY``, ``RANKS_DICTIONARY``, ``RP_SCORES_DICTIONARY`` and
