@@ -4,8 +4,25 @@ History
 
 Unreleased
 ----------
-* Re-rendered Figure 3 (``score_comparison.ipynb``) so the saved PNG/PDF/SVG match the
-  combinations-vs-molecules footer text ``6493eb6`` added to the source but did not render
+* Fixed the failing CI ``test`` check: ``759a50f`` added a ``docs`` dependency group to
+  ``pyproject.toml`` but never regenerated ``uv.lock``, so the Docker build's
+  ``uv sync --locked`` started failing with "The lockfile ... needs to be updated". Running
+  ``uv lock`` to fix it hit a separate, genuinely pre-existing problem: ``deepspeed``
+  (a transitive dependency of ``fair-esm[esmfold]``, already in ``pyproject.toml`` before
+  this branch) runs a native ``cpu_adam`` compile step as part of its own build backend,
+  which needs a C++ toolchain -- absent on this machine, so ``uv lock`` failed trying to
+  build it just to read its dependency list, independent of anything this branch touches.
+  Added a ``[[tool.uv.dependency-metadata]]`` override for ``deepspeed==0.5.9`` with its
+  dependencies copied verbatim from its own ``requirements/requirements.txt`` (``hjson``,
+  ``ninja``, ``numpy``, ``packaging``, ``psutil``, ``py-cpuinfo``, ``torch``, ``tqdm``), so
+  ``uv lock`` can resolve it from declared metadata instead of building it -- confirmed this
+  is the actual fix, not a side effect of also having ``torch`` installed locally, by
+  uninstalling ``torch`` and re-running ``uv lock`` successfully with it absent. It is a
+  metadata-only override and does not change what gets installed at sync time.
+  ``uv lock`` now adds the ``docs`` group's real dependencies (``sphinx``,
+  ``myst-parser``, and their own transitive dependencies) and passes ``uv lock --locked``
+  cleanly; ``markdown-it-py`` moves from 4.0.0 to 3.0.0 as the one version both ``rich`` and
+  the new ``myst-parser`` pin can share, chosen by the resolver, not by hand.
   (that commit cleared the cell's stale cached output instead of leaving it inconsistent).
   **Partial run: cells 1-4 only, cell 6 not executed** -- cell 6's full-pool descriptor
   matching is unrelated to this fix and its ``8a359d7`` output is untouched; do not read

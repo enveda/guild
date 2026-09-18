@@ -84,6 +84,17 @@ docs = [
 [tool.uv]
 default-groups = ["dev", ]
 
+# deepspeed's build backend runs a native cpu_adam compile step that needs a
+# C++ toolchain, so resolving/locking fails on any machine without one
+# already configured (e.g. Windows without MSVC) even though nothing here
+# changes what actually gets installed at sync time. Declared statically so
+# `uv lock` doesn't need to invoke that build backend at all; values copied
+# verbatim from deepspeed 0.5.9's own requirements/requirements.txt.
+[[tool.uv.dependency-metadata]]
+name = "deepspeed"
+version = "0.5.9"
+requires-dist = ["hjson", "ninja", "numpy", "packaging", "psutil", "py-cpuinfo", "torch", "tqdm"]
+
 [[tool.uv.index]]
 name = "prody-wheels"
 url = "https://pypi.org/project/ProDy/#files"
