@@ -39,6 +39,11 @@ import pandas as pd
 PHYSICAL_VINA = (-20.0, 0.0)   # plausible range for a Vina-family energy, kcal/mol
 ACTIVE, DECOY = "strong-binder", "decoy"
 
+# Same protein exclusions as score_comparison.ipynb's EXCLUDE_PROTEINS -- kept in
+# sync by hand, not imported, since that notebook has no importable module to
+# share this constant from.
+FIGURE3_EXCLUDE_PROTEINS = {"7v6a", "8fx5", "8wrz", "8wu1", "8dzs"}
+
 
 # ══════════════════════════════════════════════════════════════════ helpers
 def auc_lower_better(actives, decoys) -> float:
@@ -314,6 +319,28 @@ def analysis_aggregation(data: Path, out: Path) -> None:
 
 
 # ═══════════════════════════ a3: why rank percentile survives pooling
+def _load_figure3_pool(data: Path) -> pd.DataFrame | None:
+    """Binder/decoy rows assembled exactly as score_comparison.ipynb assembles
+    Figure 3's own pool: FIGURE3_EXCLUDE_PROTEINS dropped, non-null Vina score
+    required, every other target kept -- including ones with no known binder
+    at all. Returns None if knownbinders_scores.txt is missing from DATA_DIR.
+    """
+    combined = pd.read_csv(data / "vinarun_scores.txt", sep="\t", low_memory=False)
+    combined = combined[combined["ligand_category"] == DECOY].copy()
+    combined["group"] = "decoy"
+
+    kb_path = data / "knownbinders_scores.txt"
+    if not kb_path.exists():
+        return None
+    kb_scores = pd.read_csv(kb_path, sep="\t", low_memory=False)
+    kb_scores["group"] = "known-binder"
+
+    unified = pd.concat([combined, kb_scores], ignore_index=True)
+    unified["pdb_id"] = unified["protein_config_id"].str.split("-").str[0]
+    unified = unified[~unified["pdb_id"].isin(FIGURE3_EXCLUDE_PROTEINS)].copy()
+    return unified[unified["vina_score"].notna()].copy()
+
+
 def _load_case_study(data: Path) -> pd.DataFrame:
     """Known binders and decoys for the large Vina case study.
 
@@ -370,6 +397,82 @@ def analysis_normalisation(data: Path, out: Path) -> None:
     pooled = pd.DataFrame(rows)
     print(pooled.to_string(index=False))
     write(pooled, out, "a3_normalisations.tsv")
+
+    # Reconciliation: this pool gives rank percentile and z-score as a near-tie
+    # (see `pooled` above), while score_comparison.ipynb's own Figure 3 pool
+    # gives rank percentile a real lead (0.684 vs 0.597). Does that survive if
+    # this pool is rebuilt the way Figure 3 builds it instead?
+    fig3_pool = _load_figure3_pool(data)
+    if fig3_pool is None:
+        print("      skip pool reconciliation: knownbinders_scores.txt not in DATA_DIR")
+    else:
+        def _pool_aucs(f: pd.DataFrame) -> dict:
+            f = f.copy()
+            f["rank_pct"] = rank_percentile(f, "vina_score", "protein_config_id")
+            g = f.groupby("protein_config_id")["vina_score"]
+            span = g.transform("max") - g.transform("min")
+            f["minmax"] = (f.vina_score - g.transform("min")) / span
+            f["zscore"] = (f.vina_score - g.transform("mean")) / g.transform("std")
+            is_b, is_d = f.group == "known-binder", f.group == "decoy"
+            return {
+                "n_targets": f.protein_config_id.nunique(),
+                "n_binders": int(is_b.sum()),
+                "n_decoys": int(is_d.sum()),
+                "rank_pct_auc": round(auc_lower_better(f.loc[is_b, "rank_pct"], f.loc[is_d, "rank_pct"]), 3),
+                "minmax_auc": round(auc_lower_better(f.loc[is_b, "minmax"], f.loc[is_d, "minmax"]), 3),
+                "zscore_auc": round(auc_lower_better(f.loc[is_b, "zscore"], f.loc[is_d, "zscore"]), 3),
+            }
+
+        binder_targets = set(
+            fig3_pool.loc[fig3_pool.group == "known-binder", "protein_config_id"].unique()
+        )
+        pool_notebook = fig3_pool
+        pool_binder_bearing = fig3_pool[fig3_pool.protein_config_id.isin(binder_targets)]
+        pool_physical = fig3_pool[fig3_pool.vina_score.between(*PHYSICAL_VINA)]
+        both_present = pool_physical.groupby("protein_config_id")["group"].nunique() == 2
+        pool_physical_complete = pool_physical[
+            pool_physical.protein_config_id.isin(both_present[both_present].index)
+        ]
+
+        recon_rows = [
+            {"pool": "notebook pool (Figure 3, as built)", **_pool_aucs(pool_notebook)},
+            {"pool": "notebook pool, binder-bearing targets only",
+             **_pool_aucs(pool_binder_bearing)},
+            {"pool": "notebook pool + physical Vina range",
+             **_pool_aucs(pool_physical)},
+            {"pool": "notebook pool + physical range, both classes present",
+             **_pool_aucs(pool_physical_complete)},
+        ]
+        # _load_case_study()'s own pool (`pooled` above) for direct comparison. It
+        # differs from the row above only in NOT applying FIGURE3_EXCLUDE_PROTEINS:
+        # it keeps 8dzs-A-U9I-A (one binder survives the physical filter there),
+        # which is the entire 211-vs-212 difference -- not a boundary condition in
+        # the physical-range or both-classes-present logic itself.
+        case_auc = pooled.set_index("scheme")["pooled_auc"]
+        recon_rows.append({
+            "pool": "_load_case_study() (a3, existing -- no protein exclusion)",
+            "n_targets": n_t, "n_binders": n_a, "n_decoys": n_d,
+            "rank_pct_auc": case_auc["rank percentile"],
+            "minmax_auc": case_auc["min-max"],
+            "zscore_auc": case_auc["z-score"],
+        })
+        recon = pd.DataFrame(recon_rows)
+        print("\n      pool reconciliation -- does Figure 3's own pool change the "
+              "rank-percentile/z-score near-tie this analysis finds?")
+        print(recon.to_string(index=False))
+        print(f"      physical-range filter alone removes "
+              f"{pool_notebook.shape[0] - pool_physical.shape[0]:,} of "
+              f"{pool_notebook.shape[0]:,} rows from the notebook pool "
+              f"({recon_rows[0]['n_binders']} -> {recon_rows[2]['n_binders']} binders, "
+              f"{recon_rows[0]['n_decoys']:,} -> {recon_rows[2]['n_decoys']:,} decoys) "
+              "-- restricting to binder-bearing targets first changes almost nothing "
+              f"(rank percentile {recon_rows[0]['rank_pct_auc']} -> "
+              f"{recon_rows[1]['rank_pct_auc']}), so the 55 binder-free targets the "
+              "notebook pools in are inert; the physical-range filter is the whole "
+              "effect (z-score moves from "
+              f"{recon_rows[0]['zscore_auc']} to {recon_rows[2]['zscore_auc']}, onto "
+              "rank percentile).")
+        write(recon, out, "a3_pool_reconciliation.tsv")
 
     # Mechanism: a scheme pools cleanly only if it puts every target in the same
     # place. Rank percentile fixes the per-target mean at 0.5 by construction and
@@ -570,12 +673,6 @@ def analysis_training_overlap(data: Path, out: Path, verify_dates: bool = False)
 
 
 # ════════════════════ a3 binder long tail, on Figure 3's own set
-# Same protein exclusions as score_comparison.ipynb -- kept in sync by hand,
-# not imported, since that notebook has no importable module to share this
-# constant from.
-FIGURE3_EXCLUDE_PROTEINS = {"7v6a", "8fx5", "8wrz", "8wu1", "8dzs"}
-
-
 def analysis_binder_tail(data: Path, out: Path) -> None:
     """a3 long tail, computed over Figure 3's own binder/decoy set -- NOT
     a3's own _load_case_study() pool, which is a genuinely different,
@@ -588,7 +685,9 @@ def analysis_binder_tail(data: Path, out: Path) -> None:
     (PHYSICAL_VINA) and requires both a binder and a decoy present for a
     protein, with no named exclusion, giving 212 binders across the same 47
     targets. Both are legitimate; they are not the same 220/212 by coincidence
-    of one filter, they are two different conventions.
+    of one filter, they are two different conventions -- see
+    analysis_normalisation's pool reconciliation (a3_pool_reconciliation.tsv)
+    for exactly which target the exclusion adds or drops.
 
     212 IS reachable from committed code: a3_failure_tail_summary.tsv
     (written by analysis_normalisation, already committed) reports 212
@@ -600,21 +699,10 @@ def analysis_binder_tail(data: Path, out: Path) -> None:
     Figure 3's own 220, for whichever pool the manuscript text ultimately cites.
     """
     print("\na3_binder_tail  known-binder long tail on Figure 3's own set")
-    combined = pd.read_csv(data / "vinarun_scores.txt", sep="\t", low_memory=False)
-    combined = combined[combined["ligand_category"] == DECOY].copy()
-    combined["group"] = "decoy"
-
-    kb_path = data / "knownbinders_scores.txt"
-    if not kb_path.exists():
-        print(f"      skip a3_binder_tail: {kb_path.name} not in DATA_DIR")
+    unified = _load_figure3_pool(data)
+    if unified is None:
+        print("      skip a3_binder_tail: knownbinders_scores.txt not in DATA_DIR")
         return
-    kb_scores = pd.read_csv(kb_path, sep="\t", low_memory=False)
-    kb_scores["group"] = "known-binder"
-
-    unified = pd.concat([combined, kb_scores], ignore_index=True)
-    unified["pdb_id"] = unified["protein_config_id"].str.split("-").str[0]
-    unified = unified[~unified["pdb_id"].isin(FIGURE3_EXCLUDE_PROTEINS)].copy()
-    unified = unified[unified["vina_score"].notna()].copy()
     unified["rank_pct"] = rank_percentile(unified, "vina_score", "protein_config_id")
 
     binders = unified[unified["group"] == "known-binder"].copy()

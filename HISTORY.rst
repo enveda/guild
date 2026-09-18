@@ -4,6 +4,41 @@ History
 
 Unreleased
 ----------
+* Reconciled the two a3 pools that gave rank percentile and z-score a near-tie in one
+  analysis (``reproduce_response_analyses.py``, 0.675 vs. 0.674) but a real margin in
+  Figure 3's own panel (``score_comparison.ipynb``, 0.684 vs. 0.597) -- an open note in
+  this file and in ``notebooks/analysis/reviewer_response/README.md``'s caveat 2 said this
+  needed reconciling before the a3 text could be finalised. Extended
+  ``analysis_normalisation`` to recompute the three pooled AUCs on four intermediate pools
+  between the two constructions, written to the new ``a3_pool_reconciliation.tsv``.
+  Restricting Figure 3's pool to binder-bearing targets only moves rank percentile by
+  0.001 (0.684 -> 0.685), so the 55 binder-free targets it currently pools in are inert and
+  its construction does not need to change. Applying the physical Vina range
+  (``PHYSICAL_VINA``, -20 to 0 kcal/mol) is the whole effect instead: z-score moves from
+  0.597 to 0.673, landing on rank percentile (also 0.673), while min-max barely moves
+  (0.547 -> 0.577). The two analyses differ only in whether non-physical scores are
+  included, and by nothing else that matters -- neither is wrong.
+  Also pinned down the one-binder 211-vs-212 question this reconciliation surfaced:
+  ``_load_case_study()`` (a3's existing pool) reports 212 binders across 47 targets because
+  it never applies Figure 3's five-protein exclusion at all -- it keeps ``8dzs-A-U9I-A``
+  (one of the five excluded proteins), which has exactly one binder inside the physical
+  range. Apply that exclusion on top of the same physical-range + both-classes-present
+  filter and the answer is 211 binders across 46 targets, not 212 across 47 --
+  ``7xt9-R-SRO-R`` separately drops out of that pool because none of its five binders
+  survive the physical filter, which is why the target count does not simply become 47 by
+  adding ``8dzs`` back. Neither number is a bug; ``a3_pool_reconciliation.tsv`` carries all
+  four intermediate pools for whoever finalises the manuscript text to cite from.
+  Also changed ``score_comparison.ipynb``'s Figure 3 sample-size reporting from
+  compound-sounding row counts to explicit combinations-vs-molecules: 98,596 decoy
+  protein-ligand combinations are 974 unique molecules, and 220 known-binder combinations
+  are 135 unique molecules -- both now printed, and the figure's own footer annotation
+  states both instead of the bare row count. Source-only change, not re-rendered here (a
+  full top-to-bottom execution is dominated by cell 6's full-pool descriptor matching,
+  unrelated to this fix, and was not re-run for a footer-text change); the cell's stale
+  cached output (old print text, old footer baked into the saved image) is cleared rather
+  than left inconsistent with the new source, and the already-saved
+  ``figure_3_validation_three_normalisations.*`` files on disk still carry the previous
+  footer text until the next full re-render picks this up.
 * Added ``analysis_binder_tail`` to ``reproduce_response_analyses.py``, giving the current
   long-tail passage ("Of 212 known binders across 47 targets, 57 (26.9%) fall in the
   worse-scoring half...") a committed derivation on Figure 3's own binder/decoy set
@@ -389,13 +424,14 @@ Unreleased
   the notebook flips it. Neither the stored value nor the inversion itself is changed.
   Also now prints the three panel AUCs, which were computed for the in-panel annotation
   but never emitted: on this dataset, rank percentile (0.684) beats z-score (0.597) by a
-  real margin, unlike the reviewer-response reproduction over 47 targets (0.675 vs.
-  0.674, effectively tied) -- these are different analyses (this notebook's own
-  binder/decoy join vs. that script's stricter "both classes present per target" filter),
-  so the discrepancy is reported rather than resolved here; whoever finalises the a3 reply
-  needs to reconcile it. ``kde_curve``/``kde_curve_bounded`` now live in a shared
-  ``kde_helpers.py``, imported by both figure notebooks, so the b2 fix is one function,
-  not two copies that could drift.
+  real margin, unlike ``reproduce_response_analyses.py``'s own pooled computation over 47
+  targets (0.675 vs. 0.674, effectively tied) -- these are different analyses (this
+  notebook's own binder/decoy join vs. that script's stricter "both classes present per
+  target" filter). **Resolved separately** (see the pool-reconciliation bullet further
+  down): the physical Vina-range filter is the entire cause of the near-tie, not the target
+  set. ``kde_curve``/``kde_curve_bounded`` now live in a shared ``kde_helpers.py``,
+  imported by both figure notebooks, so the b2 fix is one function, not two copies that
+  could drift.
 * ``score_comparison.ipynb``'s ``_decoy_pct``, ``_zscore`` and ``_decoy_fit_unbounded``
   no longer use ``groupby(protein_col, group_keys=False).apply(...)`` -- the same pattern
   ``e9a6fe7`` removed from ``guild.tools.scores.compute_rank_percentile_scores``, and

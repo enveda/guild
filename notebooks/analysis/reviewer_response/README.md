@@ -75,6 +75,7 @@ column from those files expecting the current 0 = best orientation. See
 | `a3_failure_tail_summary.tsv` | a3 — the poorly-ranked-binder characterisation, on `_load_case_study()`'s pool (212 binders, physical-range + both-classes-present filter). This is the exact source of the current a3 manuscript passage (212 binders, 57/26.9%, 14/6.6%, 25.9 vs 28.3 heavy atoms, -6.36 vs -8.88 kcal/mol) — verified decimal for decimal. |
 | `a3_failure_tail_binders.tsv` | a3 — per-binder detail behind that summary |
 | `a3_binder_tail_figure3_set.tsv` | a3 — the same long-tail statistic recomputed on Figure 3's own pool instead (`score_comparison.ipynb`'s `EXCLUDE_PROTEINS`, non-null Vina score only): 220 binders, 47 targets, 58 (26.4%) worse half, 10 (4.5%) worst decile, heavy atoms 26.6 vs 28.2, Vina -4.39 vs -8.46. Two different, both legitimate pools give two different binder counts (212 vs 220) for the same 47 targets; see `analysis_binder_tail`'s docstring for exactly what differs. |
+| `a3_pool_reconciliation.tsv` | a3 — the pooled AUC (rank percentile / min-max / z-score) recomputed on four pools between "Figure 3's, as built" and `_load_case_study()`'s, isolating which restriction actually moves the numbers. See caveat 2 below for the resolution this backs. |
 | `reserve_size_matched_auc.tsv` | not quoted; see `../analysis_size_matched_control.md` |
 | `r2_5_training_overlap.tsv` | R2-5 — within-target AUC per track, ordered by PDB release date |
 
@@ -100,14 +101,25 @@ either.
    `knownbindersvinarun`, decoys from `vinarun`, matched on `protein_config_id`. Confirm
    the docking box and protein preparation were identical between those runs before
    treating the comparison as within-run. This affects every a3 number.
-2. **z-score is not reproduced as inferior to rank percentile.** This analysis gives
-   0.675 for z-score against 0.674 for rank percentile — statistically indistinguishable
-   — while min-max is clearly worse at 0.577. The mechanism table explains why: both
-   rank percentile and z-score fix the per-target location (SD of the per-target mean
-   0.0003 and 0.0000 respectively) whereas min-max does not (0.179). The manuscript's
-   Figure 3 reports rank percentile ahead of both, so the discrepancy must be reconciled
-   against however that figure was constructed before the a3 reply is finalised. The
-   corresponding sentence in the response draft is deliberately still marked red.
+2. **Resolved: the rank-percentile/z-score near-tie is the physical-range filter, not the
+   target set.** This analysis gives 0.675 for z-score against 0.674 for rank percentile
+   (min-max clearly worse at 0.577) over `_load_case_study()`'s pool; `score_comparison.ipynb`'s
+   own Figure 3 panel gives rank percentile a real lead over the same three schemes instead
+   (0.684 vs 0.597), over its own, differently-built pool. `a3_pool_reconciliation.tsv`
+   (added by `analysis_normalisation`) isolates why. Rebuilding Figure 3's pool restricted to
+   binder-bearing targets only changes rank percentile by 0.001 (0.684 -> 0.685), so the 55
+   binder-free targets Figure 3's own construction happens to pool in are inert — the figure
+   is sound as built and does not need to change. Applying the physical Vina range
+   (`PHYSICAL_VINA`, -20 to 0 kcal/mol) on top is the entire effect instead: z-score moves
+   from 0.597 to 0.673, landing on rank percentile (also 0.673), while min-max barely moves
+   (0.547 -> 0.577). The two analyses differ by whether non-physical scores are included,
+   and by nothing else that matters; both are correct on their own pool. The mechanism table
+   still explains why z-score and rank percentile move together and min-max doesn't: both
+   fix the per-target location (SD of the per-target mean 0.0003 and 0.0000 respectively)
+   whereas min-max does not (0.179), and that is unaffected by which pool is used. The
+   remaining small gap between the physical-range row above (0.673/0.579/0.674, 211 binders,
+   46 targets) and `_load_case_study()`'s own numbers (0.674/0.577/0.675, 212 binders, 47
+   targets) is the same 211-vs-212 question caveat 9 pins down, not a second effect.
 3. **a2 rests on 15 binders and 150 decoys**, so the confidence intervals overlap
    heavily. The ordering of the rules is informative; the individual values are not
    precise. Do not quote a difference between two rules as significant.
@@ -145,6 +157,18 @@ either.
    text); `a3_binder_tail_figure3_set.tsv` gives the same statistic on Figure 3's 220. Pick
    one pool for the final text -- whichever it is, it should match whichever number the
    figure people actually see prints in its own footer.
+   Pinned down further while reconciling the AUC near-tie (caveat 2): the two pools land on
+   the same target count, 47, by coincidence, not because they agree on which 47. Applying
+   Figure 3's five-protein exclusion on top of the physical-range + both-classes-present
+   filter gives 211 binders across 46 targets, not 212 across 47 -- `_load_case_study()`
+   reaches 47/212 only because it never applies that exclusion at all: it keeps
+   `8dzs-A-U9I-A` (one of Figure 3's five excluded proteins), which has exactly one binder
+   inside the physical range, and that single row is the entire 211-vs-212 gap. Separately,
+   `7xt9-R-SRO-R` (not an excluded protein) loses all five of its binders to the
+   physical-range filter and is dropped from `_load_case_study()`'s pool by the
+   both-classes-present rule -- unrelated to the exclusion question, but it is why the
+   target count doesn't simply go 46 -> 47 by adding `8dzs` back. `a3_pool_reconciliation.tsv`
+   has all four intermediate pools if this needs auditing again.
 
 ## Determinism
 
