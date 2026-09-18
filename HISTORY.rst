@@ -4,6 +4,33 @@ History
 
 Unreleased
 ----------
+* Ran ``score_comparison.ipynb``'s descriptor-only baseline and property-matched decoy panel
+  (cell 6) over the full pool instead of the 5-target demo slice: set ``N_TARGETS_FOR_DEMO =
+  None`` and committed it that way, since a saved output that doesn't match the committed
+  constant is worse than a slow cell. Full-pool numbers (131 targets, 655 binders, 133,000
+  candidate decoys): 9,910 property-matched, structurally-distinct decoys kept; per-descriptor
+  AUCs 0.453-0.732 (``molecular_weight`` highest at 0.732); combined-descriptor
+  cross-validated AUC 0.738. These supersede the 5-target demo's 460 kept / 0.631 / 0.778 --
+  notably, the full-pool numbers are *closer* to Figure 3's rank-percentile AUC (0.684) than
+  the demo suggested, not farther. The a3 caveat still applies here: binders come from
+  ``knownbindersvinarun``, decoys from ``vinarun``, matched only on ``protein_config_id`` --
+  if the docking box or protein preparation differed between those runs, this baseline
+  inherits that mismatch.
+* Rendered Figure 3 on exactly those 9,910 matched decoys (same 220 binders):
+  AUC 0.588 (rank percentile), 0.451 (min-max), 0.588 (z-score), against the
+  unmatched panel's 0.684/0.547/0.597 over 98,596 decoys. Saved separately as
+  ``figure_3_matched_decoys.{png,pdf,svg}`` in ``review/figures_regenerated/`` --
+  ``figure_3_validation_three_normalisations.*`` (embedded in the manuscript) is untouched.
+  ``DECOY_SUBSET`` is committed back to ``None`` so the notebook's own saved outputs stay the
+  unmatched panel; the matched render came from a scratch copy with ``DECOY_SUBSET`` set to a
+  per-(``protein_config_id``, ``ligand_id``) pair predicate.
+  Found and fixed a real bug in cell 6's own trailing instructions along the way: it told the
+  reader to set ``DECOY_SUBSET`` to ``matched_decoys['ligand_id'].tolist()`` -- ligand_id
+  alone. The decoy pool has only 1,000 unique molecules each docked against ~133 targets, so
+  filtering by ligand_id alone readmits every target-row for any decoy that matched
+  *anywhere*: 108,262 of 133,000 rows (81%), not a per-target matched panel -- confirmed by
+  actually trying it before switching to the pair-based predicate. The trailing print now
+  describes the pair-based recipe instead.
 * Added a per-pair PoseBusters validity column to ``build_supplementary_tables.py``'s Table S3,
   alongside the existing per-pose ``pb_valid (%)``: R2-4 is switching its reply from "did this
   pose pass" to "did any validated pose for this pair pass" (``<method>_pb_valid`` in
