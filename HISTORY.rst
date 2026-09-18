@@ -4,6 +4,21 @@ History
 
 Unreleased
 ----------
+* Re-rendered Figure 3 (``score_comparison.ipynb``) so the saved PNG/PDF/SVG match the
+  combinations-vs-molecules footer text ``6493eb6`` added to the source but did not render
+  (that commit cleared the cell's stale cached output instead of leaving it inconsistent).
+  **Partial run: cells 1-4 only, cell 6 not executed** -- cell 6's full-pool descriptor
+  matching is unrelated to this fix and its ``8a359d7`` output is untouched; do not read
+  this as a full end-to-end execution of the notebook. Confirmed the three AUCs are
+  unchanged (0.684 / 0.547 / 0.597) and the decoy rug is still absent before saving over
+  the existing files. New dimensions are 2273 x 2694 px, aspect 0.8437, against the
+  previous 1950 x 2693, aspect 0.7241 -- a ~16.5% width increase, well past the ~1% this
+  was checked against. Isolated the cause before treating it as a rendering problem:
+  re-rendering with the old, short footer text reproduces 1950 x 2693 exactly in this same
+  environment, so the width change is the longer footer text alone (``bbox_inches="tight"``
+  widening to fit it), not a font or environment mismatch between this render and the
+  original. Left as-is per scope -- shortening the footer or accepting the new extent is
+  for whoever places the figure in the manuscript.
 * Reconciled the two a3 pools that gave rank percentile and z-score a near-tie in one
   analysis (``reproduce_response_analyses.py``, 0.675 vs. 0.674) but a real margin in
   Figure 3's own panel (``score_comparison.ipynb``, 0.684 vs. 0.597) -- an open note in
@@ -36,9 +51,8 @@ Unreleased
   full top-to-bottom execution is dominated by cell 6's full-pool descriptor matching,
   unrelated to this fix, and was not re-run for a footer-text change); the cell's stale
   cached output (old print text, old footer baked into the saved image) is cleared rather
-  than left inconsistent with the new source, and the already-saved
-  ``figure_3_validation_three_normalisations.*`` files on disk still carry the previous
-  footer text until the next full re-render picks this up.
+  than left inconsistent with the new source. **Rendered in the next bullet up**, cells 1-4
+  only.
 * Added ``analysis_binder_tail`` to ``reproduce_response_analyses.py``, giving the current
   long-tail passage ("Of 212 known binders across 47 targets, 57 (26.9%) fall in the
   worse-scoring half...") a committed derivation on Figure 3's own binder/decoy set
