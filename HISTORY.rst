@@ -4,6 +4,30 @@ History
 
 Unreleased
 ----------
+* Labelled Figure 2's panels D and E as the Vina-rescore tracks they actually are.
+  ``score_distribution.ipynb`` plots ``vina_rescore_diffdock_score`` /
+  ``vina_rescore_boltz_score`` in those rows -- correct and deliberate (``20b3c50``, R2-3) --
+  but nothing on the figure said so: the bottom row's x-label is a hardcoded
+  ``"Raw docking score"`` shared across all five rows, and ``METHOD_SPECS``'s per-row
+  ``raw_xlabel`` was written but never read by cell 3, so rows D and E showed only
+  "DiffDock"/"Boltz-2", inviting a reader to take them for those methods' own native
+  confidences (a reading the manuscript text right before the figure makes likelier, since
+  it introduces DiffDock's confidence two paragraphs earlier). Added an optional ``track``
+  key to ``METHOD_SPECS`` for the two rescored rows and render it as a second line under the
+  panel label ("D)  DiffDock" / "Vina rescore of pose"), smaller and non-bold so it doesn't
+  compete with the panel label. Deleted the dead ``raw_xlabel`` entries and the cell-3 code
+  that unpacked and stored them without ever using the value, since keeping either would
+  have implied they did something. Also switched the (non-manuscript) rank-alluvial cell's
+  ``GUILD_COLS`` from ``rp_boltz_score``/``rp_diffdock_score`` (native confidences) to the
+  same rescore columns Figure 2 uses, so this internal figure's title ("rank percentile
+  score ranking across docking methods") doesn't contradict how Guild's consensus actually
+  treats these two methods. Checked the alluvial's ribbon count before and after: unchanged
+  (15 non-decoy compounds; per-column coverage among just those 15 is 15/15 Vina, 15/15
+  DiffDock rescore, 14/15 Boltz rescore) -- the 79.4% non-physical rate on
+  ``vina_rescore_diffdock_score`` is a dataset-wide figure that happens to fall almost
+  entirely on decoys, not on this figure's 15 binders.
+  Re-rendered and re-ran the notebook; PNG dimensions and aspect ratio unchanged at
+  4480x7212 (aspect 0.621) -- a two-line panel label doesn't move the figure height.
 * Removed the three explanatory text blocks ``score_distribution.ipynb`` drew onto Figure 2
   itself (the panel-D/panel-E notes about ``diffdock_score``/``boltz_affinity_score`` not
   being ranked or voted, and the footer disclosing the 3-target rerun). Panel labels A-E, axis
