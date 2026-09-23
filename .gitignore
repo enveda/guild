@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Sphinx build output (make docs)
+docs/_build/
+
 # Specific files
 DATABASE_SCHEMA.md
 

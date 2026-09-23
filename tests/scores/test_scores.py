@@ -10,27 +10,34 @@ import pandas as pd
 import pytest
 
 from guild.constants.bulk import (
+    AGGREGATION_FLAT,
+    AGGREGATION_POSE_SOURCE,
+    AGGREGATION_POSE_SOURCE_MEDIAN,
     DENOMINATOR_ATTEMPTED,
     DENOMINATOR_VALID,
     GLOBAL_RP_SCORE,
     RANKS_DICTIONARY,
     RP_SCORES_DICTIONARY,
+    VINA_FAMILY_PLAUSIBLE_SCORE_RANGE,
 )
 from guild.constants.guild import PROTEIN_CONF_ID
-from guild.tools.scores import compute_rank_percentile_scores
+from guild.tools.scores import compute_rank_percentile_scores, is_physical_score
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _make_df(protein_ids, vina_scores, karmadock_scores=None):
-    """Build a minimal DataFrame for testing."""
+def _make_df(protein_ids, vina_scores, karmadock_scores=None, **extra_scores):
+    """Build a minimal DataFrame; extra_scores accepts any <method>_scores=[...] kwarg."""
     data = {
         PROTEIN_CONF_ID: protein_ids,
         "vina_score": vina_scores,
     }
     if karmadock_scores is not None:
         data["karmadock_score"] = karmadock_scores
+    for name, values in extra_scores.items():
+        assert name.endswith("_scores"), f"expected a '<method>_scores' kwarg, got {name!r}"
+        data[f"{name[: -len('_scores')]}_score"] = values
     return pd.DataFrame(data)
 
 
@@ -513,3 +520,509 @@ class TestDenominator:
 
         with pytest.raises(ValueError, match="denominator must be one of"):
             compute_rank_percentile_scores(df, methods=["vina"], denominator="n_valid")
+
+
+# ---------------------------------------------------------------------------
+# 11. Aggregation: confidence exclusion and pose-source grouping
+# ---------------------------------------------------------------------------
+class TestGlobalScoreAggregation:
+    """GLOBAL_RP_SCORE excludes confidence-only tracks and groups rescores
+    with the engine whose pose they scored, instead of voting flat."""
+
+    def test_confidence_track_scored_but_excluded_from_global(self):
+        """diffdock_score gets its rp_* column but never enters the global mean."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],
+            diffdock_scores=[1.0, 2.0, 3.0],
+        )
+        result = compute_rank_percentile_scores(df, methods=["vina", "diffdock"])
+
+        assert RP_SCORES_DICTIONARY["diffdock"] in result.columns
+        vina_rp = result[RP_SCORES_DICTIONARY["vina"]]
+        diffdock_rp = result[RP_SCORES_DICTIONARY["diffdock"]]
+
+        np.testing.assert_allclose(result[GLOBAL_RP_SCORE].values, vina_rp.values)
+
+        # Had diffdock voted, the (flat) mean of the two would differ from vina alone.
+        would_be_flat = (vina_rp + diffdock_rp) / 2
+        assert not np.allclose(result[GLOBAL_RP_SCORE].values, would_be_flat.values)
+
+    def test_only_confidence_methods_adds_no_global_column(self):
+        """Requesting only diffdock/boltz produces no GLOBAL_RP_SCORE at all."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[None, None, None],
+            diffdock_scores=[1.0, 2.0, 3.0],
+            boltz_scores=[0.1, 0.5, 0.9],
+        )
+        result = compute_rank_percentile_scores(df, methods=["diffdock", "boltz"])
+
+        assert RP_SCORES_DICTIONARY["diffdock"] in result.columns
+        assert RP_SCORES_DICTIONARY["boltz"] in result.columns
+        assert GLOBAL_RP_SCORE not in result.columns
+
+    def test_diffdock_rescores_count_once_not_flat(self):
+        """DiffDock's two rescores average to one pose-source vote, not two."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],
+            vina_rescore_diffdock_scores=[-1.0, -2.0, -3.0],
+            gnina_rescore_diffdock_scores=[5.0, 10.0, 1.0],
+        )
+        result = compute_rank_percentile_scores(
+            df, methods=["vina", "vina_rescore_diffdock", "gnina_rescore_diffdock"]
+        )
+
+        vina_rp = result[RP_SCORES_DICTIONARY["vina"]]
+        vrd_rp = result[RP_SCORES_DICTIONARY["vina_rescore_diffdock"]]
+        grd_rp = result[RP_SCORES_DICTIONARY["gnina_rescore_diffdock"]]
+
+        expected_pose_source = (vina_rp + (vrd_rp + grd_rp) / 2) / 2
+        expected_flat = (vina_rp + vrd_rp + grd_rp) / 3
+
+        np.testing.assert_allclose(result[GLOBAL_RP_SCORE].values, expected_pose_source.values)
+        assert not np.allclose(result[GLOBAL_RP_SCORE].values, expected_flat.values)
+
+    def test_flat_mode_reproduces_the_old_flat_mean(self):
+        """aggregation='flat' is the unweighted mean over every voting column."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],
+            vina_rescore_diffdock_scores=[-1.0, -2.0, -3.0],
+            gnina_rescore_diffdock_scores=[5.0, 10.0, 1.0],
+        )
+        result = compute_rank_percentile_scores(
+            df,
+            methods=["vina", "vina_rescore_diffdock", "gnina_rescore_diffdock"],
+            aggregation=AGGREGATION_FLAT,
+        )
+
+        vina_rp = result[RP_SCORES_DICTIONARY["vina"]]
+        vrd_rp = result[RP_SCORES_DICTIONARY["vina_rescore_diffdock"]]
+        grd_rp = result[RP_SCORES_DICTIONARY["gnina_rescore_diffdock"]]
+        expected_flat = (vina_rp + vrd_rp + grd_rp) / 3
+
+        np.testing.assert_allclose(result[GLOBAL_RP_SCORE].values, expected_flat.values)
+
+    def test_default_aggregation_is_pose_source_median(self):
+        """Default must be pose_source_median, not the older pose_source mean."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],  # row 0 best (rank 1 -> rp 1/3)
+            karmadock_scores=[9.0, 5.0, 1.0],  # row 0 best (rank 1 -> rp 1/3)
+            gnina_scores=[10.0, 8.0, 6.0],  # row 0 worst (rank 3 -> rp 1.0) -- the aberrant vote
+        )
+        default = compute_rank_percentile_scores(df, methods=["vina", "karmadock", "gnina"])
+        explicit_median = compute_rank_percentile_scores(
+            df,
+            methods=["vina", "karmadock", "gnina"],
+            aggregation=AGGREGATION_POSE_SOURCE_MEDIAN,
+        )
+        explicit_mean = compute_rank_percentile_scores(
+            df, methods=["vina", "karmadock", "gnina"], aggregation=AGGREGATION_POSE_SOURCE
+        )
+
+        np.testing.assert_allclose(
+            default[GLOBAL_RP_SCORE].values, explicit_median[GLOBAL_RP_SCORE].values
+        )
+        # Confirms default is the median: with 3 sources disagreeing, mean would differ.
+        assert not np.allclose(
+            default[GLOBAL_RP_SCORE].values, explicit_mean[GLOBAL_RP_SCORE].values
+        )
+
+    def test_unknown_aggregation_raises(self):
+        """Fail loud rather than silently falling back to a default."""
+        df = _make_df(protein_ids=["P1"] * 3, vina_scores=[-10.0, -8.0, -6.0])
+
+        with pytest.raises(ValueError, match="aggregation must be one of"):
+            compute_rank_percentile_scores(df, methods=["vina"], aggregation="weighted")
+
+    def test_one_rescore_nan_still_votes_via_its_sibling(self):
+        """A NaN in one rescore track still lets the pose source vote via its sibling."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],
+            vina_rescore_diffdock_scores=[np.nan, -2.0, -3.0],
+            gnina_rescore_diffdock_scores=[5.0, 10.0, 1.0],
+        )
+        result = compute_rank_percentile_scores(
+            df, methods=["vina", "vina_rescore_diffdock", "gnina_rescore_diffdock"]
+        )
+
+        vina_rp = result[RP_SCORES_DICTIONARY["vina"]]
+        vrd_rp = result[RP_SCORES_DICTIONARY["vina_rescore_diffdock"]]
+        grd_rp = result[RP_SCORES_DICTIONARY["gnina_rescore_diffdock"]]
+
+        assert np.isnan(vrd_rp.iloc[0])  # premise: row 0's vina rescore is missing
+        assert not np.isnan(grd_rp.iloc[0])  # its gnina sibling still scored
+
+        # Row 0's diffdock pose source has only gnina_rescore_diffdock to go on.
+        expected_row0 = (vina_rp.iloc[0] + grd_rp.iloc[0]) / 2
+        assert result[GLOBAL_RP_SCORE].iloc[0] == pytest.approx(expected_row0)
+
+    def test_pose_source_with_every_track_nan_drops_out_of_outer_mean(self):
+        """A wholly-missing pose source is excluded from the outer mean, not imputed."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],
+            vina_rescore_diffdock_scores=[np.nan, -2.0, -3.0],
+            gnina_rescore_diffdock_scores=[np.nan, 10.0, 1.0],
+        )
+        result = compute_rank_percentile_scores(
+            df, methods=["vina", "vina_rescore_diffdock", "gnina_rescore_diffdock"]
+        )
+
+        vina_rp = result[RP_SCORES_DICTIONARY["vina"]]
+        vrd_rp = result[RP_SCORES_DICTIONARY["vina_rescore_diffdock"]]
+        grd_rp = result[RP_SCORES_DICTIONARY["gnina_rescore_diffdock"]]
+
+        assert np.isnan(vrd_rp.iloc[0]) and np.isnan(grd_rp.iloc[0])  # premise: source fully missing
+
+        # Row 0's diffdock pose source is entirely NaN, so global falls back to vina alone.
+        assert result[GLOBAL_RP_SCORE].iloc[0] == pytest.approx(vina_rp.iloc[0])
+
+
+# ---------------------------------------------------------------------------
+# 12. Median cross-source aggregation (the new default)
+# ---------------------------------------------------------------------------
+class TestMedianAggregation:
+    """pose_source_median combines per-source votes with a median instead of
+    a mean, so one aberrant pose source cannot drag the consensus as far."""
+
+    def test_median_of_five_pose_source_votes_resists_one_aberrant_vote(self):
+        """4 sources agree row 0 is best, 1 (diffdock) calls it worst; the mean
+        gets dragged toward the outlier, the median ignores it."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],  # row 0 best -> rp 1/3
+            karmadock_scores=[9.0, 5.0, 1.0],  # row 0 best -> rp 1/3
+            gnina_scores=[-10.0, -8.0, -6.0],  # row 0 best -> rp 1/3
+            nesso_scores=[-10.0, -8.0, -6.0],  # row 0 best -> rp 1/3
+            # diffdock pose source (rescore tracks, mean of the two): row 0 worst -> rp 1.0
+            vina_rescore_diffdock_scores=[-1.0, -2.0, -3.0],
+            gnina_rescore_diffdock_scores=[-1.0, -2.0, -3.0],
+        )
+        methods = [
+            "vina",
+            "karmadock",
+            "gnina",
+            "nesso",
+            "vina_rescore_diffdock",
+            "gnina_rescore_diffdock",
+        ]
+        median_result = compute_rank_percentile_scores(
+            df, methods=methods, aggregation=AGGREGATION_POSE_SOURCE_MEDIAN
+        )
+        mean_result = compute_rank_percentile_scores(
+            df, methods=methods, aggregation=AGGREGATION_POSE_SOURCE
+        )
+
+        # 5 pose-source votes for row 0: [1/3, 1/3, 1/3, 1/3, 1.0].
+        expected_median = 1 / 3
+        expected_mean = (4 * (1 / 3) + 1.0) / 5
+
+        assert median_result[GLOBAL_RP_SCORE].iloc[0] == pytest.approx(expected_median)
+        assert mean_result[GLOBAL_RP_SCORE].iloc[0] == pytest.approx(expected_mean)
+        assert median_result[GLOBAL_RP_SCORE].iloc[0] < mean_result[GLOBAL_RP_SCORE].iloc[0]
+
+    def test_missing_pose_source_takes_median_of_the_survivors(self):
+        """Median of 3 surviving pose sources; the 2 missing ones are excluded, not imputed."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],  # row 0 -> rp 1/3
+            karmadock_scores=[9.0, 5.0, 1.0],  # row 0 -> rp 1/3
+            gnina_scores=[10.0, 8.0, 6.0],  # row 0 -> rp 1.0
+            nesso_scores=[np.nan, -8.0, -6.0],  # row 0 missing entirely
+            vina_rescore_diffdock_scores=[np.nan, -2.0, -3.0],  # row 0 missing
+            gnina_rescore_diffdock_scores=[np.nan, 10.0, 1.0],  # row 0 missing (whole source gone)
+        )
+        methods = [
+            "vina",
+            "karmadock",
+            "gnina",
+            "nesso",
+            "vina_rescore_diffdock",
+            "gnina_rescore_diffdock",
+        ]
+        result = compute_rank_percentile_scores(
+            df, methods=methods, aggregation=AGGREGATION_POSE_SOURCE_MEDIAN
+        )
+
+        # Row 0 has 3 surviving votes: vina=1/3, karmadock=1/3, gnina=1.0.
+        assert result[GLOBAL_RP_SCORE].iloc[0] == pytest.approx(1 / 3)
+
+    def test_two_surviving_votes_give_their_mean(self):
+        """The even-count case: median of exactly 2 votes equals their mean."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],  # row 0 -> rp 1/3
+            karmadock_scores=[1.0, 5.0, 9.0],  # row 0 -> rp 1.0
+        )
+        result = compute_rank_percentile_scores(
+            df, methods=["vina", "karmadock"], aggregation=AGGREGATION_POSE_SOURCE_MEDIAN
+        )
+
+        vina_rp = result[RP_SCORES_DICTIONARY["vina"]].iloc[0]
+        karma_rp = result[RP_SCORES_DICTIONARY["karmadock"]].iloc[0]
+        assert result[GLOBAL_RP_SCORE].iloc[0] == pytest.approx((vina_rp + karma_rp) / 2)
+
+    def test_explicit_pose_source_still_reproduces_the_plain_mean(self):
+        """aggregation='pose_source' must still mean the mean, not the new default."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],
+            karmadock_scores=[9.0, 5.0, 1.0],
+            gnina_scores=[10.0, 8.0, 6.0],
+        )
+        result = compute_rank_percentile_scores(
+            df, methods=["vina", "karmadock", "gnina"], aggregation=AGGREGATION_POSE_SOURCE
+        )
+
+        vina_rp = result[RP_SCORES_DICTIONARY["vina"]]
+        karma_rp = result[RP_SCORES_DICTIONARY["karmadock"]]
+        gnina_rp = result[RP_SCORES_DICTIONARY["gnina"]]
+        expected_mean = (vina_rp + karma_rp + gnina_rp) / 3
+
+        np.testing.assert_allclose(result[GLOBAL_RP_SCORE].values, expected_mean.values)
+
+    def test_flat_mode_unaffected_by_the_new_default(self):
+        """aggregation='flat' still reproduces the unweighted mean over every voting track."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],
+            karmadock_scores=[9.0, 5.0, 1.0],
+            gnina_scores=[10.0, 8.0, 6.0],
+            nesso_scores=[-10.0, -8.0, -6.0],
+        )
+        methods = ["vina", "karmadock", "gnina", "nesso"]
+        result = compute_rank_percentile_scores(df, methods=methods, aggregation=AGGREGATION_FLAT)
+
+        expected_flat = sum(result[RP_SCORES_DICTIONARY[m]] for m in methods) / len(methods)
+        np.testing.assert_allclose(result[GLOBAL_RP_SCORE].values, expected_flat.values)
+
+
+# ---------------------------------------------------------------------------
+# 13. Boltz-2's affinity head votes as part of Boltz's pose source
+# ---------------------------------------------------------------------------
+class TestBoltzAffinityVote:
+    """boltz_affinity_score is ranked and voted, joining Boltz's existing
+    vote as a third estimate rather than counting as its own."""
+
+    def test_boltz_affinity_is_ranked(self):
+        """rp_boltz_affinity_score / rank_boltz_affinity_score get produced."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[None, None, None],
+            boltz_affinity_scores=[-9.0, -7.0, -5.0],
+        )
+        result = compute_rank_percentile_scores(df, methods=["boltz_affinity"])
+
+        assert RP_SCORES_DICTIONARY["boltz_affinity"] in result.columns
+        assert RANKS_DICTIONARY["boltz_affinity"] in result.columns
+
+    def test_direction_is_minimum_most_negative_is_best(self):
+        """Lower log10(IC50/uM) = more potent = best -> lowest rp_score."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[None, None, None],
+            boltz_affinity_scores=[-9.0, -7.0, -5.0],
+        )
+        result = compute_rank_percentile_scores(df, methods=["boltz_affinity"])
+
+        rp_col = RP_SCORES_DICTIONARY["boltz_affinity"]
+        assert result.loc[0, rp_col] == pytest.approx(1 / 3)  # -9.0, most negative
+        assert result.loc[2, rp_col] == pytest.approx(1.0)  # -5.0, least negative
+
+    def test_boltz_affinity_joins_boltz_group_instead_of_voting_alone(self):
+        """Vina and Boltz's group must combine as two pose-source votes, not four independent ones."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],
+            vina_rescore_boltz_scores=[-1.0, -5.0, -9.0],
+            gnina_rescore_boltz_scores=[-2.0, -5.0, -8.0],
+            boltz_affinity_scores=[-1.0, -4.0, -9.0],
+        )
+        methods = [
+            "vina",
+            "vina_rescore_boltz",
+            "gnina_rescore_boltz",
+            "boltz_affinity",
+        ]
+        result = compute_rank_percentile_scores(df, methods=methods)
+
+        vina_rp = result[RP_SCORES_DICTIONARY["vina"]]
+        vrb_rp = result[RP_SCORES_DICTIONARY["vina_rescore_boltz"]]
+        grb_rp = result[RP_SCORES_DICTIONARY["gnina_rescore_boltz"]]
+        ba_rp = result[RP_SCORES_DICTIONARY["boltz_affinity"]]
+
+        # vina votes once, Boltz's 3 tracks average to one more vote (2 total).
+        boltz_group = (vrb_rp + grb_rp + ba_rp) / 3
+        expected_two_votes = (vina_rp + boltz_group) / 2
+
+        # What it would be if boltz_affinity voted independently, flat, ungrouped.
+        expected_four_independent_votes = (vina_rp + vrb_rp + grb_rp + ba_rp) / 4
+
+        np.testing.assert_allclose(result[GLOBAL_RP_SCORE].values, expected_two_votes.values)
+        assert not np.allclose(
+            result[GLOBAL_RP_SCORE].values, expected_four_independent_votes.values
+        )
+
+    def test_missing_affinity_for_one_row_leaves_boltz_vote_intact(self):
+        """A missing boltz_affinity_score is excluded, not imputed; the Boltz
+        vote still comes from its two rescore siblings."""
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],
+            vina_rescore_boltz_scores=[-1.0, -5.0, -9.0],
+            gnina_rescore_boltz_scores=[-2.0, -5.0, -8.0],
+            boltz_affinity_scores=[np.nan, -4.0, -9.0],
+        )
+        methods = [
+            "vina",
+            "vina_rescore_boltz",
+            "gnina_rescore_boltz",
+            "boltz_affinity",
+        ]
+        result = compute_rank_percentile_scores(df, methods=methods)
+
+        vina_rp = result[RP_SCORES_DICTIONARY["vina"]]
+        vrb_rp = result[RP_SCORES_DICTIONARY["vina_rescore_boltz"]]
+        grb_rp = result[RP_SCORES_DICTIONARY["gnina_rescore_boltz"]]
+        ba_rp = result[RP_SCORES_DICTIONARY["boltz_affinity"]]
+
+        assert np.isnan(ba_rp.iloc[0])  # premise: row 0's affinity head is missing
+
+        expected_boltz_group_row0 = (vrb_rp.iloc[0] + grb_rp.iloc[0]) / 2
+        expected_row0 = (vina_rp.iloc[0] + expected_boltz_group_row0) / 2
+        assert result[GLOBAL_RP_SCORE].iloc[0] == pytest.approx(expected_row0)
+
+
+# ---------------------------------------------------------------------------
+# 14. Score plausibility
+# ---------------------------------------------------------------------------
+class TestIsPhysicalScore:
+    def test_plausible_vina_energy_is_physical(self):
+        assert is_physical_score(-9.5, "vina") is True
+
+    def test_range_endpoints_are_inclusive(self):
+        low, high = VINA_FAMILY_PLAUSIBLE_SCORE_RANGE
+        assert is_physical_score(low, "vina") is True
+        assert is_physical_score(high, "vina") is True
+
+    def test_positive_vina_score_is_not_physical(self):
+        assert is_physical_score(5.0, "vina") is False
+
+    def test_absurdly_large_magnitude_vina_score_is_not_physical(self):
+        assert is_physical_score(-43_851_078, "vina") is False
+
+    def test_gnina_and_its_rescore_tracks_use_the_same_range(self):
+        assert is_physical_score(-9.0, "gnina") is True
+        assert is_physical_score(5.0, "gnina_rescore_diffdock") is False
+        assert is_physical_score(-9.0, "vina_rescore_boltz") is True
+
+    def test_maximising_method_treats_a_positive_score_as_physical(self):
+        """karmadock_score is 'maximum'-direction — positive is correct, not suspicious."""
+        assert is_physical_score(5.0, "karmadock") is True
+        assert is_physical_score(1_000_000.0, "karmadock") is True
+
+    def test_nesso_is_not_checked_against_the_vina_range(self):
+        """Nesso is log10(IC50/uM), not a docking energy, so the vina range doesn't apply."""
+        assert is_physical_score(5.0, "nesso") is True
+        assert is_physical_score(-43_851_078, "nesso") is True
+
+    def test_missing_score_is_treated_as_physical(self):
+        """No score is a distinct, already-tracked failure mode, not a physicality one."""
+        assert is_physical_score(np.nan, "vina") is True
+        assert is_physical_score(None, "vina") is True
+
+
+# ---------------------------------------------------------------------------
+# 15. Regression: the grouping column (and row order) must survive
+# ---------------------------------------------------------------------------
+class TestGroupingColumnSurvives:
+    """Regression: groupby(...).apply(...) used to drop protein_col on
+    pandas 2.2+/3.x. Rows are interleaved out of alphabetical order here so a
+    fix that re-attaches columns by position, not by index, would still fail."""
+
+    def _interleaved_df(self):
+        return pd.DataFrame(
+            {
+                PROTEIN_CONF_ID: ["P2", "P1", "P2", "P1"],
+                "ligand_id": ["lig_p2_a", "lig_p1_a", "lig_p2_b", "lig_p1_b"],
+                "vina_score": [-9.0, -10.0, -7.0, -8.0],
+            }
+        )
+
+    def test_protein_col_survives(self):
+        df = self._interleaved_df()
+        result = compute_rank_percentile_scores(df, methods=["vina"])
+        assert PROTEIN_CONF_ID in result.columns
+
+    def test_row_count_is_unchanged(self):
+        df = self._interleaved_df()
+        result = compute_rank_percentile_scores(df, methods=["vina"])
+        assert len(result) == len(df)
+
+    def test_unrelated_column_and_protein_col_stay_aligned_to_their_own_row(self):
+        """Still attached to the right row, in original order, not group-sorted order."""
+        df = self._interleaved_df()
+        result = compute_rank_percentile_scores(df, methods=["vina"])
+
+        assert result["ligand_id"].tolist() == df["ligand_id"].tolist()
+        assert result[PROTEIN_CONF_ID].tolist() == df[PROTEIN_CONF_ID].tolist()
+
+    def test_computed_scores_stay_aligned_to_their_own_row(self):
+        """The computed rp_score must land on its own row, not get shuffled by a positional re-attach."""
+        df = self._interleaved_df()
+        result = compute_rank_percentile_scores(df, methods=["vina"])
+
+        rp_col = RP_SCORES_DICTIONARY["vina"]
+        # Row order in: P2(-9, best of its pair), P1(-10, best), P2(-7, worst), P1(-8, worst).
+        expected_rp = [0.5, 0.5, 1.0, 1.0]
+        np.testing.assert_allclose(result[rp_col].values, expected_rp)
+
+
+# ---------------------------------------------------------------------------
+# 16. R3-1: a newly-registered method needs no change to this module
+# ---------------------------------------------------------------------------
+class TestNewMethodRegistrationIsModular:
+    """docs/adding_a_prediction_method.rst promises that registering a method
+    in the three scoring dictionaries is enough for compute_rank_percentile_scores
+    to rank and vote it in, with no code change here. Verified with a throwaway
+    method rather than a real one, via monkeypatch so nothing leaks between tests."""
+
+    def _register_fake_method(self, monkeypatch):
+        import guild.tools.scores as scores_mod
+
+        monkeypatch.setitem(scores_mod.SCORES_DIRECTION_DICTIONARY, "fake_method", "minimum")
+        monkeypatch.setitem(scores_mod.RANKS_DICTIONARY, "fake_method", "rank_fake_method_score")
+        monkeypatch.setitem(scores_mod.RP_SCORES_DICTIONARY, "fake_method", "rp_fake_method_score")
+
+    def test_fake_method_gets_its_own_rp_column(self, monkeypatch):
+        self._register_fake_method(monkeypatch)
+        df = _make_df(
+            protein_ids=["P1"] * 3,
+            vina_scores=[-10.0, -8.0, -6.0],
+            fake_method_scores=[-1.0, -5.0, -3.0],
+        )
+        result = compute_rank_percentile_scores(df, methods=["vina", "fake_method"])
+        assert not result["rp_fake_method_score"].isna().any()
+
+    def test_fake_method_votes_in_global_rp_score(self, monkeypatch):
+        # Not in POSE_SOURCE_DICTIONARY or CONFIDENCE_ONLY_METHODS -> its own
+        # voting pose source, same default a brand new engine would get.
+        self._register_fake_method(monkeypatch)
+        without_it = compute_rank_percentile_scores(
+            _make_df(protein_ids=["P1"] * 3, vina_scores=[-10.0, -8.0, -6.0]),
+            methods=["vina"],
+        )[GLOBAL_RP_SCORE]
+        with_it = compute_rank_percentile_scores(
+            _make_df(
+                protein_ids=["P1"] * 3,
+                vina_scores=[-10.0, -8.0, -6.0],
+                fake_method_scores=[-1.0, -5.0, -3.0],
+            ),
+            methods=["vina", "fake_method"],
+        )[GLOBAL_RP_SCORE]
+        assert not with_it.equals(without_it)

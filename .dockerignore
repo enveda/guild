@@ -8,6 +8,8 @@
 !guild
 !tests
 !scripts/apply_karmadock_patches.py
+!scripts/run_guild.py
+!notebooks/analysis/reviewer_response/reproduce_response_analyses.py
 
 # Ignore things that might be inside the folders above
 **/*~
