@@ -112,6 +112,11 @@ _POSEBUSTERS_CONFIG_FLAG = $(if $(POSEBUSTERS_CONFIG),--posebusters-config $(POS
 EXCLUDE_NON_PHYSICAL ?=
 _EXCLUDE_NON_PHYSICAL_FLAG = $(if $(EXCLUDE_NON_PHYSICAL),--exclude-non-physical,)
 
+# DiffDock pocket restriction: auto (default; pocket box when available, blind
+# otherwise), box (pocket required), or blind (ignore any box).
+DIFFDOCK_POCKET ?=
+_DIFFDOCK_POCKET_FLAG = $(if $(DIFFDOCK_POCKET),--diffdock-pocket $(DIFFDOCK_POCKET),)
+
 # Internal docker run flags reused across targets.
 # Mounts a generated /etc/passwd so pwd.getpwuid() works for the host UID
 # (required by PyTorch / boltz inside the container).
@@ -140,7 +145,7 @@ _NO_DECOYS_FLAG      = $(if $(NO_DECOYS),--no-decoys,)
 _BOX_FLAG            = $(if $(BOX),--box $(BOX),)
 _N_WORKERS_FLAG      = $(if $(N_WORKERS),--n-workers $(N_WORKERS),)
 _VINA_EXHAUSTIVENESS_FLAG = $(if $(VINA_EXHAUSTIVENESS),--vina-exhaustiveness $(VINA_EXHAUSTIVENESS),)
-_OPTIONAL_FLAGS = $(_CLEAN_FLAG) $(_KNOWN_BINDERS_FLAG) $(_HEAD_FLAG) $(_DECOYS_FLAG) $(_NO_DECOYS_FLAG) $(_BOX_FLAG) $(_N_WORKERS_FLAG) $(_NO_GPU_FLAG) $(_GNINA_INPUT_MODE_FLAG) $(_FLEXIBLE_DOCKING_FLAG) $(_FLEXRES_GNINA_FLAG) $(_VINA_EXHAUSTIVENESS_FLAG) $(_POSES_DIR_FLAG) $(_POSE_MODE_FLAG) $(_NO_POSEBUSTERS_FLAG) $(_POSEBUSTERS_CONFIG_FLAG) $(_EXCLUDE_NON_PHYSICAL_FLAG)
+_OPTIONAL_FLAGS = $(_CLEAN_FLAG) $(_KNOWN_BINDERS_FLAG) $(_HEAD_FLAG) $(_DECOYS_FLAG) $(_NO_DECOYS_FLAG) $(_BOX_FLAG) $(_N_WORKERS_FLAG) $(_NO_GPU_FLAG) $(_GNINA_INPUT_MODE_FLAG) $(_FLEXIBLE_DOCKING_FLAG) $(_FLEXRES_GNINA_FLAG) $(_VINA_EXHAUSTIVENESS_FLAG) $(_POSES_DIR_FLAG) $(_POSE_MODE_FLAG) $(_NO_POSEBUSTERS_FLAG) $(_POSEBUSTERS_CONFIG_FLAG) $(_EXCLUDE_NON_PHYSICAL_FLAG) $(_DIFFDOCK_POCKET_FLAG)
 
 # Generate an /etc/passwd that includes the container's original entries plus
 # the host user.  This fixes pwd.getpwuid() failures for LDAP/SSSD users

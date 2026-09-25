@@ -434,6 +434,8 @@ def vina_score_pose(
     center: tuple[float, float, float],
     size: tuple[float, float, float],
     seed: int = RANDOM_SEED,
+    minimize: bool = False,
+    output_pdbqt: str | None = None,
 ) -> float:
     """
     Score a single pre-docked ligand pose with Vina (no re-docking).
@@ -447,6 +449,10 @@ def vina_score_pose(
     :param center: Box center (x, y, z).
     :param size: Box size (x, y, z).
     :param seed: Random seed (for reproducibility).
+    :param minimize: Locally minimise the pose (``Vina.optimize()``) before
+        reporting the energy, so steric clashes in an externally generated
+        pose do not dominate the score. The pose stays in place otherwise.
+    :param output_pdbqt: Optional path to write the (minimised) pose.
     :return: Vina binding energy in kcal/mol.
     """
     _validate_pdbqt(receptor_pdbqt, "receptor")
@@ -465,9 +471,14 @@ def vina_score_pose(
         raise RuntimeError(f"Failed to set ligand from {ligand_pdbqt}: {e}") from e
 
     v.compute_vina_maps(center=center, box_size=size)
-    energy = v.score()
+    energy = v.optimize() if minimize else v.score()
+    if output_pdbqt is not None:
+        v.write_pose(output_pdbqt, overwrite=True)
 
-    return float(energy[0])
+    try:
+        return float(energy[0])
+    except (TypeError, IndexError):
+        return float(energy)
 
 
 # ── Vina score-only re-scoring of Boltz-predicted complexes ─────────────────

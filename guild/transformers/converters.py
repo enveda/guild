@@ -6,16 +6,21 @@ Convert between different file formats.
 - PDB to SDF
 """
 
+import logging
 import os
+import re
 import shutil
 import subprocess
 
+import numpy as np
 from rdkit import Chem
 from rdkit.Chem import AllChem, rdMolAlign
 
 from guild.constants.ligands import OBABEL_CONVERSION_TIMEOUT
 from guild.constants.poses import POSE_FILE_EXTENSION
 from guild.constants.system import SHELL_SILENCER
+
+logger = logging.getLogger(__name__)
 
 # warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -329,7 +334,12 @@ def ligand_pdb_to_pdbqt(pdb: str, timeout: int = 300):
         raise RuntimeError(f"OpenBabel conversion failed for {pdb}: {e.stderr}") from e
 
 
-def sdf_to_pdbqt(sdf: str, pdbqt: str = None, timeout: int = OBABEL_CONVERSION_TIMEOUT):
+def sdf_to_pdbqt(
+    sdf: str,
+    pdbqt: str = None,
+    timeout: int = OBABEL_CONVERSION_TIMEOUT,
+    add_hydrogens: bool = False,
+):
     """
     Convert an SDF file (with existing 3D coordinates) directly to PDBQT.
     This preserves the 3D pose — no --gen3d is used.
@@ -338,6 +348,9 @@ def sdf_to_pdbqt(sdf: str, pdbqt: str = None, timeout: int = OBABEL_CONVERSION_T
     :param sdf: Path to the input SDF file (must have 3D coords)
     :param pdbqt: Path to the output PDBQT file. Defaults to replacing .sdf with .pdbqt.
     :param timeout: Maximum time in seconds for conversion
+    :param add_hydrogens: Add hydrogens (``obabel -h``, keeping the input's
+        formal charges) for poses written heavy-atom-only, e.g. by DiffDock;
+        without them Vina cannot type hydrogen-bond donors.
     :return: Path to the generated PDBQT file
     """
     if not os.path.exists(sdf):
@@ -346,7 +359,8 @@ def sdf_to_pdbqt(sdf: str, pdbqt: str = None, timeout: int = OBABEL_CONVERSION_T
     if pdbqt is None:
         pdbqt = sdf.replace(".sdf", ".pdbqt")
 
-    obabel_cmd = f'obabel "{sdf}" -O "{pdbqt}" {SHELL_SILENCER}'
+    hydrogen_flag = "-h " if add_hydrogens else ""
+    obabel_cmd = f'obabel "{sdf}" -O "{pdbqt}" {hydrogen_flag}{SHELL_SILENCER}'
 
     try:
         subprocess.run(
@@ -378,20 +392,65 @@ def sdf_to_pdbqt(sdf: str, pdbqt: str = None, timeout: int = OBABEL_CONVERSION_T
     return pdbqt
 
 
+# Meeko reports two residues it could not template because a steric clash was
+# read as a covalent bond (typical of predicted structures) as e.g.
+# "matched with excess inter-residue bond(s): A:69".
+_EXCESS_BOND_RESIDUE = re.compile(r"excess inter-residue bond\(s\): (\w+):(-?\d+[A-Za-z]?)")
+
+
+def _residue_spec(residues) -> str:
+    """Meeko ``--delete_residues`` spec for ``[(chain, resnum), ...]``, e.g. ``A:69,72,B:5``."""
+    by_chain = {}
+    for chain, resnum in residues:
+        by_chain.setdefault(chain, []).append(resnum)
+    return ",".join(f"{chain}:{','.join(nums)}" for chain, nums in sorted(by_chain.items()))
+
+
+def _residues_near(pdb_path: str, residues, coordinates, cutoff: float) -> list:
+    """The subset of ``residues`` with any atom within ``cutoff`` Å of ``coordinates``."""
+    wanted = set(residues)
+    points = np.asarray(coordinates, dtype=float).reshape(-1, 3)
+    near = set()
+    with open(pdb_path) as handle:
+        for line in handle:
+            if not line.startswith(("ATOM", "HETATM")):
+                continue
+            key = (line[21].strip(), line[22:27].strip())
+            if key not in wanted or key in near:
+                continue
+            atom = np.array([float(line[30:38]), float(line[38:46]), float(line[46:54])])
+            if np.linalg.norm(points - atom, axis=1).min() < cutoff:
+                near.add(key)
+    return sorted(near)
+
+
 def protein_pdb_to_pdbqt(
     input_pdb: str,
     output_pdbqt: str | None = None,
     default_altloc: str = "A",
     allow_bad_res: bool = False,
+    delete_clashing_residues: bool = False,
+    protected_coordinates=None,
+    protected_cutoff: float = 8.0,
 ):
     """
-    Convert a PDB file to a PDBQT file.
+    Convert a PDB file to a PDBQT file with Meeko.
 
     :param input_pdb: PDB file to be converted
     :param output_pdbqt: PDBQT file to be written
     :param default_altloc: Default alternate location
     :param allow_bad_res: Allow bad residues
-    return: PDBQT file
+    :param delete_clashing_residues: When Meeko rejects the receptor because
+        two residues sit close enough that it reads the contact as a bond
+        (typical of predicted structures), retry once with those residues
+        deleted. For predicted complexes only; crystal receptors should fail.
+    :param protected_coordinates: Coordinates (e.g. the ligand's atoms) that
+        a deleted residue must stay clear of, so the deletion cannot change a
+        score computed around them.
+    :param protected_cutoff: Minimum distance (Å) between a deleted residue
+        and ``protected_coordinates``; 8 Å is Vina's interaction cutoff.
+    :return: PDBQT file
+    :raises RuntimeError: with Meeko's output when preparation fails.
     """
     output_pdbqt = output_pdbqt or input_pdb.replace(".pdb", ".pdbqt")
     cmd = [
@@ -406,7 +465,35 @@ def protein_pdb_to_pdbqt(
     if allow_bad_res:
         cmd += ["--allow_bad_res"]
 
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode == 0:
+        return output_pdbqt
+
+    output = f"{result.stdout}\n{result.stderr}"
+    residues = sorted(set(_EXCESS_BOND_RESIDUE.findall(output)))
+    if not (delete_clashing_residues and residues):
+        raise RuntimeError(
+            f"mk_prepare_receptor.py failed for {input_pdb}: {output.strip()[-1500:]}"
+        )
+
+    if protected_coordinates is not None:
+        near = _residues_near(input_pdb, residues, protected_coordinates, protected_cutoff)
+        if near:
+            raise RuntimeError(
+                f"mk_prepare_receptor.py failed for {input_pdb} on clashing residue(s) "
+                f"{_residue_spec(near)} within {protected_cutoff} Å of the ligand; not deleting them"
+            )
+
+    spec = _residue_spec(residues)
+    logger.warning(
+        f"Meeko read a steric clash as a bond in {input_pdb}; retrying without residue(s) {spec}"
+    )
+    retry = subprocess.run(cmd + ["--delete_residues", spec], capture_output=True, text=True)
+    if retry.returncode != 0:
+        raise RuntimeError(
+            f"mk_prepare_receptor.py failed for {input_pdb} even without residue(s) {spec}: "
+            f"{(retry.stdout + retry.stderr).strip()[-1500:]}"
+        )
     return output_pdbqt
 
 

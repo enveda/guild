@@ -11,6 +11,7 @@ import tempfile
 import numpy as np
 import pandas as pd
 import yaml
+from rdkit import Chem
 from tqdm import tqdm
 
 from guild.constants.boltz import (
@@ -23,6 +24,7 @@ from guild.constants.bulk import (
     COMBINATIONS_TABLE_KEY,
     COMBINATIONS_TO_RUN_KEY,
     OUTPUT_LOG_FILE,
+    SMILES_NAMES_DICTIONARY_KEY,
 )
 from guild.constants.general import RANDOM_SEED
 from guild.constants.guild import (
@@ -45,10 +47,11 @@ from guild.docking.vina import (
     _validate_connected_ligand_pdbqt,
     vina_score_pose,
 )
+from guild.tools.pose_molecules import mol_from_pdb_block
 from guild.transformers.converters import (
     cif_to_pdb,
-    ligand_pdb_to_pdbqt,
     protein_pdb_to_pdbqt,
+    sdf_to_pdbqt,
 )
 
 logger = logging.getLogger(__name__)
@@ -504,10 +507,38 @@ def _ensure_boltz_complex_pdb(boltz_folder: str, run_id: str) -> str:
     return complex_pdb
 
 
+def _prepare_boltz_ligand(complex_pdb: str, ligand_pdb: str, smiles: str):
+    """
+    Build the Boltz ligand for rescoring: bond orders from ``smiles``,
+    hydrogens added in place, written next to ``ligand_pdb`` as an SDF.
+
+    Boltz writes heavy atoms with no bond orders; inferring bonds from that
+    geometry and adding hydrogens to the guess can mis-protonate the ligand.
+    A pose whose geometry does not match its SMILES (e.g. an atom Boltz put
+    too close to another) is not the ligand and is not rescored.
+
+    :return: ``(sdf_path, heavy_atom_coordinates)``.
+    :raises ValueError: when the pose cannot be matched to ``smiles``.
+    """
+    _extract_ligand_records(complex_pdb, ligand_pdb, resname="LIG")
+    with open(ligand_pdb) as handle:
+        block = handle.read()
+    mol, reason, used_fallback = mol_from_pdb_block(block, smiles)
+    if mol is None or used_fallback:
+        raise ValueError(f"Boltz ligand pose does not match its SMILES ({reason}); not rescoring")
+
+    heavy_coordinates = mol.GetConformer().GetPositions()
+    mol = Chem.AddHs(mol, addCoords=True)
+    sdf_path = ligand_pdb.replace(".pdb", ".sdf")
+    Chem.MolToMolFile(mol, sdf_path)
+    return sdf_path, heavy_coordinates
+
+
 def rescore_boltz_pose(
     boltz_folder: str,
     protein_conf_id: str,
     ligand_id: str,
+    smiles: str,
     output_dir: str = None,
     box_padding: float = 4.0,
     seed: int = RANDOM_SEED,
@@ -519,12 +550,14 @@ def rescore_boltz_pose(
     Pipeline (all in Boltz's predicted coordinate frame):
 
     1. Ensure the relabelled complex PDB exists (regenerate from CIF if needed).
-    2. Extract the receptor (everything that is not the ligand resname) → PDBQT.
-    3. Extract the ligand (resname ``LIG``) → PDBQT.
-    4. Validate the ligand PDBQT is a single connected molecule — Boltz
-       occasionally predicts physically implausible ligand geometry, which
-       leaves OpenBabel's distance-based bond inference unable to connect
-       the ligand's own atoms (see :func:`guild.docking.vina._validate_connected_ligand_pdbqt`).
+    2. Extract the ligand (resname ``LIG``), assign bond orders from its
+       SMILES and add hydrogens (:func:`_prepare_boltz_ligand`) → PDBQT.
+    3. Validate the ligand PDBQT is a single connected molecule (see
+       :func:`guild.docking.vina._validate_connected_ligand_pdbqt`).
+    4. Extract the receptor (everything that is not the ligand resname) →
+       PDBQT. Predicted receptors sometimes place two residues close enough
+       that Meeko reads a bond; those residues are dropped and preparation
+       retried, unless they lie within 8 Å of the ligand.
     5. Compute the Vina box from the ligand's bounding box.
     6. Call :func:`guild.docking.vina.vina_score_pose` (score-only).
 
@@ -532,6 +565,7 @@ def rescore_boltz_pose(
         (``{batch_folder}/boltz``).
     :param protein_conf_id: Protein configuration ID.
     :param ligand_id: Ligand identifier.
+    :param smiles: The ligand's SMILES, used for bond orders and hydrogens.
     :param output_dir: Where to write intermediate PDB/PDBQT files.
         Defaults to ``boltz_folder``.
     :param box_padding: Padding around the ligand bounding box (Å).
@@ -546,7 +580,13 @@ def rescore_boltz_pose(
         output_dir = boltz_folder
     os.makedirs(output_dir, exist_ok=True)
 
-    # Per-pose receptor in Boltz's frame
+    # Ligand in Boltz's frame
+    ligand_pdb = os.path.join(output_dir, f"{run_id}_ligand_rescore.pdb")
+    ligand_sdf, ligand_coordinates = _prepare_boltz_ligand(complex_pdb, ligand_pdb, smiles)
+    ligand_pdbqt = sdf_to_pdbqt(ligand_sdf, pdbqt=ligand_pdb.replace(".pdb", ".pdbqt"))
+    _validate_connected_ligand_pdbqt(ligand_pdbqt)
+
+    # Per-pose receptor in the same frame
     receptor_pdb = os.path.join(output_dir, f"{run_id}_receptor_rescore.pdb")
     _extract_protein_from_complex(complex_pdb, receptor_pdb, ligand_resname="LIG")
     receptor_pdbqt = receptor_pdb.replace(".pdb", ".pdbqt")
@@ -554,14 +594,9 @@ def rescore_boltz_pose(
         input_pdb=receptor_pdb,
         output_pdbqt=receptor_pdbqt,
         allow_bad_res=True,
+        delete_clashing_residues=True,
+        protected_coordinates=ligand_coordinates,
     )
-
-    # Ligand in the same frame
-    ligand_pdb = os.path.join(output_dir, f"{run_id}_ligand_rescore.pdb")
-    _extract_ligand_records(complex_pdb, ligand_pdb, resname="LIG")
-    ligand_pdb_to_pdbqt(pdb=ligand_pdb)
-    ligand_pdbqt = ligand_pdb.replace(".pdb", ".pdbqt")
-    _validate_connected_ligand_pdbqt(ligand_pdbqt)
 
     center, size = _compute_box_from_pdb_atoms(ligand_pdb, padding=box_padding)
 
@@ -602,6 +637,7 @@ def _append_progress_log(progress_log_path, message):
 def vina_rescore_boltz_batch(
     batch_folder: str,
     combinations: list,
+    smiles_by_ligand: dict,
     box_padding: float = 4.0,
     seed: int = RANDOM_SEED,
     progress_log_path: str = None,
@@ -611,6 +647,7 @@ def vina_rescore_boltz_batch(
 
     :param batch_folder: Path to the batch folder.
     :param combinations: List of ``(protein_conf_id, ligand_id)`` tuples.
+    :param smiles_by_ligand: ``ligand_id → SMILES`` for the batch.
     :param box_padding: Padding around the ligand bounding box (Å).
     :param seed: Random seed for Vina.
     :param progress_log_path: Optional path to the batch's persisted
@@ -634,6 +671,7 @@ def vina_rescore_boltz_batch(
                 boltz_folder=boltz_folder,
                 protein_conf_id=protein_conf_id,
                 ligand_id=ligand_id,
+                smiles=smiles_by_ligand[ligand_id],
                 output_dir=rescore_output_dir,
                 box_padding=box_padding,
                 seed=seed,
@@ -692,6 +730,7 @@ def vina_rescore_boltz_guild_scoring(batch_dictionary):
     df = vina_rescore_boltz_batch(
         batch_folder=batch_folder,
         combinations=combinations,
+        smiles_by_ligand=batch_dictionary[SMILES_NAMES_DICTIONARY_KEY],
         progress_log_path=progress_log_path,
     )
     keep = [COMBINATION_ID, PROTEIN_CONF_ID, LIGAND_ID, VINA_RESCORE_BOLTZ_SCORE]
@@ -706,9 +745,8 @@ def vina_rescore_boltz_guild_scoring(batch_dictionary):
 # pose), but scored with gnina's CNN-backed function instead. The receptor is
 # passed to gnina as a plain PDB — gnina reads ``.pdb`` receptors directly,
 # so no protein_pdb_to_pdbqt / mk_prepare_receptor.py step is needed here.
-# The ligand still goes through ligand_pdb_to_pdbqt: Boltz's raw coordinates
-# carry no bond-order information, so OpenBabel bond inference (and the
-# single-connected-fragment validation) is unavoidable regardless of engine.
+# The ligand is the same SMILES-templated, hydrogenated SDF the Vina track
+# uses; gnina reads SDF directly.
 # ────────────────────────────────────────────────────────────────────────────
 
 
@@ -716,6 +754,7 @@ def rescore_boltz_pose_gnina(
     boltz_folder: str,
     protein_conf_id: str,
     ligand_id: str,
+    smiles: str,
     output_dir: str = None,
     box_padding: float = 4.0,
     seed: int = RANDOM_SEED,
@@ -729,6 +768,7 @@ def rescore_boltz_pose_gnina(
     :param boltz_folder: Directory containing Boltz outputs for this batch.
     :param protein_conf_id: Protein configuration ID.
     :param ligand_id: Ligand identifier.
+    :param smiles: The ligand's SMILES, used for bond orders and hydrogens.
     :param output_dir: Where to write intermediate PDB/PDBQT files.
         Defaults to ``boltz_folder``.
     :param box_padding: Padding around the ligand bounding box (Å).
@@ -749,20 +789,15 @@ def rescore_boltz_pose_gnina(
     receptor_pdb = os.path.join(output_dir, f"{run_id}_gnina_receptor_rescore.pdb")
     _extract_protein_from_complex(complex_pdb, receptor_pdb, ligand_resname="LIG")
 
-    # Ligand: bond order must still be inferred, so this goes through the
-    # same OpenBabel + connectivity-validation pipeline as the Vina track.
     ligand_pdb = os.path.join(output_dir, f"{run_id}_gnina_ligand_rescore.pdb")
-    _extract_ligand_records(complex_pdb, ligand_pdb, resname="LIG")
-    ligand_pdb_to_pdbqt(pdb=ligand_pdb)
-    ligand_pdbqt = ligand_pdb.replace(".pdb", ".pdbqt")
-    _validate_connected_ligand_pdbqt(ligand_pdbqt)
+    ligand_sdf, _ = _prepare_boltz_ligand(complex_pdb, ligand_pdb, smiles)
 
     center, size = _compute_box_from_pdb_atoms(ligand_pdb, padding=box_padding)
 
     combination_id = f"{protein_conf_id}_{ligand_id}"
     score, cnn_score = gnina_score_pose(
         receptor=receptor_pdb,
-        ligand=ligand_pdbqt,
+        ligand=ligand_sdf,
         center=center,
         size=size,
         output_dir=output_dir,
@@ -786,6 +821,7 @@ def rescore_boltz_pose_gnina(
 def gnina_rescore_boltz_batch(
     batch_folder: str,
     combinations: list,
+    smiles_by_ligand: dict,
     box_padding: float = 4.0,
     seed: int = RANDOM_SEED,
     use_gpu: bool = False,
@@ -796,6 +832,7 @@ def gnina_rescore_boltz_batch(
 
     :param batch_folder: Path to the batch folder.
     :param combinations: List of ``(protein_conf_id, ligand_id)`` tuples.
+    :param smiles_by_ligand: ``ligand_id → SMILES`` for the batch.
     :param box_padding: Padding around the ligand bounding box (Å).
     :param seed: Random seed for gnina.
     :param use_gpu: When False (default), passes ``--no_gpu`` to gnina.
@@ -821,6 +858,7 @@ def gnina_rescore_boltz_batch(
                 boltz_folder=boltz_folder,
                 protein_conf_id=protein_conf_id,
                 ligand_id=ligand_id,
+                smiles=smiles_by_ligand[ligand_id],
                 output_dir=rescore_output_dir,
                 box_padding=box_padding,
                 seed=seed,
@@ -890,6 +928,7 @@ def gnina_rescore_boltz_guild_scoring(batch_dictionary, use_gpu: bool = False):
     df = gnina_rescore_boltz_batch(
         batch_folder=batch_folder,
         combinations=combinations,
+        smiles_by_ligand=batch_dictionary[SMILES_NAMES_DICTIONARY_KEY],
         use_gpu=use_gpu,
         progress_log_path=progress_log_path,
     )
