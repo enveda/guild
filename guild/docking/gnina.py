@@ -421,6 +421,7 @@ def gnina_score_pose(
     seed: int = RANDOM_SEED,
     use_gpu: bool = False,
     subprocess_log_path: str | None = None,
+    minimize: bool = False,
 ) -> tuple[float, float]:
     """
     Score a single pre-docked ligand pose with gnina (score-only, no re-docking).
@@ -443,6 +444,8 @@ def gnina_score_pose(
     :param use_gpu: When False (default — rescoring commonly runs alongside
         CPU-only batch scoring), passes ``--no_gpu`` to gnina.
     :param subprocess_log_path: Optional path for the gnina stdout/stderr transcript.
+    :param minimize: Locally minimise the pose first (``--local_only``) instead
+        of scoring it as-is (``--score_only``).
     :return: ``(affinity, cnn_score)`` — affinity in kcal/mol (lower = better).
     """
     output_pdbqt = os.path.join(output_dir, f"{run_id}_gnina_score.pdbqt")
@@ -457,7 +460,7 @@ def gnina_score_pose(
         output_scores=output_scores,
         seed=seed,
         use_gpu=use_gpu,
-        pose_mode=POSE_MODE_SCORE,
+        pose_mode=POSE_MODE_LOCAL if minimize else POSE_MODE_SCORE,
         subprocess_log_path=subprocess_log_path,
     )
     return float(result["scores"][0]), float(result["cnn_scores"][0])

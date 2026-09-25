@@ -2,9 +2,9 @@ ckpt: best_ema_inference_epoch_model.pt
 model_dir: ./workdir/v1.1/score_model
 confidence_ckpt: best_model_epoch75.pt
 confidence_model_dir: ./workdir/v1.1/confidence_model
-samples_per_complex: 7
-inference_steps: 10
-actual_steps: 9
+samples_per_complex: 10
+inference_steps: 20
+actual_steps: 19
 different_schedules: false
 sigma_schedule: expbeta
 inf_sched_alpha: 1

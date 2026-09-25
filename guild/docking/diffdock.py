@@ -2,12 +2,15 @@
 Diffdock support functions
 """
 
+import glob
+import json
 import logging
 import os
 import subprocess
 
 import numpy as np
 import pandas as pd
+from rdkit import Chem
 from tqdm import tqdm
 
 from guild.constants.bulk import (
@@ -16,17 +19,33 @@ from guild.constants.bulk import (
     COMBINATIONS_TO_RUN_KEY,
 )
 from guild.constants.diffdock import (
+    CLEAN_RECEPTOR_SUFFIX,
     COMPLEX_NAME,
+    DEFAULT_DIFFDOCK_POCKET,
     DIFFDOCK_ARGS_FILE,
     DIFFDOCK_COMBINATIONS_FILE,
     DIFFDOCK_DIRECTORY,
+    DIFFDOCK_POCKET_AUTO,
+    DIFFDOCK_POCKET_BLIND,
+    DIFFDOCK_POCKET_BOX,
+    DIFFDOCK_POCKET_KEY,
+    DIFFDOCK_POCKET_MODES,
+    DIFFDOCK_POSE_SELECTION,
     DIFFDOCK_RESULTS_FOLDER,
     LIGAND_DESCRIPTION,
+    POSE_NO_BOX,
+    POSE_NO_SAMPLE_IN_BOX,
+    POSE_NO_SAMPLES,
+    POSE_SELECTED_BLIND,
+    POSE_SELECTED_BOX,
     PROTEIN_PATH,
     PROTEIN_SEQUENCE,
+    RECEPTOR_CONTACT_CUTOFF,
+    SELECTED_POSE_FILE,
 )
 from guild.constants.general import RANDOM_SEED
 from guild.constants.guild import (
+    BOXES_FOLDER,
     DIFFDOCK_FOLDER,
     DIFFDOCK_SCORE,
     GNINA_RESCORE_DIFFDOCK_CNN_SCORE,
@@ -43,13 +62,14 @@ from guild.constants.system import (
     PYTHON_EXECUTABLE,
     SUPPORT_FOLDER,
 )
+from guild.constants.vina import VINA_BOXES_FOLDER
 from guild.docking.gnina import gnina_score_pose
 from guild.docking.vina import (
     compute_box_from_sdf,
+    get_center_and_size_from_box_file,
     vina_score_pose,
 )
-from guild.tools.preparation import _normalize_chain_list
-from guild.transformers.converters import sdf_to_pdbqt
+from guild.transformers.converters import protein_pdb_to_pdbqt, sdf_to_pdbqt
 
 logger = logging.getLogger(__name__)
 
@@ -71,33 +91,167 @@ def generate_diffdock_table(
     return output_csv
 
 
-def process_diffdock_files(combination, diffdock_folder):
+def clean_receptor_path(batch_folder: str, protein_conf_id: str, extension: str = "pdb") -> str:
+    """Prepared receptor Guild writes during prep, in the Vina/pocket-box frame."""
+    return os.path.join(
+        batch_folder, PROTEINS_FOLDER, f"{protein_conf_id}{CLEAN_RECEPTOR_SUFFIX}.{extension}"
+    )
+
+
+def _diffdock_samples(combo_dir: str) -> list:
+    """``(confidence, sdf_path)`` for every DiffDock sample, highest confidence first.
+
+    Confidence comes from the ``rank<N>_confidence<score>.sdf`` filename, which
+    avoids the lexicographic rank trap (``rank10`` sorts before ``rank2``).
     """
-    Process the diffdock csv files to retrieve the highest scores for each pdb
-    :param input_combination: combination to process
-    :param diffdock_folder: folder containing the diffdock results
-    :param mode: single or bulk, depending on the input. If single, the ligand and protein names are the same for all rows. If bulk, the ligand and protein names are extracted from the pdb_id
+    if not os.path.isdir(combo_dir):
+        return []
+    samples = []
+    for fname in os.listdir(combo_dir):
+        if "_confidence" not in fname or not fname.endswith(".sdf"):
+            continue
+        try:
+            confidence = float(fname.split("_confidence")[1].replace(".sdf", ""))
+        except ValueError:
+            continue
+        samples.append((confidence, os.path.join(combo_dir, fname)))
+    return sorted(samples, key=lambda item: item[0], reverse=True)
+
+
+def _heavy_atom_coordinates(sdf_path: str):
+    """Heavy-atom coordinates of the first molecule in an SDF, or ``None`` if unreadable."""
+    supplier = Chem.SDMolSupplier(sdf_path, sanitize=False, removeHs=False)
+    mol = next((m for m in supplier if m is not None), None)
+    if mol is None or mol.GetNumConformers() == 0:
+        return None
+    positions = mol.GetConformer().GetPositions()
+    heavy = [atom.GetIdx() for atom in mol.GetAtoms() if atom.GetAtomicNum() > 1]
+    return positions[heavy] if heavy else None
+
+
+def _inside_box(point, center, size) -> bool:
+    return all(abs(p - c) <= s / 2.0 for p, c, s in zip(point, center, size, strict=True))
+
+
+def find_pocket_box(batch_folder: str, protein_conf_id: str, ligand_id: str):
+    """Pocket box for a combination, or ``None`` when no pocket was defined.
+
+    Every pocket source (user box, P2Rank, co-crystal ligand) ends up in
+    ``boxes/vina_boxes/<combination>.txt``. That file is written per ligand
+    during Vina prep, so when it is missing another ligand's box for the same
+    protein is used: the pocket centre is per protein.
     """
-    folder_name = combination[0] + "_" + combination[1]
-    full_folder = os.path.join(diffdock_folder, folder_name)
+    boxes_dir = os.path.join(batch_folder, BOXES_FOLDER, VINA_BOXES_FOLDER)
+    exact = os.path.join(boxes_dir, f"{protein_conf_id}_{ligand_id}.txt")
+    if os.path.isfile(exact):
+        return exact
+    siblings = sorted(
+        glob.glob(os.path.join(glob.escape(boxes_dir), f"{glob.escape(protein_conf_id)}_*.txt"))
+    )
+    return siblings[0] if siblings else None
 
-    # Extract IDs
-    protein_conf, ligand_id = combination
 
-    scores = [
-        float(i.split("_confidence")[1].replace(".sdf", ""))
-        for i in os.listdir(full_folder)
-        if "_confidence" in i
-    ]
+def select_diffdock_pose(combo_dir: str, box_file, mode: str = DEFAULT_DIFFDOCK_POCKET) -> dict:
+    """Choose which DiffDock sample represents a combination.
 
-    best_score = max(scores) if scores else 0.0
+    - ``box`` (or ``auto`` with a box): the highest-confidence sample whose
+      heavy-atom centroid lies inside the pocket box.
+    - ``blind`` (or ``auto`` without a box): the highest-confidence sample.
 
-    return {
-        COMBINATION_ID: folder_name,
-        PROTEIN_CONF_ID: protein_conf,
-        LIGAND_ID: ligand_id,
-        DIFFDOCK_SCORE: best_score,
+    :return: dict with ``sdf`` (path or ``None``), ``confidence`` (NaN when no
+        pose), ``reason`` (one of the ``POSE_*`` outcomes), ``mode``,
+        ``box_file`` and ``n_samples``.
+    """
+    if mode not in DIFFDOCK_POCKET_MODES:
+        raise ValueError(
+            f"Invalid DiffDock pocket mode {mode!r}; expected one of {DIFFDOCK_POCKET_MODES}."
+        )
+
+    samples = _diffdock_samples(combo_dir)
+    selection = {
+        "mode": mode,
+        "box_file": box_file,
+        "n_samples": len(samples),
+        "sdf": None,
+        "confidence": np.nan,
+        "reason": POSE_NO_SAMPLES,
     }
+    if not samples:
+        return selection
+
+    use_box = mode == DIFFDOCK_POCKET_BOX or (mode == DIFFDOCK_POCKET_AUTO and box_file is not None)
+    if not use_box:
+        confidence, sdf_path = samples[0]
+        return {
+            **selection,
+            "sdf": sdf_path,
+            "confidence": confidence,
+            "reason": POSE_SELECTED_BLIND,
+        }
+
+    if box_file is None:
+        return {**selection, "reason": POSE_NO_BOX}
+
+    center, size = get_center_and_size_from_box_file(box_file)
+    for confidence, sdf_path in samples:
+        coordinates = _heavy_atom_coordinates(sdf_path)
+        if coordinates is not None and _inside_box(coordinates.mean(axis=0), center, size):
+            return {
+                **selection,
+                "sdf": sdf_path,
+                "confidence": confidence,
+                "reason": POSE_SELECTED_BOX,
+            }
+    return {**selection, "reason": POSE_NO_SAMPLE_IN_BOX}
+
+
+def diffdock_combo_dir(batch_folder: str, protein_conf_id: str, ligand_id: str) -> str:
+    return os.path.join(
+        batch_folder, DIFFDOCK_FOLDER, DIFFDOCK_RESULTS_FOLDER, f"{protein_conf_id}_{ligand_id}"
+    )
+
+
+def resolve_diffdock_pose(
+    batch_folder: str, protein_conf_id: str, ligand_id: str, mode: str = DEFAULT_DIFFDOCK_POCKET
+) -> dict:
+    """Select the pose for a combination and record the choice next to its samples.
+
+    The record (``selected_pose.json``) is what PoseBusters reads, so every
+    consumer of "the DiffDock pose" agrees without re-deriving the rule.
+    """
+    combo_dir = diffdock_combo_dir(batch_folder, protein_conf_id, ligand_id)
+    box_file = (
+        None
+        if mode == DIFFDOCK_POCKET_BLIND
+        else find_pocket_box(batch_folder, protein_conf_id, ligand_id)
+    )
+    selection = select_diffdock_pose(combo_dir, box_file, mode)
+
+    if os.path.isdir(combo_dir):
+        record = {
+            **selection,
+            "sdf": os.path.basename(selection["sdf"]) if selection["sdf"] else None,
+            "confidence": None if pd.isna(selection["confidence"]) else selection["confidence"],
+        }
+        with open(os.path.join(combo_dir, SELECTED_POSE_FILE), "w") as handle:
+            json.dump(record, handle, indent=2)
+    return selection
+
+
+def read_selected_pose(combo_dir: str):
+    """The recorded selection for a combination, with ``sdf`` as a full path, or ``None``."""
+    path = os.path.join(combo_dir, SELECTED_POSE_FILE)
+    if not os.path.isfile(path):
+        return None
+    with open(path) as handle:
+        record = json.load(handle)
+    if record.get("sdf"):
+        record["sdf"] = os.path.join(combo_dir, record["sdf"])
+    return record
+
+
+def pocket_mode(batch_dictionary: dict) -> str:
+    return batch_dictionary.get(DIFFDOCK_POCKET_KEY, DEFAULT_DIFFDOCK_POCKET)
 
 
 def deploy_diffdock_single(
@@ -235,14 +389,19 @@ def write_diffdock_combinations_table(input_table, output_dir):
     """
     Write the combinations table to the project directory for DiffDock.
 
+    DiffDock docks into the same prepared receptor as Vina and gnina
+    (``proteins/<id>_single_chain_clean.pdb``: the receptor chain(s) only, in
+    the pocket-box frame), not the deposited file, which can carry G proteins,
+    antibodies or fusion partners that a blind docker would search too.
+
     :param input_table: Table to write the combinations table for.
-    :param output_dir: Path to the project directory.
+    :param output_dir: Path to the batch directory.
     """
 
     diffdock_combinations_table = input_table.copy()
 
     diffdock_combinations_table[PROTEIN_PATH] = diffdock_combinations_table[PROTEIN_CONF_ID].apply(
-        lambda x: f"{output_dir}/{PROTEINS_FOLDER}/{x}_raw.pdb"
+        lambda x: clean_receptor_path(output_dir, x)
     )
 
     diffdock_combinations_table[COMPLEX_NAME] = (
@@ -261,263 +420,187 @@ def write_diffdock_combinations_table(input_table, output_dir):
 
 def diffdock_guild_scoring(batch_dictionary):
     """
-    Perform the scoring of the dockinf results for DiffDock
+    DiffDock confidence of the selected pose for each combination in a batch.
+
+    A combination with no selectable pose scores NaN (not 0.0, which is a
+    mid-range confidence). ``diffdock_pose_selection`` records which rule
+    chose the pose, or why none was chosen.
 
     :param batch_dictionary: Dictionary containing the batch information.
     :return: DataFrame containing the docking scores.
     """
-    diffdock_scores_data = []
-    diffdock_folder = (
-        f"{batch_dictionary[BATCH_FOLDER]}/{DIFFDOCK_FOLDER}/{DIFFDOCK_RESULTS_FOLDER}/"
-    )
-    for current_combination in tqdm(
+    batch_folder = batch_dictionary[BATCH_FOLDER]
+    mode = pocket_mode(batch_dictionary)
+    rows = []
+    for protein_conf_id, ligand_id in tqdm(
         batch_dictionary[COMBINATIONS_TO_RUN_KEY],
         desc="DiffDock scoring",
     ):
-        diffdock_scores_data.append(process_diffdock_files(current_combination, diffdock_folder))
-
-    return pd.DataFrame(diffdock_scores_data)
+        selection = resolve_diffdock_pose(batch_folder, protein_conf_id, ligand_id, mode)
+        rows.append(
+            {
+                COMBINATION_ID: f"{protein_conf_id}_{ligand_id}",
+                PROTEIN_CONF_ID: protein_conf_id,
+                LIGAND_ID: ligand_id,
+                DIFFDOCK_SCORE: selection["confidence"],
+                DIFFDOCK_POSE_SELECTION: selection["reason"],
+            }
+        )
+    return pd.DataFrame(
+        rows,
+        columns=[
+            COMBINATION_ID,
+            PROTEIN_CONF_ID,
+            LIGAND_ID,
+            DIFFDOCK_SCORE,
+            DIFFDOCK_POSE_SELECTION,
+        ],
+    )
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Vina score-only re-scoring of DiffDock poses
+# Rescoring of DiffDock poses (Vina and gnina)
 #
-# DiffDock returns a relative confidence score, not a physics-based ΔG. For a
-# comparable energy estimate we apply Vina's scoring function to the highest-
-# confidence pose (no re-docking). DiffDock writes poses in the coordinate
-# frame of the *raw* input PDB, so the rescore receptor must be derived from
-# that same raw PDB — the cleaned/centred receptor used by Vina docking is in
-# a different frame.
+# DiffDock's confidence is not a binding energy, so the selected pose is also
+# scored with Vina and gnina. Both use the receptor DiffDock docked into
+# (Guild's prepared receptor, so the frames already agree), and the pose is
+# locally minimised first: raw DiffDock poses routinely carry heavy-atom
+# clashes that would otherwise dominate the score. A pose that touches no
+# receptor atom is reported as NaN rather than the ~0 an empty grid returns.
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def _find_best_diffdock_sdf(diffdock_results_dir: str, protein_conf_id: str, ligand_id: str) -> str:
-    """
-    Locate the highest-confidence SDF file for a combination in a DiffDock
-    results directory. DiffDock names output files like
-    ``rank1_confidence-1.23.sdf``.
-
-    :return: Absolute path to the best-confidence SDF.
-    :raises FileNotFoundError: If no SDF files are found for the combination.
-    """
-    folder_name = f"{protein_conf_id}_{ligand_id}"
-    combo_dir = os.path.join(diffdock_results_dir, folder_name)
-
-    if not os.path.isdir(combo_dir):
-        raise FileNotFoundError(f"DiffDock results folder not found: {combo_dir}")
-
-    sdf_scores = {}
-    for fname in os.listdir(combo_dir):
-        if "_confidence" in fname and fname.endswith(".sdf"):
-            try:
-                score = float(fname.split("_confidence")[1].replace(".sdf", ""))
-                sdf_scores[fname] = score
-            except ValueError:
-                continue
-
-    if not sdf_scores:
-        raise FileNotFoundError(f"No DiffDock SDF files found in {combo_dir}")
-
-    best_fname = max(sdf_scores, key=sdf_scores.get)
-    return os.path.join(combo_dir, best_fname)
+def _has_receptor_contact(
+    sdf_path: str, receptor_pdb: str, cutoff: float = RECEPTOR_CONTACT_CUTOFF
+) -> bool:
+    ligand = _heavy_atom_coordinates(sdf_path)
+    if ligand is None:
+        return False
+    receptor = []
+    with open(receptor_pdb) as handle:
+        for line in handle:
+            if line.startswith(("ATOM", "HETATM")) and line[76:78].strip().upper() != "H":
+                receptor.append((float(line[30:38]), float(line[38:46]), float(line[46:54])))
+    if not receptor:
+        return False
+    distances = np.linalg.norm(ligand[:, None, :] - np.asarray(receptor)[None, :, :], axis=-1)
+    return bool((distances < cutoff).any())
 
 
-def _extract_receptor_pdb_from_raw(
-    raw_pdb: str,
-    chain_id,
-    output_pdb: str,
-) -> str:
-    """
-    Extract one or more chains (ATOM records only) from a raw PDB into a new
-    PDB, preserving the original crystal coordinates so the receptor is in
-    the same frame as DiffDock's output SDF files. No format conversion — the
-    result is still a plain PDB.
+def _rescorable_pose(
+    batch_folder: str, protein_conf_id: str, ligand_id: str, mode: str, track: str
+):
+    """The selected pose's SDF when it can be rescored, else ``None`` (reason logged)."""
+    combination_id = f"{protein_conf_id}_{ligand_id}"
+    selection = resolve_diffdock_pose(batch_folder, protein_conf_id, ligand_id, mode)
+    if selection["sdf"] is None:
+        logger.info(f"{track}: no DiffDock pose for {combination_id} ({selection['reason']})")
+        return None
 
-    ``chain_id`` may be a single chain ID, a list of IDs, or a comma-separated
-    string (e.g. ``"A,B"``) so a multi-chain receptor is kept intact.
-    """
-    if not os.path.isfile(raw_pdb):
-        raise FileNotFoundError(f"Raw PDB not found: {raw_pdb}")
-
-    chain_ids = _normalize_chain_list(chain_id)
-    kept = 0
-    with open(raw_pdb) as fin, open(output_pdb, "w") as fout:
-        for line in fin:
-            if line.startswith("ATOM") and len(line) > 21 and line[21] in chain_ids:
-                fout.write(line)
-                kept += 1
-        fout.write("END\n")
-
-    if kept == 0:
-        raise ValueError(f"No ATOM records found for chain(s) {chain_ids} in {raw_pdb}")
-
-    logger.info(
-        f"Extracted receptor PDB from raw PDB chain(s) {chain_ids}: " f"{kept} atoms → {output_pdb}"
-    )
-    return output_pdb
-
-
-def _prepare_receptor_pdbqt_from_raw(
-    raw_pdb: str,
-    chain_id,
-    output_pdbqt: str,
-) -> str:
-    """
-    Extract one or more chains from a raw PDB (see
-    :func:`_extract_receptor_pdb_from_raw`) and convert them to PDBQT via
-    OpenBabel. Used by the Vina rescore track — gnina's rescore track
-    (:func:`rescore_diffdock_pose_gnina`) passes the extracted PDB straight
-    to gnina instead, since gnina's receptor argument accepts plain PDB.
-    """
-    chain_pdb = output_pdbqt.replace(".pdbqt", "_chain.pdb")
-    _extract_receptor_pdb_from_raw(raw_pdb, chain_id, chain_pdb)
-
-    result = subprocess.run(
-        ["obabel", "-ipdb", chain_pdb, "-opdbqt", "-O", output_pdbqt, "-xr"],
-        capture_output=True,
-        text=True,
-    )
-    if not os.path.isfile(output_pdbqt) or os.path.getsize(output_pdbqt) == 0:
-        raise RuntimeError(f"obabel PDB→PDBQT failed for {chain_pdb}: {result.stderr}")
-
-    logger.info(f"Prepared receptor PDBQT from {chain_pdb} → {output_pdbqt}")
-    return output_pdbqt
+    receptor_pdb = clean_receptor_path(batch_folder, protein_conf_id)
+    if not os.path.isfile(receptor_pdb):
+        logger.warning(f"{track}: prepared receptor {receptor_pdb} not found for {combination_id}")
+        return None
+    if not _has_receptor_contact(selection["sdf"], receptor_pdb):
+        logger.warning(
+            f"{track}: DiffDock pose for {combination_id} has no receptor heavy atom within "
+            f"{RECEPTOR_CONTACT_CUTOFF} Å; reporting NaN"
+        )
+        return None
+    return selection["sdf"]
 
 
 def rescore_diffdock_pose(
     receptor_pdbqt: str,
-    diffdock_results_dir: str,
-    protein_conf_id: str,
-    ligand_id: str,
-    output_dir: str = None,
-    box_padding: float = 4.0,
+    sdf_path: str,
+    output_dir: str,
+    combination_id: str,
+    box_padding: float = 6.0,
     seed: int = RANDOM_SEED,
-) -> dict:
+) -> float:
     """
-    Re-score a single DiffDock pose with Vina's physics-based scoring function.
+    Vina energy of a DiffDock pose after local minimisation (no re-docking).
 
-    Pipeline:
-    1. Find the highest-confidence SDF in ``diffdock_results_dir/{protein}_{ligand}/``.
-    2. Convert SDF → PDBQT (preserving 3D coordinates).
-    3. Compute a Vina box centred on the SDF pose.
-    4. Call :func:`guild.docking.vina.vina_score_pose` (score-only).
+    The grid is a box around the pose itself; the pocket restriction has
+    already been applied when the pose was selected.
 
-    :return: Dict with ``combination``, ``protein_config_id``, ``ligand_id``,
-        ``vina_rescore_diffdock_score``, ``diffdock_sdf``.
+    :return: Vina energy in kcal/mol (lower = better).
     """
-    sdf_path = _find_best_diffdock_sdf(diffdock_results_dir, protein_conf_id, ligand_id)
-
-    if output_dir is None:
-        output_dir = os.path.dirname(sdf_path)
-
-    ligand_pdbqt = os.path.join(output_dir, f"{protein_conf_id}_{ligand_id}_rescore.pdbqt")
-    sdf_to_pdbqt(sdf_path, pdbqt=ligand_pdbqt)
+    ligand_pdbqt = os.path.join(output_dir, f"{combination_id}_rescore.pdbqt")
+    # DiffDock writes heavy atoms only; Vina needs polar hydrogens to type donors.
+    sdf_to_pdbqt(sdf_path, pdbqt=ligand_pdbqt, add_hydrogens=True)
 
     center, size = compute_box_from_sdf(sdf_path, padding=box_padding)
-
     score = vina_score_pose(
         receptor_pdbqt=receptor_pdbqt,
         ligand_pdbqt=ligand_pdbqt,
         center=center,
         size=size,
         seed=seed,
+        minimize=True,
+        output_pdbqt=os.path.join(output_dir, f"{combination_id}_rescore_minimized.pdbqt"),
     )
-
-    combination_id = f"{protein_conf_id}_{ligand_id}"
     logger.info(f"Vina rescore (DiffDock pose): {combination_id} → {score:.3f} kcal/mol")
+    return score
 
-    return {
-        COMBINATION_ID: combination_id,
-        PROTEIN_CONF_ID: protein_conf_id,
-        LIGAND_ID: ligand_id,
-        VINA_RESCORE_DIFFDOCK_SCORE: score,
-        "diffdock_sdf": sdf_path,
-    }
+
+def _prepared_receptor_pdbqt(batch_folder: str, protein_conf_id: str) -> str:
+    """Vina's receptor PDBQT, prepared the way Vina docking prepares it when Vina did not run."""
+    receptor_pdbqt = clean_receptor_path(batch_folder, protein_conf_id, "pdbqt")
+    if not os.path.isfile(receptor_pdbqt):
+        protein_pdb_to_pdbqt(
+            input_pdb=clean_receptor_path(batch_folder, protein_conf_id),
+            output_pdbqt=receptor_pdbqt,
+            allow_bad_res=True,
+        )
+    return receptor_pdbqt
 
 
 def vina_rescore_diffdock_batch(
     batch_folder: str,
     combinations: list,
-    receptor_pdbqt_dir: str = None,
-    box_padding: float = 4.0,
+    mode: str = DEFAULT_DIFFDOCK_POCKET,
+    box_padding: float = 6.0,
     seed: int = RANDOM_SEED,
 ) -> pd.DataFrame:
-    """
-    Batch re-score DiffDock poses for all combinations in a batch.
+    """Vina-rescore the selected DiffDock pose of every combination in a batch."""
+    output_dir = os.path.join(batch_folder, VINA_RESCORE_DIFFDOCK_FOLDER)
+    os.makedirs(output_dir, exist_ok=True)
 
-    Receptor PDBQT resolution order:
-
-    1. ``{receptor_pdbqt_dir}/{protein_conf_id}_raw.pdbqt`` — single-chain
-       PDBQT already in the raw (crystal) coordinate frame.
-    2. Auto-generated from ``{protein_conf_id}_raw.pdb`` by extracting the
-       chain letter encoded in *protein_conf_id* and converting via OpenBabel.
-    """
-    diffdock_results_dir = os.path.join(batch_folder, DIFFDOCK_FOLDER, DIFFDOCK_RESULTS_FOLDER)
-    if receptor_pdbqt_dir is None:
-        receptor_pdbqt_dir = os.path.join(batch_folder, PROTEINS_FOLDER)
-
-    rescore_output_dir = os.path.join(batch_folder, VINA_RESCORE_DIFFDOCK_FOLDER)
-    os.makedirs(rescore_output_dir, exist_ok=True)
-
-    results = []
+    rows = []
     for protein_conf_id, ligand_id in combinations:
-        receptor_pdbqt = os.path.join(receptor_pdbqt_dir, f"{protein_conf_id}_raw.pdbqt")
-        if not os.path.exists(receptor_pdbqt):
-            raw_pdb = os.path.join(receptor_pdbqt_dir, f"{protein_conf_id}_raw.pdb")
-            if os.path.isfile(raw_pdb):
-                parts = protein_conf_id.split("-")
-                chain_id = parts[1] if len(parts) >= 2 else "A"
-                try:
-                    _prepare_receptor_pdbqt_from_raw(raw_pdb, chain_id, receptor_pdbqt)
-                except Exception as e:
-                    logger.warning(
-                        f"Could not prepare receptor PDBQT from raw PDB "
-                        f"for {protein_conf_id}: {e}"
-                    )
-                    receptor_pdbqt = None
-            else:
-                logger.warning(
-                    f"Neither {receptor_pdbqt} nor {raw_pdb} found for "
-                    f"{protein_conf_id}, skipping combination"
-                )
-                receptor_pdbqt = None
-
-        if receptor_pdbqt is None or not os.path.exists(receptor_pdbqt):
-            results.append(
-                {
-                    COMBINATION_ID: f"{protein_conf_id}_{ligand_id}",
-                    PROTEIN_CONF_ID: protein_conf_id,
-                    LIGAND_ID: ligand_id,
-                    VINA_RESCORE_DIFFDOCK_SCORE: np.nan,
-                    "diffdock_sdf": None,
-                }
-            )
-            continue
-
+        combination_id = f"{protein_conf_id}_{ligand_id}"
+        row = {
+            COMBINATION_ID: combination_id,
+            PROTEIN_CONF_ID: protein_conf_id,
+            LIGAND_ID: ligand_id,
+            VINA_RESCORE_DIFFDOCK_SCORE: np.nan,
+        }
         try:
-            result = rescore_diffdock_pose(
-                receptor_pdbqt=receptor_pdbqt,
-                diffdock_results_dir=diffdock_results_dir,
-                protein_conf_id=protein_conf_id,
-                ligand_id=ligand_id,
-                output_dir=rescore_output_dir,
-                box_padding=box_padding,
-                seed=seed,
+            sdf_path = _rescorable_pose(
+                batch_folder, protein_conf_id, ligand_id, mode, "Vina rescore"
             )
-            results.append(result)
+            if sdf_path is not None:
+                row[VINA_RESCORE_DIFFDOCK_SCORE] = rescore_diffdock_pose(
+                    receptor_pdbqt=_prepared_receptor_pdbqt(batch_folder, protein_conf_id),
+                    sdf_path=sdf_path,
+                    output_dir=output_dir,
+                    combination_id=combination_id,
+                    box_padding=box_padding,
+                    seed=seed,
+                )
         except Exception as e:
-            logger.warning(f"Vina rescore failed for {protein_conf_id}_{ligand_id}: {e}")
-            results.append(
-                {
-                    COMBINATION_ID: f"{protein_conf_id}_{ligand_id}",
-                    PROTEIN_CONF_ID: protein_conf_id,
-                    LIGAND_ID: ligand_id,
-                    VINA_RESCORE_DIFFDOCK_SCORE: np.nan,
-                    "diffdock_sdf": None,
-                }
-            )
+            logger.warning(f"Vina rescore failed for {combination_id}: {e}")
+        rows.append(row)
 
-    return pd.DataFrame(results)
+    return pd.DataFrame(
+        rows, columns=[COMBINATION_ID, PROTEIN_CONF_ID, LIGAND_ID, VINA_RESCORE_DIFFDOCK_SCORE]
+    )
+
+
+def _diffdock_outputs_present(batch_folder: str) -> bool:
+    diffdock_root = os.path.join(batch_folder, DIFFDOCK_FOLDER, DIFFDOCK_RESULTS_FOLDER)
+    return os.path.isdir(diffdock_root) and len(os.listdir(diffdock_root)) > 0
 
 
 def vina_rescore_diffdock_guild_scoring(batch_dictionary):
@@ -529,62 +612,40 @@ def vina_rescore_diffdock_guild_scoring(batch_dictionary):
         empty frame (with those columns) if no DiffDock outputs are found.
     """
     batch_folder = batch_dictionary[BATCH_FOLDER]
-    combinations = batch_dictionary[COMBINATIONS_TO_RUN_KEY]
-
-    diffdock_root = os.path.join(batch_folder, DIFFDOCK_FOLDER, DIFFDOCK_RESULTS_FOLDER)
-    diffdock_present = os.path.isdir(diffdock_root) and len(os.listdir(diffdock_root)) > 0
-    if not diffdock_present:
+    columns = [COMBINATION_ID, PROTEIN_CONF_ID, LIGAND_ID, VINA_RESCORE_DIFFDOCK_SCORE]
+    if not _diffdock_outputs_present(batch_folder):
         logger.warning(
             "vina_rescore_diffdock: no DiffDock outputs found in %s — returning empty score table",
             batch_folder,
         )
-        return pd.DataFrame(
-            columns=[COMBINATION_ID, PROTEIN_CONF_ID, LIGAND_ID, VINA_RESCORE_DIFFDOCK_SCORE]
-        )
+        return pd.DataFrame(columns=columns)
 
-    df = vina_rescore_diffdock_batch(batch_folder=batch_folder, combinations=combinations)
-    keep = [COMBINATION_ID, PROTEIN_CONF_ID, LIGAND_ID, VINA_RESCORE_DIFFDOCK_SCORE]
-    return df[[c for c in keep if c in df.columns]]
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# gnina score-only re-scoring of DiffDock poses
-#
-# Same rationale as the Vina rescore track above, but via gnina's CNN-backed
-# scoring function instead. Needs no PDBQT conversion at all: DiffDock already
-# writes its poses as SDF (gnina reads ligand SDF directly), and gnina's
-# receptor argument accepts a plain PDB — so the chain-filtered raw PDB is
-# passed straight through with no OpenBabel step.
-# ────────────────────────────────────────────────────────────────────────────
+    return vina_rescore_diffdock_batch(
+        batch_folder=batch_folder,
+        combinations=batch_dictionary[COMBINATIONS_TO_RUN_KEY],
+        mode=pocket_mode(batch_dictionary),
+    )
 
 
 def rescore_diffdock_pose_gnina(
     receptor_pdb: str,
-    diffdock_results_dir: str,
-    protein_conf_id: str,
-    ligand_id: str,
-    output_dir: str = None,
-    box_padding: float = 4.0,
+    sdf_path: str,
+    output_dir: str,
+    combination_id: str,
+    box_padding: float = 6.0,
     seed: int = RANDOM_SEED,
     use_gpu: bool = False,
     subprocess_log_path: str = None,
-) -> dict:
+) -> tuple[float, float]:
     """
-    Re-score a single DiffDock pose with gnina's score-only mode (no PDBQT
-    conversion for either receptor or ligand — see module note above).
+    gnina energy and CNN score of a DiffDock pose after local minimisation.
 
-    :return: Dict with ``combination``, ``protein_config_id``, ``ligand_id``,
-        ``gnina_rescore_diffdock_score``, ``gnina_rescore_diffdock_cnn_score``,
-        ``diffdock_sdf``.
+    gnina reads the SDF and the plain-PDB receptor directly, so no PDBQT
+    conversion is involved.
+
+    :return: ``(affinity, cnn_score)``.
     """
-    sdf_path = _find_best_diffdock_sdf(diffdock_results_dir, protein_conf_id, ligand_id)
-
-    if output_dir is None:
-        output_dir = os.path.dirname(sdf_path)
-
     center, size = compute_box_from_sdf(sdf_path, padding=box_padding)
-
-    combination_id = f"{protein_conf_id}_{ligand_id}"
     score, cnn_score = gnina_score_pose(
         receptor=receptor_pdb,
         ligand=sdf_path,
@@ -595,86 +656,67 @@ def rescore_diffdock_pose_gnina(
         seed=seed,
         use_gpu=use_gpu,
         subprocess_log_path=subprocess_log_path,
+        minimize=True,
     )
-
     logger.info(f"gnina rescore (DiffDock pose): {combination_id} → {score:.3f} kcal/mol")
-
-    return {
-        COMBINATION_ID: combination_id,
-        PROTEIN_CONF_ID: protein_conf_id,
-        LIGAND_ID: ligand_id,
-        GNINA_RESCORE_DIFFDOCK_SCORE: score,
-        GNINA_RESCORE_DIFFDOCK_CNN_SCORE: cnn_score,
-        "diffdock_sdf": sdf_path,
-    }
+    return score, cnn_score
 
 
 def gnina_rescore_diffdock_batch(
     batch_folder: str,
     combinations: list,
-    receptor_pdb_dir: str = None,
-    box_padding: float = 4.0,
+    mode: str = DEFAULT_DIFFDOCK_POCKET,
+    box_padding: float = 6.0,
     seed: int = RANDOM_SEED,
     use_gpu: bool = False,
 ) -> pd.DataFrame:
-    """
-    Batch re-score DiffDock poses with gnina for all combinations in a batch.
+    """gnina-rescore the selected DiffDock pose of every combination in a batch."""
+    output_dir = os.path.join(batch_folder, GNINA_RESCORE_DIFFDOCK_FOLDER)
+    os.makedirs(output_dir, exist_ok=True)
 
-    Receptor resolution mirrors :func:`vina_rescore_diffdock_batch` but stops
-    at a plain chain-filtered PDB — no PDBQT conversion needed since gnina
-    reads ``.pdb`` receptors directly.
-    """
-    diffdock_results_dir = os.path.join(batch_folder, DIFFDOCK_FOLDER, DIFFDOCK_RESULTS_FOLDER)
-    if receptor_pdb_dir is None:
-        receptor_pdb_dir = os.path.join(batch_folder, PROTEINS_FOLDER)
-
-    rescore_output_dir = os.path.join(batch_folder, GNINA_RESCORE_DIFFDOCK_FOLDER)
-    os.makedirs(rescore_output_dir, exist_ok=True)
-
-    results = []
+    rows = []
     for protein_conf_id, ligand_id in combinations:
         combination_id = f"{protein_conf_id}_{ligand_id}"
-        empty_result = {
+        row = {
             COMBINATION_ID: combination_id,
             PROTEIN_CONF_ID: protein_conf_id,
             LIGAND_ID: ligand_id,
             GNINA_RESCORE_DIFFDOCK_SCORE: np.nan,
             GNINA_RESCORE_DIFFDOCK_CNN_SCORE: np.nan,
-            "diffdock_sdf": None,
         }
-
-        raw_pdb = os.path.join(receptor_pdb_dir, f"{protein_conf_id}_raw.pdb")
-        if not os.path.isfile(raw_pdb):
-            logger.warning(f"{raw_pdb} not found for {protein_conf_id}, skipping combination")
-            results.append(empty_result)
-            continue
-
         try:
-            parts = protein_conf_id.split("-")
-            chain_id = parts[1] if len(parts) >= 2 else "A"
-            receptor_pdb = os.path.join(rescore_output_dir, f"{protein_conf_id}_raw_chain.pdb")
-            _extract_receptor_pdb_from_raw(raw_pdb, chain_id, receptor_pdb)
-
-            subprocess_log_path = os.path.join(
-                rescore_output_dir, f"{combination_id}.subprocess.log"
+            sdf_path = _rescorable_pose(
+                batch_folder, protein_conf_id, ligand_id, mode, "gnina rescore"
             )
-            result = rescore_diffdock_pose_gnina(
-                receptor_pdb=receptor_pdb,
-                diffdock_results_dir=diffdock_results_dir,
-                protein_conf_id=protein_conf_id,
-                ligand_id=ligand_id,
-                output_dir=rescore_output_dir,
-                box_padding=box_padding,
-                seed=seed,
-                use_gpu=use_gpu,
-                subprocess_log_path=subprocess_log_path,
-            )
-            results.append(result)
+            if sdf_path is not None:
+                score, cnn_score = rescore_diffdock_pose_gnina(
+                    receptor_pdb=clean_receptor_path(batch_folder, protein_conf_id),
+                    sdf_path=sdf_path,
+                    output_dir=output_dir,
+                    combination_id=combination_id,
+                    box_padding=box_padding,
+                    seed=seed,
+                    use_gpu=use_gpu,
+                    subprocess_log_path=os.path.join(
+                        output_dir, f"{combination_id}.subprocess.log"
+                    ),
+                )
+                row[GNINA_RESCORE_DIFFDOCK_SCORE] = score
+                row[GNINA_RESCORE_DIFFDOCK_CNN_SCORE] = cnn_score
         except Exception as e:
             logger.warning(f"gnina rescore failed for {combination_id}: {e}")
-            results.append(empty_result)
+        rows.append(row)
 
-    return pd.DataFrame(results)
+    return pd.DataFrame(
+        rows,
+        columns=[
+            COMBINATION_ID,
+            PROTEIN_CONF_ID,
+            LIGAND_ID,
+            GNINA_RESCORE_DIFFDOCK_SCORE,
+            GNINA_RESCORE_DIFFDOCK_CNN_SCORE,
+        ],
+    )
 
 
 def gnina_rescore_diffdock_guild_scoring(batch_dictionary, use_gpu: bool = False):
@@ -687,33 +729,24 @@ def gnina_rescore_diffdock_guild_scoring(batch_dictionary, use_gpu: bool = False
         frame (with those columns) if no DiffDock outputs are found.
     """
     batch_folder = batch_dictionary[BATCH_FOLDER]
-    combinations = batch_dictionary[COMBINATIONS_TO_RUN_KEY]
-
-    diffdock_root = os.path.join(batch_folder, DIFFDOCK_FOLDER, DIFFDOCK_RESULTS_FOLDER)
-    diffdock_present = os.path.isdir(diffdock_root) and len(os.listdir(diffdock_root)) > 0
-    if not diffdock_present:
-        logger.warning(
-            "gnina_rescore_diffdock: no DiffDock outputs found in %s — returning empty score table",
-            batch_folder,
-        )
-        return pd.DataFrame(
-            columns=[
-                COMBINATION_ID,
-                PROTEIN_CONF_ID,
-                LIGAND_ID,
-                GNINA_RESCORE_DIFFDOCK_SCORE,
-                GNINA_RESCORE_DIFFDOCK_CNN_SCORE,
-            ]
-        )
-
-    df = gnina_rescore_diffdock_batch(
-        batch_folder=batch_folder, combinations=combinations, use_gpu=use_gpu
-    )
-    keep = [
+    columns = [
         COMBINATION_ID,
         PROTEIN_CONF_ID,
         LIGAND_ID,
         GNINA_RESCORE_DIFFDOCK_SCORE,
         GNINA_RESCORE_DIFFDOCK_CNN_SCORE,
     ]
-    return df[[c for c in keep if c in df.columns]]
+    if not _diffdock_outputs_present(batch_folder):
+        logger.warning(
+            "gnina_rescore_diffdock: no DiffDock outputs found in %s — returning empty score table",
+            batch_folder,
+        )
+        return pd.DataFrame(columns=columns)
+
+    df = gnina_rescore_diffdock_batch(
+        batch_folder=batch_folder,
+        combinations=batch_dictionary[COMBINATIONS_TO_RUN_KEY],
+        mode=pocket_mode(batch_dictionary),
+        use_gpu=use_gpu,
+    )
+    return df.reindex(columns=columns)

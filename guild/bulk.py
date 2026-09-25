@@ -43,7 +43,10 @@ from guild.constants.bulk import (
     SMILES_NAMES_DICTIONARY_KEY,
 )
 from guild.constants.diffdock import (
+    DEFAULT_DIFFDOCK_POCKET,
     DIFFDOCK_COMBINATIONS_FILE,
+    DIFFDOCK_POCKET_KEY,
+    DIFFDOCK_POCKET_MODES,
     DIFFDOCK_RESULTS_FOLDER,
 )
 from guild.constants.guild import (
@@ -337,6 +340,7 @@ class BulkRun:
         pose_mode=DEFAULT_POSE_MODE,
         flexible_docking: bool = False,
         flexres_gnina: str = None,
+        diffdock_pocket: str = DEFAULT_DIFFDOCK_POCKET,
     ):
         """
                 BulkRun class for running multiple docking simulations and performing guild scoring.
@@ -384,6 +388,12 @@ class BulkRun:
             gnina's ``--flexres`` flag (e.g. ``"A:88,91"`` or ``"A:88,91_B:7"``).  Applied
             to every row; when set it takes precedence over the automatic box/flexdist
             selection that ``flexible_docking`` uses.
+        :param diffdock_pocket: How DiffDock's pose is restricted to the pocket.
+            ``"auto"`` (default) keeps the highest-confidence sample inside the
+            pocket box when the combination has one and falls back to blind
+            selection when it does not; ``"box"`` requires a pocket box (no box,
+            or no sample inside it, is a failure); ``"blind"`` ignores any box.
+            DiffDock always docks into the prepared receptor chain(s).
         """
 
         # Pathing variables
@@ -402,6 +412,11 @@ class BulkRun:
         self.n_workers = n_workers if n_workers is not None else mp.cpu_count()
         self.vina_exhaustiveness = vina_exhaustiveness
         self.predict_binding_pocket = predict_binding_pocket
+        if diffdock_pocket not in DIFFDOCK_POCKET_MODES:
+            raise ValueError(
+                f"Invalid diffdock_pocket={diffdock_pocket!r}; expected one of {DIFFDOCK_POCKET_MODES}."
+            )
+        self.diffdock_pocket = diffdock_pocket
 
         if "_" in project_name:
             raise ValueError("Project name cannot contain underscores!")
@@ -478,10 +493,7 @@ class BulkRun:
             self.methods_to_run = list(self.methods_to_run) + [GNINA_RESCORE_BOLTZ_PREFIX]
         # boltz_affinity isn't a docking method (no docking step of its own,
         # like the rescore tracks above) — listed only so scoring ranks/votes it.
-        if (
-            BOLTZ_PREFIX in self.methods_to_run
-            and BOLTZ_AFFINITY_PREFIX not in self.methods_to_run
-        ):
+        if BOLTZ_PREFIX in self.methods_to_run and BOLTZ_AFFINITY_PREFIX not in self.methods_to_run:
             self.methods_to_run = list(self.methods_to_run) + [BOLTZ_AFFINITY_PREFIX]
 
         # Resolve gnina_input_mode against the (now auto-extended) methods
@@ -692,6 +704,7 @@ class BulkRun:
                 current_batch_table=current_batch_table,
                 batch_folder=batch_folder,
             )
+            self.batched_dictionary[current_batch][DIFFDOCK_POCKET_KEY] = self.diffdock_pocket
 
             self.batched_dictionary[current_batch] = identify_previously_ran_combinations(
                 current_batch=current_batch,
@@ -2125,7 +2138,7 @@ class BulkRun:
             logger.info(
                 f"PLIP/ProLIF coverage: {sorted(unsupported)} produce no complex "
                 f"PDB by design and are excluded from interaction analysis — "
-                f"structurally not applicable, not \"analyzed and found nothing\"."
+                f'structurally not applicable, not "analyzed and found nothing".'
             )
 
         logger.info("Starting interactions analysis")
@@ -2431,7 +2444,7 @@ class BulkRun:
             logger.info(
                 f"PoseBusters coverage: {unsupported} produce no complex PDB by "
                 f"design and are excluded from pose validity — structurally not "
-                f"applicable, not \"checked and passed\". Validating: {supported}."
+                f'applicable, not "checked and passed". Validating: {supported}.'
             )
 
         logger.info(

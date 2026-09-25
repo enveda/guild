@@ -329,7 +329,12 @@ def ligand_pdb_to_pdbqt(pdb: str, timeout: int = 300):
         raise RuntimeError(f"OpenBabel conversion failed for {pdb}: {e.stderr}") from e
 
 
-def sdf_to_pdbqt(sdf: str, pdbqt: str = None, timeout: int = OBABEL_CONVERSION_TIMEOUT):
+def sdf_to_pdbqt(
+    sdf: str,
+    pdbqt: str = None,
+    timeout: int = OBABEL_CONVERSION_TIMEOUT,
+    add_hydrogens: bool = False,
+):
     """
     Convert an SDF file (with existing 3D coordinates) directly to PDBQT.
     This preserves the 3D pose — no --gen3d is used.
@@ -338,6 +343,9 @@ def sdf_to_pdbqt(sdf: str, pdbqt: str = None, timeout: int = OBABEL_CONVERSION_T
     :param sdf: Path to the input SDF file (must have 3D coords)
     :param pdbqt: Path to the output PDBQT file. Defaults to replacing .sdf with .pdbqt.
     :param timeout: Maximum time in seconds for conversion
+    :param add_hydrogens: Add hydrogens (``obabel -h``, keeping the input's
+        formal charges) for poses written heavy-atom-only, e.g. by DiffDock;
+        without them Vina cannot type hydrogen-bond donors.
     :return: Path to the generated PDBQT file
     """
     if not os.path.exists(sdf):
@@ -346,7 +354,8 @@ def sdf_to_pdbqt(sdf: str, pdbqt: str = None, timeout: int = OBABEL_CONVERSION_T
     if pdbqt is None:
         pdbqt = sdf.replace(".sdf", ".pdbqt")
 
-    obabel_cmd = f'obabel "{sdf}" -O "{pdbqt}" {SHELL_SILENCER}'
+    hydrogen_flag = "-h " if add_hydrogens else ""
+    obabel_cmd = f'obabel "{sdf}" -O "{pdbqt}" {hydrogen_flag}{SHELL_SILENCER}'
 
     try:
         subprocess.run(
