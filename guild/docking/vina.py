@@ -475,7 +475,10 @@ def vina_score_pose(
     if output_pdbqt is not None:
         v.write_pose(output_pdbqt, overwrite=True)
 
-    return float(energy[0])
+    try:
+        return float(energy[0])
+    except (TypeError, IndexError):
+        return float(energy)
 
 
 # ── Vina score-only re-scoring of Boltz-predicted complexes ─────────────────
