@@ -58,6 +58,28 @@ mainly avoids stale column names lingering in `unified`.
 Generates the previously hand-built, uncaptioned schematic diagram from real data instead
 of invented distributions, so it can no longer drift out of step with the scoring code.
 
+## Supplementary Figure 1 — `plip_visualizations.ipynb`
+
+| | |
+| --- | --- |
+| File | `$GUILD_FIGURES_DATA_DIR/plip_interactions.tsv` |
+| Columns needed | `protein_config_id`, `n_hbonds`, `n_hydrophobic`, `n_pistacking`, `n_pication`, `n_saltbridges`, `n_halogen` |
+| Provenance | PLIP interaction counts for the AutoDock Vina poses of the GPCR case study: 98,538 poses over 106 structures |
+| Family mapping | `plip_families.py` (committed): PDB id to GPCR family, from Supplementary Table 1 |
+
+The figure shows one bar per GPCR family: each structure's counts are averaged over its poses and a
+family's bar is the mean over its structures. It replaces an earlier top-25-structures chart,
+which selected the structures with the highest total interaction count and so showed only the
+upper end of the distribution.
+
+Supplementary Table 1 lists `6d9h`, `7ld4`, `6u1n`, `7t11` and `7ul2` under two proteins each, and
+omits `7v6a`, `8dzs` and `8fx5`. `plip_families.py` resolves these from the ligand and UniProt
+mapping (details in its docstring); the table itself still needs correcting.
+
+The notebook drops five structures (`7v6a`, `8fx5`, `8wrz`, `8wu1`, `8dzs`) before averaging, as
+the earlier version did; four of them are in the file, so the figure covers 26 families and 102
+structures. Dropping them removes the vasopressin/oxytocin family entirely.
+
 ## The Zenodo deposit does not cover any of this
 
 The deposit (DOI `10.5281/zenodo.20024339`, `guild_data.zip`, 4.2 GB, 4.7 M entries)
