@@ -36,7 +36,6 @@ from guild.constants.bulk import (
     UNIQUE_PROTEIN_IDS_KEY,
 )
 from guild.constants.decoys import DECOYS_CATEGORY
-from guild.constants.diffdock import DIFFDOCK_RESULTS_FOLDER
 from guild.constants.guild import (
     BOLTZ_FOLDER,
     COVALENT_REC_ATOM,
@@ -54,7 +53,6 @@ from guild.constants.guild import (
     VINA_FOLDER,
 )
 from guild.tools.binders import collect_known_binders
-from guild.tools.preparation import _normalize_chain_list
 from guild.transformers.converters import cif_to_pdb, sdf_to_pdb
 from guild.transformers.pdb import (
     add_covalent_conect,
@@ -395,20 +393,28 @@ def generate_diffdock_complex_pdbs(batch_dictionary):
     """
     Generate PLIP-ready complex PDB files for DiffDock docking results.
 
-    For each combination, finds the highest-confidence DiffDock SDF pose,
-    converts it to PDB, extracts the matching chain from the raw protein PDB
-    (preserving the crystal coordinate frame), and merges them into a single
-    complex PDB suitable for PLIP analysis.
+    For each combination, takes the pose chosen by
+    :func:`guild.docking.diffdock.resolve_diffdock_pose` (the same pose the
+    DiffDock score and both rescores use), converts it to PDB and merges it
+    with the prepared receptor DiffDock docked into. A combination with no
+    selectable pose gets no complex. An existing complex is rebuilt when the
+    selected pose has changed since it was written.
 
     :param batch_dictionary: Dictionary containing batch information including
                              BATCH_FOLDER, COMBINATIONS_TABLE_KEY, etc.
     """
     from guild.constants.guild import DIFFDOCK_FOLDER
+    from guild.docking.diffdock import (
+        clean_receptor_path,
+        diffdock_combo_dir,
+        pocket_mode,
+        read_selected_pose,
+        resolve_diffdock_pose,
+    )
 
     batch_folder = batch_dictionary[BATCH_FOLDER]
-    diffdock_results = f"{batch_folder}/{DIFFDOCK_FOLDER}/{DIFFDOCK_RESULTS_FOLDER}"
-    proteins_folder = f"{batch_folder}/proteins"
     diffdock_folder = f"{batch_folder}/{DIFFDOCK_FOLDER}"
+    mode = pocket_mode(batch_dictionary)
 
     combinations_df = batch_dictionary[COMBINATIONS_TABLE_KEY]
 
@@ -419,39 +425,23 @@ def generate_diffdock_complex_pdbs(batch_dictionary):
         protein_conf_id = row[PROTEIN_CONF_ID]
         ligand_id = row[LIGAND_ID]
         run_id = f"{protein_conf_id}_{ligand_id}"
-
         complex_pdb = f"{diffdock_folder}/{run_id}_complex.pdb"
 
-        # Skip if complex already exists
-        if os.path.exists(complex_pdb):
+        previous = read_selected_pose(diffdock_combo_dir(batch_folder, protein_conf_id, ligand_id))
+        selection = resolve_diffdock_pose(batch_folder, protein_conf_id, ligand_id, mode)
+        best_sdf = selection["sdf"]
+
+        if best_sdf is None:
+            if os.path.exists(complex_pdb):
+                os.remove(complex_pdb)
+            logger.warning(f"No DiffDock pose selected for {run_id} ({selection['reason']})")
+            complexes_failed += 1
+            continue
+
+        if os.path.exists(complex_pdb) and previous and previous.get("sdf") == best_sdf:
             complexes_created += 1
             continue
 
-        # --- Find best DiffDock SDF ---
-        combo_dir = os.path.join(diffdock_results, run_id)
-        if not os.path.isdir(combo_dir):
-            logger.warning(f"DiffDock results folder not found: {combo_dir}")
-            complexes_failed += 1
-            continue
-
-        sdf_scores = {}
-        for fname in os.listdir(combo_dir):
-            if "_confidence" in fname and fname.endswith(".sdf"):
-                try:
-                    score = float(fname.split("_confidence")[1].replace(".sdf", ""))
-                    sdf_scores[fname] = score
-                except ValueError:
-                    continue
-
-        if not sdf_scores:
-            logger.warning(f"No DiffDock SDF files found in {combo_dir}")
-            complexes_failed += 1
-            continue
-
-        best_fname = max(sdf_scores, key=sdf_scores.get)
-        best_sdf = os.path.join(combo_dir, best_fname)
-
-        # --- Convert SDF → PDB (preserving 3D coordinates) ---
         ligand_pdb = os.path.join(diffdock_folder, f"{run_id}_ligand.pdb")
         try:
             sdf_to_pdb(best_sdf, ligand_pdb)
@@ -460,39 +450,15 @@ def generate_diffdock_complex_pdbs(batch_dictionary):
             complexes_failed += 1
             continue
 
-        # --- Get protein PDB in raw coordinate frame ---
-        # DiffDock outputs are in the raw PDB frame, so we must use the raw PDB.
-        # Extract the single chain to match what DiffDock used.
-        raw_pdb = f"{proteins_folder}/{protein_conf_id}_raw.pdb"
-        if not os.path.exists(raw_pdb):
-            logger.warning(f"Raw PDB not found for {protein_conf_id}: {raw_pdb}")
+        receptor_pdb = clean_receptor_path(batch_folder, protein_conf_id)
+        if not os.path.exists(receptor_pdb):
+            logger.warning(f"Prepared receptor not found for {protein_conf_id}: {receptor_pdb}")
             complexes_failed += 1
             continue
 
-        # Extract chain(s) from protein_conf_id. Single chain ("8gut-R-KO8-R" →
-        # "R") or a comma-joined set for a multi-chain pocket ("8gut-A,B-..." →
-        # ["A", "B"]); every listed chain is kept so the receptor stays intact.
-        parts = protein_conf_id.split("-")
-        chain_ids = _normalize_chain_list(parts[1]) if len(parts) >= 2 else ["A"]
-
-        chain_pdb = os.path.join(diffdock_folder, f"{protein_conf_id}_chain.pdb")
-        if not os.path.exists(chain_pdb):
-            kept = 0
-            with open(raw_pdb) as fin, open(chain_pdb, "w") as fout:
-                for line in fin:
-                    if line.startswith("ATOM") and len(line) > 21 and line[21] in chain_ids:
-                        fout.write(line)
-                        kept += 1
-                fout.write("END\n")
-            if kept == 0:
-                logger.warning(f"No ATOM records for chain(s) {chain_ids} in {raw_pdb}")
-                complexes_failed += 1
-                continue
-
-        # --- Build complex PDB ---
         try:
             build_complex_pdb(
-                protein_pdb=chain_pdb,
+                protein_pdb=receptor_pdb,
                 ligand_file=ligand_pdb,
                 out_complex_pdb=complex_pdb,
                 ligand_is_pdbqt=False,

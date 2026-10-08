@@ -15,7 +15,6 @@ unverified pose; ``posebusters_status`` separates "invalid" from "could
 not check".
 """
 
-import glob
 import logging
 import multiprocessing as mp
 import os
@@ -65,6 +64,7 @@ from guild.constants.posebusters import (
     POSEBUSTERS_MAX_POSES,
     POSEBUSTERS_REPORT_ID_COLUMNS,
 )
+from guild.docking.diffdock import _diffdock_samples, read_selected_pose
 from guild.tools.pose_molecules import (
     mol_from_pdb_block,
     mols_from_sdf,
@@ -112,19 +112,16 @@ def _pose_mols(
             poses = [mol_from_pdb_block(b, smiles) for b in split_pdbqt_models(pdbqt_path)]
 
     elif docking_method == DIFFDOCK_PREFIX:
-        # Confidence from the filename matches how the complex PDB picked its
-        # pose, and avoids the rank<N> lexicographic trap (rank10 < rank2).
+        # The recorded selection (the pose in the complex PDB and behind every
+        # DiffDock score) comes first; the remaining samples follow by
+        # confidence for the escalate/all scopes.
         results_dir = f"{method_folder}/results/{combination_id}"
-        scored = []
-        for path in glob.glob(f"{results_dir}/*_confidence*.sdf"):
-            try:
-                confidence = float(
-                    os.path.basename(path).split("_confidence")[1].replace(".sdf", "")
-                )
-            except (IndexError, ValueError):
-                continue
-            scored.append((confidence, path))
-        for _, path in sorted(scored, key=lambda item: item[0], reverse=True):
+        ordered = [path for _, path in _diffdock_samples(results_dir)]
+        selection = read_selected_pose(results_dir)
+        if selection and selection.get("sdf") in ordered:
+            ordered.remove(selection["sdf"])
+            ordered.insert(0, selection["sdf"])
+        for path in ordered:
             poses.extend(mols_from_sdf(path, smiles))
 
     if not poses:

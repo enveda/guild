@@ -39,6 +39,7 @@ os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", "/tmp/torchinductor")
 import numpy as np
 import pandas as pd
 
+from guild.constants.diffdock import DEFAULT_DIFFDOCK_POCKET, DIFFDOCK_POCKET_MODES
 from guild.constants.posebusters import DEFAULT_POSEBUSTERS_CONFIG, POSEBUSTERS_CONFIGS
 
 # ---------------------------------------------------------------------------
@@ -317,6 +318,19 @@ def parse_args() -> argparse.Namespace:
             "Ignored by Vina, Boltz, DiffDock, and KarmaDock."
         ),
     )
+    parser.add_argument(
+        "--diffdock-pocket",
+        choices=DIFFDOCK_POCKET_MODES,
+        default=DEFAULT_DIFFDOCK_POCKET,
+        help=(
+            "How DiffDock's pose is restricted to the pocket. 'auto': keep the "
+            "highest-confidence sample inside the pocket box when the combination "
+            "has one, blind selection otherwise. 'box': require a pocket box; no "
+            "box, or no sample inside it, is a failure. 'blind': ignore any box "
+            "and keep the top-confidence sample. DiffDock always docks into the "
+            "prepared receptor chain(s), in every mode."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -474,6 +488,7 @@ def main() -> None:
         pose_mode=args.pose_mode,
         flexible_docking=args.flexible_docking,
         flexres_gnina=args.flexres_gnina,
+        diffdock_pocket=args.diffdock_pocket,
     )
 
     skip_docking_and_scoring, run_plip, run_posebusters = resolve_pipeline_steps(args)

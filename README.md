@@ -93,6 +93,7 @@ make run-vina \
 | `NO_POSEBUSTERS` | *(empty)* | Set to `1` to skip the PoseBusters pose-validity step. On by default (mirrors PLIP): ~400ms/pose, and adds `<method>_pb_valid`/`<method>_pb_pose` to `guild_scores.txt`. See [PoseBusters](#posebusters). |
 | `POSEBUSTERS_CONFIG` | *(empty → `dock`)* | `dock` \| `dock_fast`. `dock_fast` skips the `internal_energy` conformer-ensemble check — a lever worth trying on large/very flexible ligand sets. |
 | `EXCLUDE_NON_PHYSICAL` | *(empty)* | Set to `1` to null non-physical Vina-family raw scores (e.g. a positive binding energy) before ranking, for a **new** run. Off by default — see [Raw score plausibility](#raw-score-plausibility). |
+| `DIFFDOCK_POCKET` | *(empty → `auto`)* | `auto` \| `box` \| `blind`. How DiffDock's pose is restricted to the pocket. `auto` keeps the highest-confidence sample whose centroid lies inside the combination's pocket box, and falls back to blind selection when no pocket exists; `box` requires a pocket (no box, or no sample inside it, scores NaN); `blind` ignores any box. DiffDock always docks into the prepared receptor chain(s), in every mode. See [DiffDock pocket restriction](#diffdock-pocket-restriction). |
 | `MIN_MOL_WT` | `250` | Minimum molecular weight filter for known-binder expansion |
 | `MAX_MOL_WT` | `450` | Maximum molecular weight filter for known-binder expansion |
 | `CHEMBL_VERSION` | `chembl_36` | ChEMBL version string used for known-binder lookup |
@@ -457,6 +458,32 @@ and Boltz gets four distinct rescore scores:
 All four are in kcal/mol (lower = stronger predicted binding), independently ranked per
 protein. The gnina tracks also emit `gnina_rescore_*_cnn_score` as a confidence side channel,
 which is not ranked.
+
+DiffDock poses are locally minimised before both rescores (Vina `optimize()`, gnina
+`--local_only`), against the same prepared receptor DiffDock docked into, with hydrogens added
+to the heavy-atom-only ligand. A DiffDock pose with no receptor heavy atom within 4 Å scores
+NaN instead of the near-zero energy an empty grid would return.
+
+### DiffDock pocket restriction
+
+DiffDock is a blind docker with no pocket argument. Guild gives it the same prepared receptor
+as Vina and gnina (`proteins/<id>_single_chain_clean.pdb`: the receptor chain(s) only), so
+partner chains in the deposited file (G proteins, antibodies, fusion domains) are never
+searched. Whether the chosen pose must lie in the pocket is set by `DIFFDOCK_POCKET`
+(`--diffdock-pocket`):
+
+| Mode | Pocket box present | No pocket box |
+|------|--------------------|---------------|
+| `auto` (default) | highest-confidence sample whose heavy-atom centroid is inside the box | highest-confidence sample |
+| `box` | as `auto` | failure (NaN) |
+| `blind` | highest-confidence sample | highest-confidence sample |
+
+A combination whose samples all fall outside the box scores NaN (`no_sample_in_box`). The
+outcome is recorded per combination in the `diffdock_pose_selection` column (`box`, `blind`,
+`no_sample_in_box`, `no_box`, `no_samples`) and in
+`batches/<batch>/diffdock/results/<combination>/selected_pose.json`. The DiffDock confidence
+score, both rescores, the complex PDB and PoseBusters all use that same pose. Use `box` for
+benchmarks, so a missing pocket can never silently become blind docking.
 
 > **Rank-percentile orientation.** Every `rp_*_score` and the `global_rp_score` is bounded to
 > `(0, 1]` with **0 = best**. A ligand that is uniquely best for a protein scores `1 / n` and the
